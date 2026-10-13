@@ -63,7 +63,36 @@ judging is exactly v14.1 dual judging. It ships dormant; the key
 arrives with James's provider signup. The panel (which judges
 ran, per-judge ms, third-judge status) rides in the response's
 judging metadata.
+
+v15 (2026-10-13): attack the draft, not just the verdict (see
+v15/PLAN.md). Refutation retrieval hunts contradicting excerpts
+for load-bearing claims, in parallel with the first judge round,
+with a skepticism-preserving join before resolution. NIM takes
+the local 14B's three jobs: hard questions draft on
+moonshotai/kimi-k3, the standing second judging seat is the NIM
+Nemotron (the v14.2 third seat promoted), and ladder redrafts
+generate on NIM; simple questions may draft on a fast NIM model
+(nemotron-3.5-lightning) with automatic fallback to the local 9B.
+The 14B is DEMOTED, not removed: behind LOCAL_FALLBACK_JUDGE it
+remains the fallback judge (v14 degradation shapes), the
+divergence oracle on hard questions, and the fallback
+drafter/redrafter when NIM is down. Drafters must cite excerpt
+numbers at birth; uncited load-bearing sentences are unverified
+by construction. A quantity checker widens the figure checker
+to periods and period conversions. Source-conflict claims force
+answers to surface corpus disagreements (registry figure slots)
+instead of silently picking a value. A per-ask wall-clock cap
+(ASK_TIME_CAP_S, 600s) stops the ladder mid-climb and ships only
+already-verified claims as a Partial, else IDK. Speedups:
+per-claim verdict caching, keep-alive connection pooling for
+Gemini/NIM calls, and a job-based webapp flow (POST /ask?async=1
++ GET /ask/result/<id>) with live stage text; the synchronous
+/ask API is unchanged for other callers.
 """
+import hashlib
+import http.client
+import io
+import uuid
 import json
 import os
 import re
@@ -203,6 +232,106 @@ except FileNotFoundError:
 # judging section (env var first, then the provider's gitignored
 # key file in the server dir, the same pattern as the Gemini key
 # above). Absent key = the seat stays dormant, exactly v14.1.
+
+# --- v15: pipeline config -------------------------------------------------
+# Per-ask wall-clock ceiling (James's decision, 2026-10-13): when an
+# ask hits the cap mid-ladder it stops climbing and ships the best
+# state reached (a Partial built ONLY from claims already verified
+# by the panel, else an IDK with its gap log entry); timing records
+# cap_hit. The cap can never make an unverified answer ship.
+ASK_TIME_CAP_S = 600
+# The demoted local 14B as fallback judge (v15 plan item 2): when a
+# remote judge cannot run, the 14B takes its seat (and both-remotes-
+# down degrades to local-only judging, the v14 shape). Off = a
+# missing remote judge degrades to the surviving remote judge alone.
+LOCAL_FALLBACK_JUDGE = True
+
+# --- v15 speedup S3: persistent remote connections -------------------------
+# A small keep-alive pool for the server's HTTPS calls to the hosted
+# providers (Gemini + NIM): one shared pool per host instead of a
+# fresh TLS connection per call. ALL request semantics live in the
+# callers (Gemini's 4s spacing and retry profile, NIM's one-retry /
+# no-429-retry politeness); the pool only moves bytes. A connection
+# that fails or goes stale is discarded and the caller retries per
+# its own rules, exactly as with a fresh connection.
+_CONN_POOL = {}
+_CONN_POOL_LOCK = threading.Lock()
+_CONN_POOL_MAX = 4
+
+
+def _pool_acquire(host):
+    with _CONN_POOL_LOCK:
+        bucket = _CONN_POOL.setdefault(host, [])
+        if bucket:
+            return bucket.pop()
+    return http.client.HTTPSConnection(host, timeout=60)
+
+
+def _pool_release(host, conn, reusable):
+    if reusable:
+        with _CONN_POOL_LOCK:
+            bucket = _CONN_POOL.setdefault(host, [])
+            if len(bucket) < _CONN_POOL_MAX:
+                bucket.append(conn)
+                return
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _https_post(host, path, body, headers, timeout=60):
+    """One POST over the keep-alive pool. Returns (status, body
+    bytes). Raises on transport failure (the connection is then
+    discarded, never returned to the pool)."""
+    conn = _pool_acquire(host)
+    conn.timeout = timeout
+    try:
+        conn.request("POST", path, body=body, headers=headers)
+        resp = conn.getresponse()
+        data = resp.read()
+    except Exception:
+        _pool_release(host, conn, False)
+        raise
+    _pool_release(host, conn, True)
+    return resp.status, data
+
+
+# --- v15 speedup S5: job stage tracking ------------------------------------
+# The webapp's async jobs report a live stage ("retrieving",
+# "drafting", "judging round 2", "arbitrating", "done"). The stage
+# lives in a thread-local the job runner points at its job record;
+# on the synchronous path _set_stage is a no-op. The pipeline sets
+# stages at real boundaries; the poller only observes.
+_STAGE_TLS = threading.local()
+
+
+def _set_stage(text):
+    rec = getattr(_STAGE_TLS, "job", None)
+    if rec is not None:
+        rec["stage"] = text
+
+
+_JOBS = {}
+_JOBS_LOCK = threading.Lock()
+_JOBS_MAX = 50
+
+
+def _job_create():
+    job_id = uuid.uuid4().hex[:16]
+    rec = {"id": job_id, "status": "running", "stage": "retrieving",
+           "result": None, "error": None, "ts": time.time()}
+    with _JOBS_LOCK:
+        _JOBS[job_id] = rec
+        while len(_JOBS) > _JOBS_MAX:
+            oldest = min(_JOBS.values(), key=lambda r: r["ts"])
+            _JOBS.pop(oldest["id"], None)
+    return rec
+
+
+def _job_get(job_id):
+    with _JOBS_LOCK:
+        return _JOBS.get(job_id)
 
 def _cache_get(cache, key):
     return cache.get(key)
@@ -1450,6 +1579,42 @@ _QWORD_START = re.compile(
     r"should|if|when|where|who|why)\b", re.IGNORECASE)
 
 
+_AND_ASK_RX = re.compile(
+    r"\s+and\s+(?=(?:what should|what can|what do|what steps|"
+    r"what is|what are|how do|how can|how should|can we|should we|"
+    r"do we|does it|do i|can i|should i|what happens|what else)\b)",
+    re.IGNORECASE)
+
+
+def _compound_split(q):
+    """v15 (regression fix c, James's manual test 2026-10-13): TWO
+    asks joined by 'and' inside ONE sentence — 'does it affect my
+    eligibility and what should we do before the money arrives?'
+    — which the '?'/clause splitters never separated, so the
+    eligibility core and the advice ask sank or swam together.
+    Returns [part1, part2] with the fact preamble kept on both
+    parts, or [] when the shape is not a compound ask."""
+    text = (q or "").strip().rstrip("?")
+    matches = list(_AND_ASK_RX.finditer(text))
+    if not matches:
+        return []
+    m = matches[-1]
+    left = text[:m.start()].strip()
+    right = re.sub(r"^and\s+", "", text[m.start():].strip(),
+                   flags=re.IGNORECASE)
+    if len(right.split()) < 4 or len(left.split()) < 4:
+        return []
+    sents = re.split(r"(?<=[.;])\s+", left)
+    ask = sents[-1]
+    if not _QWORD_START.match(ask) and not re.search(
+            r"\b(does|do|did|can|could|is|are|will|would|should)\b",
+            ask, re.IGNORECASE):
+        return []
+    preamble = " ".join(sents[:-1]).strip()
+    part2 = (preamble + " " + right).strip() if preamble else right
+    return [left.rstrip("?").strip(), part2.rstrip("?").strip()]
+
+
 def _split_subquestions(q):
     """Split a bundled question into its sub-questions (v11). Primary
     split on '?'; if that yields fewer than 3 parts, also split long
@@ -1482,6 +1647,13 @@ def _split_subquestions(q):
                 alt.append(frag)
         if len(alt) > len(parts):
             parts = alt
+    if len(parts) < 3:
+        # v15: the eligibility+advice compound (one sentence, two
+        # asks) decomposes into exactly two parts so the verified
+        # core can ship as a Partial when the other part abstains.
+        compound = _compound_split(q)
+        if compound:
+            return compound
     return parts[:6] if len(parts) >= 3 else []
 
 
@@ -1602,6 +1774,175 @@ def _check_figures(answer, question, hits, extra_allowed=()):
     return answer + note, ungrounded
 
 
+# --- v15: quantity checker (item 5) -------------------------------------------
+# The figure checker proves WHERE a number came from; this
+# proves the relationships BETWEEN numbers: durations against
+# their registry periods, and period conversions (weekly <->
+# monthly <-> annual) the draft itself states. Deterministic,
+# run beside _check_figures, feeding the same objection
+# machinery in _run_unit.
+_MONTH_NAMES = ["january", "february", "march", "april", "may",
+                "june", "july", "august", "september", "october",
+                "november", "december"]
+_MONTH_RX = ("(january|february|march|april|may|june|july|august|"
+             "september|october|november|december)")
+_MONEY_RX = re.compile(r"\$\s?([\d,]+(?:\.\d{1,2})?)")
+
+
+def _money_near(text, pos):
+    """The dollar amount attached to a unit phrase at pos: the
+    closest amount ENDING just before it ('$665 per week'), else
+    the first amount starting just after ('per week: $665')."""
+    best = None
+    for m in _MONEY_RX.finditer(text, max(0, pos - 40), pos + 30):
+        if m.end() <= pos + 4:
+            best = m
+        elif best is None and m.start() - pos <= 25:
+            best = m
+    return float(best.group(1).replace(",", "")) if best else None
+
+
+def _check_quantities(answer, question=""):
+    """Deterministic quantity failures in a draft:
+    (a) a matched mechanism's registry period (its 'period'
+        field) stated as a confusable duration anywhere in
+        the answer;
+    (b) period conversions the draft states in BOTH units
+        (weekly/monthly, monthly/annual, weekly/annual) that
+        do not reconcile (factors 52/12, 12, 52; tolerance
+        ~2% or $15);
+    (c) a backpay exclusion end month that disagrees with the
+        receipt month named in the question + the period.
+    Returns [{mechanism, label}] shaped like mechanism
+    failures."""
+    fails = []
+    low = (answer or "").lower()
+    qlow = (question or "").lower()
+    mech = _mechanism_matches(question) if qlow else []
+    for m in mech:
+        period = m.get("period") or {}
+        for conf in period.get("confusables", ()):
+            if conf in low:
+                fails.append({
+                    "mechanism": m["id"],
+                    "label": (f"states a {conf} period where the "
+                              f"rule is {period['count']} months: "
+                              f"{period['note']}")})
+    convs = [(r"\bper week\b|\bweekly\b|\ba week\b", "per week",
+              r"\bper month\b|\bmonthly\b|\ba month\b", "per month",
+              52.0 / 12.0),
+             (r"\bper month\b|\bmonthly\b|\ba month\b", "per month",
+              r"\bper year\b|\bannual\w*\b|\ba year\b", "per year",
+              12.0),
+             (r"\bper week\b|\bweekly\b|\ba week\b", "per week",
+              r"\bper year\b|\bannual\w*\b|\ba year\b", "per year",
+              52.0)]
+    for rx_a, name_a, rx_b, name_b, factor in convs:
+        for ma in re.finditer(rx_a, low):
+            va = _money_near(low, ma.start())
+            mb = re.search(rx_b, low[ma.end():ma.end() + 120])
+            if not mb:
+                continue
+            vb = _money_near(low, ma.end() + mb.start())
+            if not va or not vb:
+                continue
+            expect = va * factor
+            if abs(vb - expect) > max(15.0, 0.02 * expect):
+                fails.append({
+                    "mechanism": "quantity-conversion",
+                    "label": (f"period conversion does not "
+                              f"reconcile: ${va:,.2f} {name_a} is "
+                              f"${expect:,.2f} {name_b}, not "
+                              f"${vb:,.2f}")})
+    periods = [m for m in mech if m.get("period")]
+    if periods:
+        rm = re.search(_MONTH_RX, qlow)
+        um = re.search(r"\buntil\s+" + _MONTH_RX, low)
+        if rm and um:
+            period = periods[0]["period"]
+            ridx = _MONTH_NAMES.index(rm.group(1))
+            expect_name = _MONTH_NAMES[(ridx + period["count"]) % 12]
+            if um.group(1) != expect_name:
+                fails.append({
+                    "mechanism": periods[0]["id"],
+                    "label": (f"exclusion end month is wrong: "
+                              f"received in {rm.group(1)}, so the "
+                              f"{period['count']}-month exclusion "
+                              f"runs through {expect_name}, not "
+                              f"{um.group(1)}")})
+    return fails
+
+
+# --- v15: source-conflict claims (item 6) --------------------------------------
+# When the registry pins a figure and a retrieved source prints
+# a NEAR-MISS variant of it (the $4,066.50 CMS vs $4,067 Indiana
+# case), the answer must SURFACE the disagreement with
+# provenance instead of silently picking one. Scope (James's
+# decision): registry figure slots only. A conflict becomes a
+# judgeable claim; a draft that omits either value fails it in
+# code, whatever a judge says.
+def _conflict_scan(hits):
+    """Returns [{entry, registry_value, corpus_value, source,
+    url}] for registry figures with a near-miss corpus variant
+    in the ask's hits (within 2%, not equal — far enough that
+    the figure checker would have let both through as one
+    value's provenance, close enough to be the same fact
+    stated two ways)."""
+    out = []
+    for entry in VERIFIED_FIGURES:
+        terms = entry.get("conflict_terms") or (
+            entry["title"].lower(),)
+        corpus_vals = {}
+        for h in hits or ():
+            blob = ((h.get("title") or "") + " "
+                    + (h.get("excerpt") or "")).lower()
+            if not any(t in blob for t in terms):
+                continue
+            for tok in _MONEY_RX.findall(h.get("excerpt") or ""):
+                try:
+                    corpus_vals[float(tok.replace(",", ""))] = h
+                except ValueError:
+                    pass
+        if not corpus_vals:
+            continue
+        for reg_val in entry.get("figures", ()):
+            for cval, h in corpus_vals.items():
+                if cval == reg_val:
+                    continue
+                if abs(cval - reg_val) <= 0.02 * max(reg_val, 1):
+                    out.append({"entry": entry["id"],
+                                "registry_value": reg_val,
+                                "corpus_value": cval,
+                                "source": h.get("title") or "",
+                                "url": h.get("url") or ""})
+    return out
+
+
+def _conflict_claims(conflicts, answer):
+    """Conflict records as judgeable claims, plus the code
+    override map (claim text -> forced final) for drafts that
+    do not present BOTH values."""
+    claims, forced = [], {}
+    low = (answer or "").lower()
+    for cf in conflicts:
+        def _has(v):
+            forms = {f"${v:,.2f}", f"${v:,.0f}", f"{v:,.2f}",
+                     f"{v:,.0f}"}
+            return any(f.lower() in low for f in forms)
+        both = _has(cf["registry_value"]) and _has(cf["corpus_value"])
+        text = (f"The answer surfaces the source disagreement on "
+                f"{cf['entry']}: sources give both "
+                f"${cf['registry_value']:,.2f} and "
+                f"${cf['corpus_value']:,.2f} (corpus variant from "
+                f"{cf['source']}), instead of presenting one "
+                f"figure as settled.")
+        claims.append({"text": text, "load_bearing": True,
+                       "sources": [], "origin": "conflict"})
+        if not both:
+            forced[text] = "contradicted"
+    return claims, forced
+
+
 # --- v13: verified-figures registry --------------------------------------
 # Hand-verified figures and rules for the topics where graded runs kept
 # picking the wrong number from competing excerpts (v12 battery: Q5
@@ -1700,6 +2041,12 @@ VERIFIED_FIGURES = [
         "source": ("CMS 2026 spousal impoverishment standards; "
                    "Indiana ILTCP (prints the max as $4,067)"),
         "figures": (2705.0, 4066.50, 4067.0, 811.50),
+        # v15 (item 6): the seeded conflict slot. The registry
+        # carries BOTH published maxima, so the near-miss scan
+        # arms whenever a corpus excerpt states either one in
+        # MMMNA context; the answer must show both with sources.
+        "conflict_terms": ("mmmna", "monthly maintenance needs",
+                           "maintenance needs allowance"),
     },
     {
         "id": "home_equity_limit",
@@ -1946,6 +2293,19 @@ MECHANISMS = [
         ],
         "forbidden": ("excluded for six months", "excluded for 6 months",
                       "excluded for six-month"),
+        # v15 (item 5): the period gets CODE arithmetic, not just
+        # string checks: any six-month phrasing anywhere in a
+        # backpay answer fails as a confusable period, and the
+        # exclusion end month is recomputed from the receipt
+        # date when the question supplies one.
+        "period": {"count": 9, "unit": "month",
+                   "confusables": ("six months", "6 months",
+                                   "six-month", "6-month"),
+                   "note": ("The backpay exclusion period is NINE "
+                            "months after the month of receipt; "
+                            "six months appears only in "
+                            "payee/administrative material and is "
+                            "never the exclusion.")},
         "prompt": (
             "Retroactive benefits are excluded from resources for "
             "NINE months; the six-month figure in representative-payee "
@@ -2270,36 +2630,36 @@ def _gemini_call(api_model, payload):
     """One model, bounded polite attempts (delays 0/3/8s, 45s timeout;
     v12 speed pass). Returns the
     answer text. Raises _GeminiQuota on daily-quota exhaustion and
-    RuntimeError when this model is unusable right now."""
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{api_model}:generateContent?key={GEMINI_API_KEY}")
-    req = urllib.request.Request(url, data=payload,
-                                 headers={"Content-Type": "application/json"})
+    RuntimeError when this model is unusable right now. v15 (S3):
+    the transport is the keep-alive pool; spacing, retries, and
+    error semantics are unchanged."""
+    host = "generativelanguage.googleapis.com"
+    path = (f"/v1beta/models/{api_model}:generateContent"
+            f"?key={GEMINI_API_KEY}")
     last_err = None
     for delay in (0, 3, 8):
         if delay:
             time.sleep(delay)
         _gemini_space()
         try:
-            data = json.loads(urllib.request.urlopen(req, timeout=45).read())
-        except urllib.error.HTTPError as e:
-            body = ""
-            try:
-                body = e.read().decode("utf-8", "replace")
-            except Exception:
-                pass
-            if e.code == 429 and ("RESOURCE_EXHAUSTED" in body
-                                  or "quota" in body.lower()):
-                raise _GeminiQuota(f"{api_model} daily quota exhausted")
-            if e.code == 404:
-                raise RuntimeError(f"{api_model} not available (HTTP 404)")
-            if e.code in (429, 500, 502, 503, 504):
-                last_err = e
-                continue
-            raise RuntimeError(f"{api_model} HTTP {e.code}: {body[:200]}")
+            status, raw = _https_post(
+                host, path, payload,
+                {"Content-Type": "application/json"}, timeout=45)
         except Exception as e:  # network blips: also retryable
             last_err = e
             continue
+        if status != 200:
+            body = raw.decode("utf-8", "replace")
+            if status == 429 and ("RESOURCE_EXHAUSTED" in body
+                                  or "quota" in body.lower()):
+                raise _GeminiQuota(f"{api_model} daily quota exhausted")
+            if status == 404:
+                raise RuntimeError(f"{api_model} not available (HTTP 404)")
+            if status in (429, 500, 502, 503, 504):
+                last_err = RuntimeError(f"{api_model} HTTP {status}")
+                continue
+            raise RuntimeError(f"{api_model} HTTP {status}: {body[:200]}")
+        data = json.loads(raw)
         try:
             content = data["candidates"][0]["content"]["parts"][0]["text"].strip()
         except (KeyError, IndexError):
@@ -2311,6 +2671,15 @@ def _gemini_call(api_model, payload):
     raise RuntimeError(f"{api_model} unavailable after retries: {last_err}")
 
 
+def _numbered_context(hits):
+    """v15 (item 3, citations at birth): the drafter-facing excerpt
+    context, each excerpt numbered in the SAME order the judges use,
+    so a drafter can cite [n] and the server can map the citation
+    back to the excerpt deterministically."""
+    return "\n\n".join(f"Excerpt {i + 1}:\n{_fmt_hit(h)}"
+                       for i, h in enumerate(hits or ()))
+
+
 def gemini_ask(model, question, hits, instructions=""):
     """Ask the Gemini API, best model first, downgrading down GEMINI_CHAIN
     only when a model is unavailable. Returns (answer, prompt, served_model,
@@ -2318,7 +2687,7 @@ def gemini_ask(model, question, hits, instructions=""):
     back to the local model."""
     if not GEMINI_API_KEY:
         raise RuntimeError("Gemini API key not configured (gemini_key.txt missing)")
-    context = "\n\n".join(_fmt_hit(h) for h in hits)
+    context = _numbered_context(hits)
     user_msg = f"Question: {question}\n\nDocument excerpts:\n{context}"
     sys_prompt = SYSTEM_PROMPT + (("\n\n" + instructions) if instructions
                                   else "")
@@ -2342,7 +2711,7 @@ def gemini_ask(model, question, hits, instructions=""):
 
 
 def ollama_ask(model, question, hits, instructions=""):
-    context = "\n\n".join(_fmt_hit(h) for h in hits)
+    context = _numbered_context(hits)
     user_msg = f"Question: {question}\n\nDocument excerpts:\n{context}"
     sys_prompt = SYSTEM_PROMPT + (("\n\n" + instructions) if instructions
                                   else "")
@@ -2446,24 +2815,29 @@ def _flash_spend():
         return True
 
 
-# --- v14.2: third judge seat --------------------------------------------------
-# A third, independent verdict on every claim, from a hosted
-# open-weight model on a generous free tier. Provider decision
-# (James, 2026-10-13): NVIDIA NIM is the shipped default
-# (Nemotron 3 Super 120B; the Cerebras signup began demanding a
-# card, which reopened the choice). All three candidate providers
-# are configured here and THIRD_JUDGE_PROVIDER alone picks the
-# active one: flip that one line (and supply that provider's key)
-# to move the seat. Nothing outside this block names a provider.
-# All endpoints are OpenAI-compatible chat completions with
-# Bearer auth, so the client below is provider-agnostic. The
-# seat is DORMANT without the active provider's key:
-# _third_verdicts reports unavailable and the panel resolves
-# exactly as v14.1 dual judging. Politeness mirrors the house
-# rules for hosted free tiers: a ~60s cap (the seat answers in
-# seconds), ONE retry on 5xx, and NO retry on 429 — a
-# rate-limited judge is simply unavailable for that ask and the
-# panel degrades.
+# --- v14.2: third judge seat -> v15: the NIM layer ---------------------------
+# v14.2 shipped this as a third judge seat (provider decision,
+# James, 2026-10-13: NVIDIA NIM default, Nemotron 3 Super 120B;
+# Cerebras began demanding a card, Groq stays a configured
+# alternate). v15 (plan item 2, the demotion) promotes the seat
+# and grows it into the server's NIM layer:
+# - the NIM Nemotron is now the STANDING SECOND JUDGE (verdicts
+#   beside the Gemini Lite primary); the metadata keeps the
+#   v14.2 "third" seat record shape so consumers do not drift.
+# - a DRAFTER block (same provider pattern) drafts hard questions
+#   on moonshotai/kimi-k3 and simple questions on a fast NIM
+#   model, and generates ladder redrafts, all with the local
+#   models as automatic fallbacks.
+# All providers here are OpenAI-compatible chat completions with
+# Bearer auth, so the client is provider-agnostic and one
+# constant per block picks the active provider. Seats are
+# DORMANT without their provider's key (gitignored key file in
+# the server dir, or env var): a dormant seat simply never runs
+# and the pipeline degrades per the v14/v15 rules. Politeness:
+# ONE retry on 5xx, NO retry on 429 (a rate-limited seat is
+# unavailable for that ask), timeouts sized per seat (the
+# judge answers in seconds warm; a cold flagship drafter took
+# ~51s for its first reply in the pre-build catalog smoke).
 THIRD_JUDGE_PROVIDERS = {
     "nvidia": {
         "base_url": "https://integrate.api.nvidia.com/v1",
@@ -2493,25 +2867,71 @@ THIRD_JUDGE_KEY_ENV = _THIRD_CFG["key_env"]
 THIRD_JUDGE_TIMEOUT = 60
 _THIRD_STATE = {"date": "", "count": 0}
 _THIRD_LOCK = threading.Lock()
-_THIRD_KEY = {"loaded": False, "value": None}
+
+# v15: the NIM drafting seat (plan item 2 + speedup S4). "model"
+# drafts hard questions and generates redrafts; "simple_model"
+# drafts simple questions. Ids verified against the live NIM
+# catalog at build time (80 models, 2026-10-13): kimi-k3 and
+# nemotron-3.5-lightning-30b-a3b both present and answering.
+DRAFTER_PROVIDERS = {
+    "nvidia": {
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "model": "moonshotai/kimi-k3",
+        "simple_model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+        "key_file": "nvidia_key.txt",
+        "key_env": "NVIDIA_API_KEY",
+    },
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": "openai/gpt-oss-120b",
+        "simple_model": "openai/gpt-oss-20b",
+        "key_file": "groq_key.txt",
+        "key_env": "GROQ_API_KEY",
+    },
+    "cerebras": {
+        "base_url": "https://api.cerebras.ai/v1",
+        "model": "gpt-oss-120b",
+        "simple_model": "gpt-oss-20b",
+        "key_file": "cerebras_key.txt",
+        "key_env": "CEREBRAS_API_KEY",
+    },
+}
+DRAFTER_PROVIDER = "nvidia"  # <-- the one-line provider flip
+_DRAFT_CFG = DRAFTER_PROVIDERS[DRAFTER_PROVIDER]
+DRAFTER_BASE_URL = _DRAFT_CFG["base_url"]
+DRAFTER_MODEL = _DRAFT_CFG["model"]
+DRAFTER_SIMPLE_MODEL = _DRAFT_CFG["simple_model"]
+DRAFTER_KEY_FILE = _DRAFT_CFG["key_file"]
+DRAFTER_KEY_ENV = _DRAFT_CFG["key_env"]
+DRAFTER_TIMEOUT = 240  # cold flagship drafts are slow (see header)
+_NIM_KEYS = {}
 
 
-def _third_judge_key():
-    """The active provider's API key, loaded once: its env var
-    first, else its key file in the server dir (the Gemini-key
-    pattern). None when absent; the seat then stays dormant."""
-    if not _THIRD_KEY["loaded"]:
-        _THIRD_KEY["loaded"] = True
-        val = os.environ.get(THIRD_JUDGE_KEY_ENV) or None
+def _nim_key_for(key_env, key_file):
+    """A hosted provider's API key, loaded once per key file: its
+    env var first, else its key file in the server dir (the
+    Gemini-key pattern). None when absent; the seat stays dormant."""
+    cache_key = key_file
+    if cache_key not in _NIM_KEYS:
+        val = os.environ.get(key_env) or None
         if not val:
             try:
-                with open(THIRD_JUDGE_KEY_FILE,
-                          encoding="utf-8") as f:
+                with open(key_file, encoding="utf-8") as f:
                     val = f.read().strip() or None
             except FileNotFoundError:
                 pass
-        _THIRD_KEY["value"] = val
-    return _THIRD_KEY["value"]
+        _NIM_KEYS[cache_key] = val
+    return _NIM_KEYS[cache_key]
+
+
+def _third_judge_key():
+    """The active judge provider's key (see _nim_key_for)."""
+    return _nim_key_for(THIRD_JUDGE_KEY_ENV, THIRD_JUDGE_KEY_FILE)
+
+
+def _drafter_key():
+    """The active drafter provider's key (see _nim_key_for)."""
+    return _nim_key_for(DRAFTER_KEY_ENV, DRAFTER_KEY_FILE)
 
 
 def _third_calls_today():
@@ -2535,60 +2955,108 @@ def _third_count_one():
         _THIRD_STATE["count"] += 1
 
 
-def _third_judge_text(system, user):
-    """One chat call to the ACTIVE third-judge provider for judge
-    work (temperature 0, OpenAI-compatible). Returns the reply
-    text; raises RuntimeError when the seat cannot run (no key,
-    429, persistent 5xx, bad reply) so the caller degrades the
-    panel instead of failing."""
-    key = _third_judge_key()
+def _nim_text(base_url, key_env, key_file, model, system, user,
+              temperature=0, max_tokens=2048, timeout=60,
+              provider="nim"):
+    """One chat call to a hosted OpenAI-compatible provider (the
+    NIM layer's seats), over the keep-alive pool (v15 S3).
+    Returns the reply text; raises RuntimeError when the seat
+    cannot run (no key, 429, persistent 5xx, bad reply) so the
+    caller degrades instead of failing. Politeness: ONE retry
+    on 5xx, NO retry on 429."""
+    key = _nim_key_for(key_env, key_file)
     if not key:
-        raise RuntimeError("third judge API key not configured "
-                           f"({THIRD_JUDGE_KEY_FILE} missing)")
+        raise RuntimeError(f"{provider} API key not configured "
+                           f"({key_file} missing)")
     payload = json.dumps({
-        "model": THIRD_JUDGE_MODEL,
+        "model": model,
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
-        "temperature": 0,
-        "max_tokens": 2048,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
     }).encode()
-    url = THIRD_JUDGE_BASE_URL + "/chat/completions"
+    u = urlparse(base_url)
+    host, path = u.netloc, u.path.rstrip("/") + "/chat/completions"
     last_err = None
     for attempt in (0, 1):
-        req = urllib.request.Request(url, data=payload, headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + key})
         try:
-            data = json.loads(urllib.request.urlopen(
-                req, timeout=THIRD_JUDGE_TIMEOUT).read())
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                raise RuntimeError(
-                    f"{THIRD_JUDGE_PROVIDER} rate limited (HTTP 429)")
-            if e.code in (500, 502, 503, 504) and attempt == 0:
-                last_err = e
+            status, raw = _https_post(
+                host, path, payload,
+                {"Content-Type": "application/json",
+                 "Authorization": "Bearer " + key},
+                timeout=timeout)
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
                 continue
-            raise RuntimeError(
-                f"{THIRD_JUDGE_PROVIDER} HTTP {e.code}")
+            raise RuntimeError(f"{provider} unavailable: {e}")
+        if status == 429:
+            raise RuntimeError(f"{provider} rate limited (HTTP 429)")
+        if status in (500, 502, 503, 504):
+            last_err = RuntimeError(f"{provider} HTTP {status}")
+            if attempt == 0:
+                continue
+            raise last_err
+        if status != 200:
+            raise RuntimeError(f"{provider} HTTP {status}")
         try:
+            data = json.loads(raw)
             content = data["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError, TypeError, AttributeError):
-            raise RuntimeError(
-                f"{THIRD_JUDGE_PROVIDER} returned an unexpected "
-                "response")
+        except (KeyError, IndexError, TypeError, AttributeError,
+                ValueError):
+            raise RuntimeError(f"{provider} returned an unexpected "
+                               "response")
         if not content:
-            raise RuntimeError(
-                f"{THIRD_JUDGE_PROVIDER} returned an empty response")
-        _third_count_one()
+            raise RuntimeError(f"{provider} returned an empty response")
         return content
-    raise RuntimeError(
-        f"{THIRD_JUDGE_PROVIDER} unavailable after retry: {last_err}")
+    raise RuntimeError(f"{provider} unavailable after retry: {last_err}")
+
+
+def _third_judge_text(system, user):
+    """One verdict call to the standing NIM judge seat (v14.2's
+    third seat, promoted in v15). Temperature 0."""
+    content = _nim_text(THIRD_JUDGE_BASE_URL, THIRD_JUDGE_KEY_ENV,
+                        THIRD_JUDGE_KEY_FILE, THIRD_JUDGE_MODEL,
+                        system, user, temperature=0, max_tokens=2048,
+                        timeout=THIRD_JUDGE_TIMEOUT,
+                        provider=THIRD_JUDGE_PROVIDER)
+    _third_count_one()
+    return content
+
+
+def nim_ask(model, question, hits, instructions=""):
+    """One NIM draft generation (v15 item 2 / S4): the same prompt
+    shape as the local and Gemini drafters (SYSTEM_PROMPT +
+    instructions, numbered excerpts), temperature 0.3. Returns
+    (answer, prompt). Raises when the seat cannot run; callers
+    fall back to the local models."""
+    context = _numbered_context(hits)
+    user_msg = f"Question: {question}\n\nDocument excerpts:\n{context}"
+    sys_prompt = SYSTEM_PROMPT + (("\n\n" + instructions) if instructions
+                                  else "")
+    content = _nim_text(DRAFTER_BASE_URL, DRAFTER_KEY_ENV,
+                        DRAFTER_KEY_FILE, model, sys_prompt, user_msg,
+                        temperature=0.3, max_tokens=2048,
+                        timeout=DRAFTER_TIMEOUT,
+                        provider=DRAFTER_PROVIDER)
+    # Hosted open models occasionally trail control-token debris
+    # (kimi-k3's catalog smoke ended "<|close|>response"); it is
+    # never answer text, so cut anything from the first such
+    # marker onward.
+    content = re.split(r"<\|[^>]{0,40}>", content)[0].strip()
+    if not content:
+        raise RuntimeError("NIM drafter returned an empty response")
+    return content, sys_prompt + "\n\n" + user_msg
 
 
 def _panel_info(judges, ms, third_status, third_error=None):
     """The judging-metadata panel record: which judges produced
-    verdicts, per-seat wall-clock ms, and the third seat's status
-    ('ok', 'no-key', 'unavailable', or 'not-run')."""
+    verdicts, per-seat wall-clock ms, and the NIM seat's status
+    ('ok', 'no-key', 'unavailable', or 'not-run'). v15: also the
+    count of claims resolved by the verdict cache (S2) and the
+    refutation stage's shape (S1). In v15 the "third" record
+    describes the NIM seat, which is now the standing second
+    judge (see the NIM layer header)."""
     return {"judges": list(judges),
             "primary_ms": ms.get("primary"),
             "second_ms": ms.get("second"),
@@ -2597,7 +3065,9 @@ def _panel_info(judges, ms, third_status, third_error=None):
                       "model": THIRD_JUDGE_MODEL,
                       "status": third_status,
                       "error": third_error},
-            "third_calls_today": _third_calls_today()}
+            "third_calls_today": _third_calls_today(),
+            "cached_claims": ms.get("cached_claims", 0),
+            "refuted_claims": ms.get("refuted_claims", 0)}
 
 
 # --- v14: judging -------------------------------------------------------------
@@ -2698,6 +3168,27 @@ _JUDGE_SYSTEM = (
     "prose, no code fences.")
 
 
+# v15 (regression fix, James's manual test 2026-10-13): claims ABOUT
+# the documents themselves ("the documents provide explicit advice
+# on steps to take") are framing, not facts about the world. An
+# extractor marked one load-bearing and its not_addressed verdict
+# sank an otherwise answerable question to a full IDK. Meta claims
+# are classified in code, never trusted to the extracting judge:
+# they are forced non-load-bearing and excluded from the pass
+# computation — they can be dropped or rewritten, never sink an
+# answer.
+_META_CLAIM_RX = re.compile(
+    r"^\s*(the\s+)?(documents?|excerpts?|sources?|records?|material|"
+    r"guidance)\s+(provide|provides|provided|state|states|say|says|"
+    r"show|shows|cover|covers|indicate|indicates|describe|describes|"
+    r"include|includes|contain|contains|offer|offers|give|gives|"
+    r"address|addresses|discuss|discusses)\b", re.IGNORECASE)
+
+
+def _is_meta_claim(text):
+    return bool(_META_CLAIM_RX.match(text or ""))
+
+
 def _judge_excerpts(hits, cap=1000):
     lines = []
     for i, h in enumerate(hits or ()):
@@ -2720,7 +3211,10 @@ def _primary_judgment(engine, question, hits, answer, mech_block):
         f"Draft answer:\n{answer}\n\n"
         "Extract the draft's substantive factual claims (at most 14; "
         "merge duplicates; mark load_bearing=true for claims the "
-        "answer's conclusion rests on). For EACH claim give your "
+        "answer's conclusion rests on). Claims about the documents "
+        "or excerpts themselves (what they provide, cover, or say) "
+        "are framing, never facts: always mark them "
+        "load_bearing=false. For EACH claim give your "
         "verdict: supported, contradicted, or not_addressed, judging "
         "ONLY against the excerpts and blocks above, plus a one-line "
         "note. In sources, list the numbers of the excerpts (from "
@@ -2733,6 +3227,10 @@ def _primary_judgment(engine, question, hits, answer, mech_block):
     try:
         if engine == "lite":
             text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM, user)
+        elif engine == "nim":
+            # v15: the NIM seat extracts when Lite is down (the
+            # local 14B is the extractor of last resort).
+            text = _third_judge_text(_JUDGE_SYSTEM, user)
         else:
             text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM, user)
         obj = _parse_judge_json(text)
@@ -2758,7 +3256,8 @@ def _primary_judgment(engine, question, hits, answer, mech_block):
                 if len(srcs) >= 4:
                     break
             claims.append({"text": t,
-                           "load_bearing": bool(c.get("load_bearing")),
+                           "load_bearing": bool(c.get("load_bearing"))
+                           and not _is_meta_claim(t),
                            "verdict": _norm_verdict(c.get("verdict")),
                            "note": str(c.get("note") or "")[:200],
                            "sources": srcs})
@@ -2773,14 +3272,38 @@ def _primary_judgment(engine, question, hits, answer, mech_block):
 
 def _claim_evidence(hits, claim):
     """v14.1: the excerpt text ONE claim rests on: its mapped
-    sources, or the full excerpt set when it has no mapping."""
+    sources, or the full excerpt set when it has no mapping.
+    v15 (item 1): refutation candidates retrieved for the claim
+    ride along under their own heading, so every verdict-stage
+    judge rules against the union of supporting and possibly
+    contradicting material."""
     src = [j for j in (claim.get("sources") or [])
            if 0 <= j < len(hits or ())]
     use = src if src else list(range(len(hits or ())))
-    return "\n\n".join(
+    text = "\n\n".join(
         f"[{j + 1}] {hits[j].get('title', '')} "
         f"({hits[j].get('url', '')})\n"
         f"{(hits[j].get('excerpt') or '')[:1000]}" for j in use)
+    refs = claim.get("refutations") or ()
+    if refs:
+        text += ("\n\nPossibly contradicting material (retrieved "
+                 "to test this claim; weigh it like the excerpts "
+                 "above):\n" + "\n\n".join(
+                     f"[R{k + 1}] {h.get('title', '')} "
+                     f"({h.get('url', '')})\n"
+                     f"{(h.get('excerpt') or '')[:1000]}"
+                     for k, h in enumerate(refs)))
+    hunt = claim.get("hunt") or ()
+    if hunt:
+        text += ("\n\nAdditional material retrieved for this "
+                 "claim by targeted search (the original excerpts "
+                 "did not settle it; weigh this like the excerpts "
+                 "above):\n" + "\n\n".join(
+                     f"[H{k + 1}] {h.get('title', '')} "
+                     f"({h.get('url', '')})\n"
+                     f"{(h.get('excerpt') or '')[:1000]}"
+                     for k, h in enumerate(hunt)))
+    return text
 
 
 def _scoped_evidence(hits, claims, labels=None):
@@ -2832,6 +3355,11 @@ def _second_verdicts(engine, question, hits, claims, mech_block):
     try:
         if engine == "lite":
             text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM, user)
+        elif engine == "nim":
+            # v15: the NIM seat as second judge (verdicts only in
+            # this seat's other role; the missed-claims pass is
+            # part of this function's contract for every engine).
+            text = _third_judge_text(_JUDGE_SYSTEM, user)
         else:
             text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM, user,
                                     num_predict=1024)
@@ -2861,65 +3389,6 @@ def _second_verdicts(engine, question, hits, claims, mech_block):
                 "missed": missed[:4], "error": None}
     except Exception as e:
         return {"available": False, "verdicts": {}, "missed": [],
-                "error": str(e)[:200]}
-
-
-def _third_verdicts(question, hits, claims, mech_block):
-    """v14.2: the THIRD judge (the active provider's model, see
-    THIRD_JUDGE_PROVIDER) verdicts the SAME numbered
-    claim list as the second judge, with the same claim-scoped
-    evidence (v14.1). Verdicts only: spotting claims the extractor
-    missed stays the second judge's job. available is False
-    whenever the seat cannot run (no key, rate limited, error,
-    unusable reply); the caller then resolves the round exactly
-    as v14.1 dual judging."""
-    if not _third_judge_key():
-        return {"available": False, "verdicts": {},
-                "error": "no key configured "
-                         f"({THIRD_JUDGE_KEY_FILE} missing)"}
-    verdict_instr = (
-        "Give a verdict for EVERY numbered claim: supported, "
-        "contradicted, or not_addressed, judging ONLY against the "
-        "excerpts and blocks above, with a one-line note each. "
-        "Reply with ONLY this JSON:\n"
-        '{"verdicts": [{"i": 1, "verdict": "supported", '
-        '"note": "..."}]}')
-    scoped = _scoped_evidence(hits, claims)
-    if scoped is not None:
-        user = (
-            f"Question: {question}\n\n{mech_block}\n\n"
-            f"Claims to judge, each followed by the excerpts it "
-            f"rests on:\n{scoped}\n\n" + verdict_instr)
-    else:
-        numbered = "\n".join(
-            f"{i + 1}. {c['text']}" for i, c in enumerate(claims))
-        user = (
-            f"Question: {question}\n\nDocument excerpts:\n"
-            f"{_judge_excerpts(hits)}\n\n{mech_block}\n\n"
-            f"Claims to judge:\n{numbered}\n\n" + verdict_instr)
-    try:
-        text = _third_judge_text(_JUDGE_SYSTEM, user)
-        obj = _parse_judge_json(text)
-        if not obj or not isinstance(obj.get("verdicts"), list):
-            return {"available": False, "verdicts": {},
-                    "error": "judge reply was not usable JSON"}
-        verdicts = {}
-        for v in obj["verdicts"]:
-            try:
-                idx = int(v.get("i")) - 1
-            except (TypeError, ValueError):
-                continue
-            if 0 <= idx < len(claims):
-                verdicts[idx] = {
-                    "verdict": _norm_verdict(v.get("verdict")),
-                    "note": str(v.get("note") or "")[:200]}
-        if not verdicts:
-            return {"available": False, "verdicts": {},
-                    "error": "judge returned no verdicts"}
-        return {"available": True, "verdicts": verdicts,
-                "error": None}
-    except Exception as e:
-        return {"available": False, "verdicts": {},
                 "error": str(e)[:200]}
 
 
@@ -3026,140 +3495,484 @@ def _majority_final(verdicts):
     return "not_addressed"
 
 
-def _judge_round(question, hits, answer, hard, mech_block=""):
-    """One full judging round over a draft: primary extraction +
-    verdicts, second-judge verdicts on the same list, and (v14.2)
-    the third judge's verdicts on the same list, run concurrently
-    with the second judge's. Resolution: with three verdicts,
-    majority rules (_majority_final) and Flash is spent only on
-    genuine 3-way splits (load-bearing, or any claim on hard
-    questions) plus its final-rung role in _run_unit; with two or
-    fewer verdicts the round resolves EXACTLY as v14.1 (agreement
-    decides, disagreement to Flash under the same conditions,
-    else the worse verdict, fail closed). Returns {mode, claims,
-    flash_used, errors, panel} where each claim has lite/local/
-    third/flash/final verdicts. mode is 'panel' (three judges),
-    'dual', 'arbitrated', 'gemini-only', 'local-only', or 'none'
-    (no judge could run)."""
+# --- v15: citations at birth (item 3) -----------------------------------------
+# The drafter contract (appended to every drafter's instructions
+# in _run_unit): every factual sentence ends with the number(s)
+# of the excerpt(s) it rests on, [n] style, or [registry] for
+# facts from the verified-figures / mechanism blocks. The parser
+# below reads a draft back deterministically: a cited sentence
+# becomes a claim whose evidence is exactly those excerpts; a
+# factual sentence with NO citation is uncited, and an uncited
+# LOAD-BEARING sentence is unverified by construction (it can
+# never be argued into supported; it goes to the redraft
+# objections verbatim and blocks shipping while it stands).
+CITATION_CONTRACT = (
+    "CITATIONS (checked by the server): end EVERY factual "
+    "sentence with the number(s) of the excerpt(s) it rests on, "
+    "in square brackets, like [2] or [2][5]. Facts taken from "
+    "the VERIFIED FIGURES or REQUIRED MECHANISMS blocks above "
+    "end with [registry] instead. A factual sentence with no "
+    "citation is treated as unverified and will be sent back or "
+    "cut. Headings, the confidence line, and purely connective "
+    "sentences need no citation.")
+
+
+def _split_sentences(text):
+    """Sentence splitter for the citation parse: splits on
+    sentence-final punctuation, but not on decimal points
+    ($4,066.50) or common abbreviations (e.g., i.e., U.S.)."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    text = re.sub(r"(\d)\.(\d)", r"\1<DEC>\2", text)
+    for ab in ("e.g", "i.e", "U.S", "Mr", "Mrs", "Dr", "vs", "No"):
+        text = text.replace(ab + ".", ab + "<DOT>")
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    out = []
+    for p in parts:
+        p = p.replace("<DEC>", ".").replace("<DOT>", ".").strip()
+        if p:
+            out.append(p)
+    return out
+
+
+_CITE_TAIL = re.compile(
+    r"((?:\[\d+\]|\[registry\])[\s,]*)+[.!?]?\s*$", re.IGNORECASE)
+_CITE_NUM = re.compile(r"\[(\d+)\]")
+_LINK_RX = re.compile(r"\[[^\]]*\]\((https?://[^)]+)\)")
+_FACTUAL_RX = re.compile(
+    r"(\$\s?\d|\b\d+\s?(?:months?|years?|weeks?|days?|percent|%)\b|"
+    r"\b(?:must|shall|counts?|excluded|exclusion|eligible|limit|"
+    r"qualif\w+|requires?|prohibit\w+|allows?|not counted|"
+    r"does not count|is not|are not)\b)", re.IGNORECASE)
+
+
+def _parse_citations(answer, hits):
+    """Read a draft's citations back (item 3). Returns
+    {sentences: [{text, sources, cited, factual}], cited_claims:
+    [{text, load_bearing, sources}], uncited_lb: [sentence texts]}.
+    A sentence is cited when it ends with [n]/[registry] markers
+    or carries a markdown link to one of the hits' URLs.
+    Load-bearing heuristic for cited/uncited classification: the
+    sentence states a figure, a duration, or a rule (the
+    _FACTUAL_RX signals) — connective prose is neither cited
+    nor factual and passes through untouched."""
+    urls = {}
+    for j, h in enumerate(hits or ()):
+        if h.get("url"):
+            urls[h["url"]] = j
+    sentences, cited_claims, uncited_lb = [], [], []
+    for s in _split_sentences(answer):
+        if s.lower().startswith("confidence:"):
+            sentences.append({"text": s, "sources": [],
+                              "cited": True, "factual": False})
+            continue
+        srcs = []
+        m = _CITE_TAIL.search(s)
+        if m:
+            for n in _CITE_NUM.findall(m.group(0)):
+                j = int(n) - 1
+                if 0 <= j < len(hits or ()) and j not in srcs:
+                    srcs.append(j)
+        for url in _LINK_RX.findall(s):
+            if url in urls and urls[url] not in srcs:
+                srcs.append(urls[url])
+        factual = bool(_FACTUAL_RX.search(s))
+        cited = bool(srcs) or "[registry]" in s.lower()
+        sentences.append({"text": s, "sources": srcs,
+                          "cited": cited, "factual": factual})
+        if factual and cited:
+            cited_claims.append({"text": s, "load_bearing": True,
+                                 "sources": srcs})
+        elif factual and not cited:
+            uncited_lb.append(s)
+    return {"sentences": sentences, "cited_claims": cited_claims,
+            "uncited_lb": uncited_lb}
+
+
+# --- v15: refutation retrieval (item 1, parallel per S1) ----------------------
+def _refutation_queries(claim, mechanisms):
+    """Search queries designed to DISPROVE one claim: its own
+    figures and key terms restated as a hunt for those numbers
+    in other rules, plus the matched mechanisms' forbidden
+    substitutes and confusables where the registry names them."""
+    text = claim.get("text") or ""
+    queries = []
+    figs = re.findall(r"\$\s?[\d,]+(?:\.\d+)?", text)
+    terms = [w for w in re.findall(r"[a-z]{4,}", text.lower())
+             if w not in STOP][:6]
+    if figs and terms:
+        queries.append(" ".join(terms[:4] + figs[:1]))
+    if terms:
+        queries.append(" ".join(terms[:6]))
+    for m in mechanisms or ():
+        for bad in m.get("forbidden", ()):
+            queries.append(bad)
+        period = m.get("period") or {}
+        for conf in period.get("confusables", ()):
+            queries.append(conf)
+    seen, out = set(), []
+    for q in queries:
+        if q and q not in seen:
+            seen.add(q)
+            out.append(q)
+    return out[:3]
+
+
+def _refutation_retrieve(corp, hits, claims, mechanisms):
+    """For each LOAD-BEARING claim, run its refutation queries
+    against the corpus and attach any NEW excerpt (not already
+    in the ask's set) that bears on the claim as a refutation
+    candidate (claim['refutations'], capped at 2). Retrieval is
+    keyword search (fast, local); judges rule on the candidates,
+    code never auto-fails a claim on one. Returns total ms."""
+    t0 = time.monotonic()
+    if corp is None:
+        return 0
+    seen_keys = {(h.get("url"), (h.get("excerpt") or "")[:60])
+                 for h in hits or ()}
+    for claim in claims:
+        if not claim.get("load_bearing"):
+            continue
+        found = []
+        for q in _refutation_queries(claim, mechanisms):
+            try:
+                res = search(q, corpus=corp, n=4)
+            except Exception:
+                res = []
+            for h in res:
+                key = (h.get("url"), (h.get("excerpt") or "")[:60])
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                found.append(h)
+                if len(found) >= 2:
+                    break
+            if len(found) >= 2:
+                break
+        if found:
+            claim["refutations"] = found
+    return int((time.monotonic() - t0) * 1000)
+
+
+def _hunt_evidence(corp, hits, claim, mechanisms):
+    """v15 (item 1, regression fix b): a claim judged
+    not_addressed gets ONE targeted evidence hunt before it is
+    abandoned — the failure mode where the right DOCUMENT was
+    retrieved but the chunk carrying the specific passage was
+    not (James's manual test, 2026-10-13: the Spousal
+    Impoverishment document was in the sources without its
+    name-on-the-check passage). Queries come from the claim
+    itself plus the matched mechanisms' own retry searches.
+    Returns up to 2 NEW excerpts (other chunks of a retrieved
+    document count as new)."""
+    if corp is None:
+        return []
+    seen_keys = {(h.get("url"), (h.get("excerpt") or "")[:60])
+                 for h in hits or ()}
+    queries = _refutation_queries(claim, ())
+    for m in mechanisms or ():
+        if m.get("retry_query"):
+            queries.append(m["retry_query"])
+    found = []
+    for q in queries[:4]:
+        try:
+            res = search(q, corpus=corp, n=5)
+        except Exception:
+            res = []
+        for h in res:
+            key = (h.get("url"), (h.get("excerpt") or "")[:60])
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            found.append(h)
+            if len(found) >= 2:
+                return found
+    return found
+
+
+# --- v15: claim-verdict cache (speedup S2) ------------------------------------
+# A resolved verdict is reusable when the CLAIM and the EVIDENCE
+# it rests on are both unchanged: keyed by (normalized claim
+# text, hash of the claim's scoped evidence). Only trustworthy
+# resolutions are written (finals decided by two agreeing
+# judges, a majority, or a Flash ruling — never a lone
+# fail-closed guess). A cached claim whose parallel refutation
+# returns new material loses the cached verdict at the join
+# (its evidence changed, so the key no longer describes it).
+_VERDICT_CACHE = {}
+_VERDICT_CACHE_MAX = 500
+_VERDICT_LOCK = threading.Lock()
+
+
+def _norm_claim_text(text):
+    return re.sub(r"\s+", " ", (text or "").strip().lower())[:300]
+
+
+def _evidence_hash(hits, claim):
+    parts = []
+    src = [j for j in (claim.get("sources") or [])
+           if 0 <= j < len(hits or ())]
+    use = src if src else list(range(len(hits or ())))
+    for j in use:
+        h = hits[j]
+        parts.append((h.get("url") or "") + "|" +
+                     (h.get("excerpt") or "")[:200])
+    for h in claim.get("refutations") or ():
+        parts.append("R|" + (h.get("url") or "") + "|" +
+                     (h.get("excerpt") or "")[:200])
+    return hashlib.sha256(
+        "\n".join(parts).encode("utf-8", "replace")).hexdigest()[:24]
+
+
+def _verdict_cache_get(hits, claim):
+    key = (_norm_claim_text(claim.get("text")),
+           _evidence_hash(hits, claim))
+    with _VERDICT_LOCK:
+        return _VERDICT_CACHE.get(key)
+
+
+def _verdict_cache_put(hits, claim, verdict):
+    key = (_norm_claim_text(claim.get("text")),
+           _evidence_hash(hits, claim))
+    with _VERDICT_LOCK:
+        if len(_VERDICT_CACHE) >= _VERDICT_CACHE_MAX:
+            _VERDICT_CACHE.pop(next(iter(_VERDICT_CACHE)))
+        _VERDICT_CACHE[key] = verdict
+
+
+def _judge_round(question, hits, answer, hard, mech_block="",
+                 corp=None, mechanisms=None, extra_claims=None):
+    """One full judging round over a draft. v15 composition: the
+    PRIMARY judge extracts claims and verdicts them (Gemini Lite;
+    the NIM seat when Lite is down; the demoted local 14B only
+    when both remotes are down). The SECOND judge verdicts the
+    same list (the NIM seat by default; Lite when the NIM seat
+    extracted; the local 14B behind LOCAL_FALLBACK_JUDGE when a
+    remote seat cannot run). Refutation retrieval (item 1) runs
+    CONCURRENTLY with the verdict stage (S1) and joins before
+    resolution: claims whose refutation surfaced new material
+    are re-verdicted against the union evidence, and a
+    re-verdict that does not affirm them sends them to the
+    disputed pool. Cached claims (S2) resolve from the verdict
+    cache without new judge calls unless the join's refutation
+    invalidates them. Disputes go to Flash (load-bearing, or
+    any claim on hard questions); when Flash cannot rule and
+    the local fallback is on and has not yet verdicted, the 14B
+    casts a tiebreak verdict and majority rules. Whatever no
+    judge rules on fails closed on the worst verdict. Returns
+    {mode, claims, flash_used, pass, errors, panel, refute_ms}
+    where each claim carries lite/nim/local/flash/final
+    verdicts (plus the v14.2-era 'third' alias of nim). mode is
+    'panel' (both remote seats), 'dual', 'arbitrated',
+    'gemini-only', 'nim-only', 'local-only', or 'none'."""
     errors = []
-    panel_ms = {"primary": None, "second": None, "third": None}
-    # v14.1: the Lite primary judgment and the local judge's GPU
-    # preparation run concurrently. The second verdict call depends
-    # on the primary's claim list, so it cannot start sooner; what
-    # parallelism removes is everything it used to wait on serially
-    # AFTER the claims existed (unloading the 9B, loading the 14B).
-    # Verdict combination below is exactly the sequential logic.
+    panel_ms = {"primary": None, "second": None, "third": None,
+                "cached_claims": 0, "refuted_claims": 0}
+    nim_status = "ok" if _third_judge_key() else "no-key"
+    nim_error = None
+
+    # --- Stage 1: primary extraction + verdicts. Lite first,
+    # then the NIM seat, then (both remotes down) the demoted
+    # local 14B. The local GPU warm-up runs alongside ONLY when
+    # a local seat is likely to be needed, which v15 knows only
+    # after a remote failure — so there is no speculative warm-up
+    # on the default path (that is the demotion's latency win).
     pt0 = time.monotonic()
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_primary = pool.submit(_primary_judgment, "lite",
-                                  question, hits, answer, mech_block)
-        fut_warm = pool.submit(_warm_local_judge)
-        primary = fut_primary.result()
-        primary_engine = "lite"
+    primary = _primary_judgment("lite", question, hits, answer,
+                                mech_block)
+    primary_engine = "lite"
+    if not primary["available"]:
+        errors.append("lite judge: " + str(primary["error"]))
+        primary = _primary_judgment("nim", question, hits, answer,
+                                    mech_block)
+        primary_engine = "nim"
         if not primary["available"]:
-            errors.append("lite judge: " + str(primary["error"]))
-            fut_warm.result()  # GPU ready before the local primary
-            primary = _primary_judgment("local", question, hits,
-                                        answer, mech_block)
-            primary_engine = "local"
-        else:
-            fut_warm.result()  # GPU ready before the second judge
+            errors.append("nim judge: " + str(primary["error"]))
+            nim_status = "unavailable"
+            nim_error = str(primary["error"])
+            if LOCAL_FALLBACK_JUDGE:
+                _warm_local_judge()
+                primary = _primary_judgment("local", question, hits,
+                                            answer, mech_block)
+                primary_engine = "local"
     panel_ms["primary"] = int((time.monotonic() - pt0) * 1000)
     if not primary["available"]:
-        errors.append("local judge: " + str(primary["error"]))
+        if primary_engine == "local":
+            errors.append("local judge: " + str(primary["error"]))
         return {"mode": "none", "claims": [], "flash_used": False,
-                "errors": errors,
-                "panel": _panel_info(
-                    [], panel_ms,
-                    "no-key" if not _third_judge_key() else "not-run")}
+                "pass": False, "errors": errors, "refute_ms": 0,
+                "panel": _panel_info([], panel_ms, nim_status,
+                                     nim_error)}
     claims = [{"text": c["text"], "load_bearing": c["load_bearing"],
-               "lite": None, "local": None, "third": None,
-               "flash": None,
-               "final": None, "notes": [],
-               "sources": list(c.get("sources") or [])}
+               "lite": None, "nim": None, "third": None,
+               "local": None, "flash": None, "final": None,
+               "notes": [], "origin": "extracted",
+               "meta": _is_meta_claim(c["text"]),
+               "sources": list(c.get("sources") or []),
+               "refutations": []}
               for c in primary["claims"]]
     for i, c in enumerate(primary["claims"]):
         claims[i][primary_engine] = c["verdict"]
         if c["note"]:
             claims[i]["notes"].append(c["note"])
-    second_engine = "local" if primary_engine == "lite" else "lite"
-    # v14.2: the second and third judges verdict the same claim
-    # list concurrently (one local/hosted pair, no shared state:
-    # the local call manages Ollama, the third is a plain HTTPS
-    # call). Neither consumes the other's output; combination
-    # below is unchanged in spirit from the sequential logic.
+    # Extra claims (v15): citation-derived claims the extractor
+    # did not list, divergence completeness claims, and conflict
+    # claims. They carry no primary verdict; the verdict stage
+    # and the arbitrator rule on them like any other claim.
+    seen_norm = {_norm_claim_text(c["text"]) for c in claims}
+    for ec in extra_claims or ():
+        if _norm_claim_text(ec["text"]) in seen_norm:
+            continue
+        seen_norm.add(_norm_claim_text(ec["text"]))
+        claims.append({"text": ec["text"],
+                       "load_bearing": bool(ec.get("load_bearing")),
+                       "lite": None, "nim": None, "third": None,
+                       "local": None, "flash": None, "final": None,
+                       "notes": [], "origin": ec.get("origin", "extra"),
+                       "meta": _is_meta_claim(ec["text"]),
+                       "sources": list(ec.get("sources") or []),
+                       "refutations": []})
+    # --- S2: verdict cache. Resolved claims (identical claim +
+    # identical scoped evidence) resolve without new judge
+    # calls; the join below can still invalidate a cached claim
+    # whose refutation returns new material.
+    cached_idx = set()
+    for i, c in enumerate(claims):
+        hit_v = _verdict_cache_get(hits, c)
+        if hit_v:
+            c["cached"] = hit_v
+            cached_idx.add(i)
+    panel_ms["cached_claims"] = len(cached_idx)
+    live_idx = [i for i in range(len(claims)) if i not in cached_idx]
+    # --- Stage 2 (S1): the second judge's verdicts and the
+    # refutation retrieval run CONCURRENTLY; local fallback
+    # seats compose per the demotion rules.
+    if primary_engine == "lite":
+        second_engine = "nim"
+    elif primary_engine == "nim":
+        second_engine = "lite"
+    else:
+        second_engine = None  # local extracted: no second remote
+    second = {"available": False, "verdicts": {}, "missed": [],
+              "error": "not run"}
+    refute_ms = 0
+
+    def _run_refutation():
+        return _refutation_retrieve(corp, hits,
+                                    [claims[i] for i in live_idx
+                                     if claims[i]["load_bearing"]],
+                                    mechanisms)
+
     st0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=2) as pool:
         fut_second = pool.submit(_second_verdicts, second_engine,
-                                 question, hits, claims, mech_block)
-        fut_third = pool.submit(_third_verdicts, question, hits,
-                                claims, mech_block)
-        second = fut_second.result()
-        panel_ms["second"] = int((time.monotonic() - st0) * 1000)
-        third = fut_third.result()
-        panel_ms["third"] = int((time.monotonic() - st0) * 1000)
+                                 question, hits,
+                                 [claims[i] for i in live_idx],
+                                 mech_block) if second_engine \
+            else None
+        fut_refute = pool.submit(_run_refutation)
+        if fut_second is not None:
+            second = fut_second.result()
+        refute_ms = fut_refute.result()
+    panel_ms["second"] = int((time.monotonic() - st0) * 1000)
     judges = [primary_engine]
     if second["available"]:
         judges.append(second_engine)
-        for idx, v in second["verdicts"].items():
-            claims[idx][second_engine] = v["verdict"]
+        for sub_idx, v in second["verdicts"].items():
+            claims[live_idx[sub_idx]][second_engine] = v["verdict"]
             if v["note"]:
-                claims[idx]["notes"].append(v["note"])
+                claims[live_idx[sub_idx]]["notes"].append(v["note"])
         for m in second["missed"]:
-            # Appended after the third judge ran: it never saw
-            # these, so they carry no third verdict and resolve
-            # under the two-verdict rules below.
             claims.append({"text": m["text"],
                            "load_bearing": m["load_bearing"],
-                           "lite": None, "local": None, "third": None,
-                           "flash": None,
-                           "final": None,
+                           "lite": None, "nim": None, "third": None,
+                           "local": None, "flash": None, "final": None,
                            "notes": [m["note"]] if m["note"] else [],
-                           "sources": []})
+                           "origin": "missed",
+                           "meta": _is_meta_claim(m["text"]),
+                           "sources": [], "refutations": []})
             claims[-1][second_engine] = m["verdict"]
-    else:
-        errors.append(second_engine + " judge: " + str(second["error"]))
-    third_status, third_error = "not-run", None
-    if third["available"]:
-        judges.append("third")
-        third_status = "ok"
-        for idx, v in third["verdicts"].items():
-            claims[idx]["third"] = v["verdict"]
-            if v["note"]:
-                claims[idx]["notes"].append(v["note"])
-    else:
-        third_error = str(third["error"])
-        if _third_judge_key():
-            third_status = "unavailable"
-            errors.append("third judge: " + third_error)
+            live_idx.append(len(claims) - 1)
+    elif second_engine:
+        errors.append(second_engine + " judge: "
+                      + str(second["error"]))
+        if second_engine == "nim":
+            nim_status = "unavailable"
+            nim_error = str(second["error"])
+    if "nim" in judges:
+        panel_ms["third"] = panel_ms["second"]
+    # --- Fallback second seat: a remote seat failed and the
+    # demoted 14B is flagged on. It verdicts the live claims the
+    # failed seat never reached.
+    if not second["available"] and second_engine \
+            and LOCAL_FALLBACK_JUDGE and primary_engine != "local":
+        _warm_local_judge()
+        fb = _second_verdicts("local", question, hits,
+                              [claims[i] for i in live_idx],
+                              mech_block)
+        if fb["available"]:
+            judges.append("local")
+            panel_ms["second"] = int((time.monotonic() - st0) * 1000)
+            for sub_idx, v in fb["verdicts"].items():
+                claims[live_idx[sub_idx]]["local"] = v["verdict"]
+                if v["note"]:
+                    claims[live_idx[sub_idx]]["notes"].append(
+                        v["note"])
+            second = fb
+            second_engine = "local"
         else:
-            # Dormant by design (no key yet): not an error, and
-            # the round is exactly a v14.1 round.
-            third_status = "no-key"
-            third_error = None
-    if len(judges) >= 3:
+            errors.append("local judge: " + str(fb["error"]))
+    # --- The join (S1): cached claims whose refutation returned
+    # NEW material lose their cached verdict (their evidence
+    # changed); every claim carrying refutation candidates is
+    # re-verdicted against the union evidence by the second
+    # seat. A re-verdict that does not affirm the claim sends
+    # it to the disputed pool below.
+    refuted = [i for i in range(len(claims))
+               if claims[i].get("refutations")]
+    panel_ms["refuted_claims"] = len(refuted)
+    for i in refuted:
+        if i in cached_idx:
+            cached_idx.discard(i)
+            claims[i].pop("cached", None)
+            panel_ms["cached_claims"] -= 1
+            if i not in live_idx:
+                live_idx.append(i)
+    rejudge_engine = second_engine if second["available"] else None
+    if refuted and rejudge_engine:
+        subset = [claims[i] for i in refuted]
+        rv = _second_verdicts(rejudge_engine, question, hits,
+                              subset, mech_block)
+        if rv["available"]:
+            for sub_idx, v in rv["verdicts"].items():
+                ci = refuted[sub_idx]
+                claims[ci]["refute_verdict"] = v["verdict"]
+                if v["note"]:
+                    claims[ci]["notes"].append(
+                        "refutation check: " + v["note"])
+    # --- Mode + resolution. Code resolves verdicts, never
+    # averages (v14's rule, unchanged).
+    remote = [j for j in judges if j in ("lite", "nim")]
+    if len(remote) >= 2:
         mode = "panel"
-    elif len(judges) == 2:
+    elif len(judges) >= 2:
         mode = "dual"
+    elif judges == ["lite"]:
+        mode = "gemini-only"
+    elif judges == ["nim"]:
+        mode = "nim-only"
     else:
-        mode = "gemini-only" if primary_engine == "lite" \
-            else "local-only"
-    # Resolution (v14.2). Code resolves verdicts, never averages.
-    # A claim with THREE verdicts resolves by _majority_final; a
-    # genuine 3-way split (one of each) joins the disputed pool.
-    # A claim with TWO verdicts follows the v14.1 rules exactly:
-    # agreement decides, disagreement is disputed. ONE verdict
-    # stands alone (degraded modes); ZERO verdicts is
-    # not_addressed. Disputed claims go to Flash when load-bearing
-    # (or on any claim of a hard question); whatever Flash does
-    # not rule on fails closed with the worst of its verdicts —
-    # which for a two-verdict claim is exactly v14.1's
-    # _worse_verdict(lite, local). When the third judge did not
-    # run, every claim has at most two verdicts and this whole
-    # block reduces to the v14.1 logic unchanged.
+        mode = "local-only"
     disputed = []
     for i, c in enumerate(claims):
-        vs = [c[k] for k in ("lite", "local", "third") if c.get(k)]
+        if i in cached_idx and c.get("cached"):
+            c["final"] = c["cached"]
+            continue
+        vs = [c[k] for k in ("lite", "nim", "local") if c.get(k)]
+        if c.get("refute_verdict") and c["refute_verdict"] != "supported":
+            disputed.append(i)
+            continue
         if len(vs) >= 3:
             f = _majority_final(vs)
             if f is None:
@@ -3175,33 +3988,120 @@ def _judge_round(question, hits, answer, hard, mech_block=""):
             c["final"] = vs[0]
         else:
             c["final"] = "not_addressed"
+    for c in claims:  # keep the arbitration evidence's alias fresh
+        c["third"] = c.get("nim")
     flash_used = False
     if disputed:
+        _set_stage("arbitrating")
         to_rule = [i for i in disputed
                    if claims[i]["load_bearing"] or hard]
         if to_rule:
-            rulings = _flash_arbitrate(question, hits, claims, to_rule)
+            rulings = _flash_arbitrate(question, hits, claims,
+                                       to_rule)
             if rulings:
                 flash_used = True
                 mode = "arbitrated"
                 for idx, verdict in rulings.items():
                     claims[idx]["flash"] = verdict
                     claims[idx]["final"] = verdict
+        # Local tiebreak: Flash could not rule on everything and
+        # the demoted 14B is flagged on and has not verdicted.
+        rest = [i for i in disputed if claims[i]["final"] is None]
+        if rest and LOCAL_FALLBACK_JUDGE \
+                and "local" not in judges:
+            _warm_local_judge()
+            tb = _second_verdicts("local", question, hits,
+                                  [claims[i] for i in rest],
+                                  mech_block)
+            if tb["available"]:
+                if "local" not in judges:
+                    judges.append("local")
+                for sub_idx, v in tb["verdicts"].items():
+                    ci = rest[sub_idx]
+                    claims[ci]["local"] = v["verdict"]
+                    if v["note"]:
+                        claims[ci]["notes"].append(v["note"])
+                    vs = [claims[ci][k] for k in ("lite", "nim",
+                                                  "local")
+                          if claims[ci].get(k)]
+                    if len(vs) >= 3:
+                        f = _majority_final(vs)
+                        claims[ci]["final"] = f if f is not None \
+                            else _worse_verdict(
+                                vs[0], _worse_verdict(vs[1], vs[2]))
+                    elif claims[ci].get("refute_verdict") \
+                            and claims[ci]["refute_verdict"] \
+                            != "supported":
+                        claims[ci]["final"] = "contradicted"
         for i in disputed:
             if claims[i]["final"] is None:
-                vs = [claims[i][k] for k in ("lite", "local", "third")
+                vs = [claims[i][k] for k in ("lite", "nim", "local")
                       if claims[i].get(k)]
-                w = vs[0]
-                for v in vs[1:]:
-                    w = _worse_verdict(w, v)
-                claims[i]["final"] = w
-    passed = bool(claims) and all(c["final"] == "supported"
-                                  for c in claims)
+                if claims[i].get("refute_verdict") \
+                        and claims[i]["refute_verdict"] != "supported" \
+                        and "supported" not in vs:
+                    claims[i]["final"] = "contradicted"
+                elif vs:
+                    w = vs[0]
+                    for v in vs[1:]:
+                        w = _worse_verdict(w, v)
+                    claims[i]["final"] = w
+                else:
+                    claims[i]["final"] = "not_addressed"
+    # --- Targeted evidence hunt (item 1, regression fix b):
+    # claims still not_addressed get one hunt for the specific
+    # passage before they are abandoned. Promotion is strict:
+    # at least two judges must re-verdict supported against the
+    # enlarged evidence; the hunt never demotes.
+    if corp is not None:
+        hunt_idx = [i for i, c in enumerate(claims)
+                    if c["final"] == "not_addressed"
+                    and not c.get("meta")][:2]
+        for i in hunt_idx:
+            new = _hunt_evidence(corp, hits, claims[i], mechanisms)
+            if not new:
+                continue
+            claims[i]["hunt"] = new
+            verdicts = []
+            for eng in dict.fromkeys(
+                    [primary_engine] +
+                    ([second_engine] if second["available"] else [])):
+                rv = _second_verdicts(eng, question, hits,
+                                      [claims[i]], mech_block)
+                if rv["available"] and 0 in rv["verdicts"]:
+                    claims[i][eng] = rv["verdicts"][0]["verdict"]
+                    verdicts.append(rv["verdicts"][0]["verdict"])
+                    if rv["verdicts"][0]["note"]:
+                        claims[i]["notes"].append(
+                            rv["verdicts"][0]["note"])
+            if len(verdicts) >= 2 and all(
+                    v == "supported" for v in verdicts):
+                claims[i]["final"] = "supported"
+                claims[i]["notes"].append(
+                    "targeted retrieval found the passage; "
+                    "re-judged supported")
+    # Cache the trustworthy resolutions (S2): finals decided by
+    # two agreeing judges, a majority, or a Flash ruling.
+    for i, c in enumerate(claims):
+        if i in cached_idx or c.get("origin") == "conflict":
+            continue
+        vs = [c[k] for k in ("lite", "nim", "local") if c.get(k)]
+        trustworthy = bool(c.get("flash")) or len(set(vs)) == 1 \
+            and len(vs) >= 2
+        if trustworthy and c["final"]:
+            _verdict_cache_put(hits, c, c["final"])
+    # Keep the v14.2-era 'third' alias pointing at the NIM seat.
+    for c in claims:
+        c["third"] = c.get("nim")
+    # Meta claims (about the documents themselves) never sink
+    # an answer: the pass is computed over substantive claims.
+    substantive = [c for c in claims if not c.get("meta")]
+    passed = bool(substantive) and all(
+        c["final"] == "supported" for c in substantive)
     return {"mode": mode, "claims": claims, "flash_used": flash_used,
-            "pass": passed, "errors": errors,
-            "panel": _panel_info(judges, panel_ms, third_status,
-                                 third_error)}
-
+            "pass": passed, "errors": errors, "refute_ms": refute_ms,
+            "panel": _panel_info(judges, panel_ms, nim_status,
+                                 nim_error)}
 
 # --- v14: the escalation ladder ----------------------------------------------
 # Per answering unit (the whole question, or one part of a bundled
@@ -3222,6 +4122,13 @@ def _generate(engine, model, question, hits, instructions):
         if dg:
             label += " (downgraded: best Gemini unavailable)"
         return answer, prompt, label, dg, False
+    if engine in ("nim", "nimfast"):
+        # v15: NIM drafting seats (kimi-k3 / the fast tier). The
+        # served label names the NIM model honestly; callers own
+        # the fallback chains when this raises.
+        answer, prompt = nim_ask(model, question, hits,
+                                 instructions=instructions)
+        return answer, prompt, model + " (NIM API)", False, False
     try:
         answer, prompt = ollama_ask(model, question, hits,
                                     instructions=instructions)
@@ -3236,7 +4143,8 @@ def _generate(engine, model, question, hits, instructions):
                 False, True)
 
 
-def _build_objections(jr, mech_failures, ungrounded):
+def _build_objections(jr, mech_failures, ungrounded, uncited=(),
+                      quantities=(), required_points=(), conflicts=()):
     lines = ["CORRECTIONS REQUIRED: a previous draft of this answer "
              "failed verification. Fix every item below. Ground each "
              "claim in the excerpts or the verified figures, correct "
@@ -3248,11 +4156,100 @@ def _build_objections(jr, mech_failures, ungrounded):
         lines.append(f"- The figure {_fmt_money(v)} appears in none of "
                      "the excerpts or verified figures; do not use it.")
     for c in (jr or {}).get("claims", ()):
-        if c["final"] != "supported":
+        if c["final"] != "supported" and not c.get("meta"):
             note = ("; ".join(c["notes"][:2])) or "no source supports it"
             lines.append(f"- Claim judged {c['final']}: \"{c['text']}\" "
                          f"({note})")
+            for h in c.get("refutations") or ():
+                lines.append(
+                    "  Possibly contradicting source: "
+                    + (h.get("title") or "") + " — "
+                    + (h.get("excerpt") or "")[:300])
+    # v15 additions: uncited load-bearing sentences (item 3),
+    # quantity failures (item 5), divergence-required points
+    # (item 4), source conflicts to surface (item 6).
+    for s in uncited or ():
+        lines.append("- This factual sentence carries no citation "
+                     "and is unverified by construction: \"" + s +
+                     "\" — cite the excerpt it rests on with [n], "
+                     "correct it, or remove it.")
+    for f in quantities or ():
+        lines.append(f"- Quantity check failed: {f['label']} "
+                     "Correct the arithmetic.")
+    for p in required_points or ():
+        lines.append("- This point was established by the "
+                     "independent second draft and confirmed by "
+                     "the judges, but the current draft omits it: "
+                     "\"" + p + "\" — work it in accurately.")
+    for cf in conflicts or ():
+        lines.append(f"- The sources disagree on {cf['entry']}: "
+                     f"${cf['registry_value']:,.2f} (verified "
+                     f"registry) vs ${cf['corpus_value']:,.2f} "
+                     f"({cf['source'] or 'a retrieved source'}). "
+                     "State BOTH figures with where each comes "
+                     "from; do not present one as settled.")
     return "\n".join(lines)
+
+
+def _points_missing(points, draft):
+    """v15 (item 4): which divergence-required points a draft
+    fails to cover: every figure in the point must appear, and
+    at least half its content words must be present."""
+    low = (draft or "").lower()
+    low_flat = low.replace(",", "")
+    draft_toks = set(re.findall(r"[a-z]{4,}", low))
+    missing = []
+    for p in points or ():
+        nums = re.findall(r"\d[\d,]*\.?\d*", p)
+        num_ok = all(n.replace(",", "") in low_flat for n in nums)
+        toks = {w for w in re.findall(r"[a-z]{4,}", p.lower())
+                if w not in STOP}
+        overlap = (len(toks & draft_toks) / len(toks)) if toks else 1.0
+        if not (num_ok and overlap >= 0.5):
+            missing.append(p)
+    return missing
+
+
+def _assemble_capped_partial(draft, jr, question, hits,
+                             allowed_extra):
+    """v15 (the 600s cap): build a Partial ONLY from sentences
+    of the last judged draft that no failed claim touches, then
+    re-run the figure checker on the assembly. Returns the
+    text, or None when nothing verified survives (the caller
+    then IDKs; the cap never ships unverified material)."""
+    failed = [c for c in (jr or {}).get("claims", ())
+              if c["final"] != "supported" and not c.get("meta")]
+    kept = []
+    for s in _split_sentences(draft):
+        if s.lower().startswith("confidence:"):
+            continue
+        stoks = set(re.findall(r"[a-z0-9]{3,}", s.lower()))
+        bad = False
+        for c in failed:
+            ctoks = set(re.findall(r"[a-z0-9]{3,}", c["text"].lower()))
+            if ctoks and len(stoks & ctoks) / max(
+                    1, min(len(stoks), len(ctoks))) >= 0.6:
+                bad = True
+                break
+            ns, nc = _norm_claim_text(s), _norm_claim_text(c["text"])
+            if ns[:40] and (ns[:40] in nc or nc[:40] in ns):
+                bad = True
+                break
+        if not bad:
+            kept.append(s)
+    for _pass in range(3):
+        if not kept:
+            return None
+        text = " ".join(kept)
+        _a, ung = _check_figures(text, question, hits,
+                                 extra_allowed=allowed_extra)
+        if not ung:
+            return text
+        bad_toks = {str(v).replace(",", "") for v in ung}
+        kept = [s for s in kept
+                if not (set(re.findall(r"\d[\d,]*\.?\d*", s))
+                        & bad_toks)]
+    return None
 
 
 def _run_unit(ctx):
@@ -3261,9 +4258,13 @@ def _run_unit(ctx):
     answers), hits, engine ('local'|'gemini'), draft_model,
     instructions (base prompt additions), mechanisms, allowed_extra
     (figure-checker allowed values), csra_comp, hard (bool).
+    v15 ctx additions: corp (for refutation/hunt retrieval),
+    deadline (monotonic cap), diverge (item 4 eligibility),
+    explicit_model (an API caller's own model pick, never
+    overridden by NIM drafting).
     Returns the unit record: {answer (None when IDK), badge, served,
     fallback, downgraded, judging, claims, figure_check, rungs,
-    judge_ms, missing, gate, prompt}."""
+    judge_ms, refute_ms, cap_hit, missing, gate, prompt}."""
     reg_block = _registry_block(ctx.get("registry_entries") or ())
     mech_only = _mechanism_block(ctx["mechanisms"])
     # Judges see the registry + mechanism blocks. Drafters get the
@@ -3275,36 +4276,95 @@ def _run_unit(ctx):
     if not ctx.get("reg_in_instructions") and reg_block:
         draft_extra = "\n\n".join(x for x in (reg_block, mech_only)
                                   if x)
+    hard = bool(ctx.get("hard"))
+    deadline = ctx.get("deadline")
+    diverge = bool(ctx.get("diverge")) and ctx["engine"] == "local" \
+        and not ctx.get("explicit_model")
+    conflicts = _conflict_scan(ctx["hits"])
     draft = None
     jr = None
     mech_failures, ungrounded = [], []
+    quantities = []
+    uncited_lb = []
     judge_ms = 0
+    refute_ms = 0
     rungs = 0
     objections = ""
     gen_error = None
+    cap_hit = False
+    judged_draft = None       # last draft that went through judging
+    required_points = []      # item 4: confirmed B-only points
+    missing_points = []
+    divergence = None
+
+    def _draft_choice(rung):
+        """(engine, model) for one generation attempt. v15: the
+        local path drafts on NIM (hard: kimi-k3; simple: the fast
+        tier; redrafts: kimi-k3) unless the caller explicitly
+        picked a model. Gemini units are unchanged."""
+        if ctx["engine"] == "gemini" or ctx.get("explicit_model"):
+            if rung > 0 and ctx["engine"] == "local":
+                return "local", ROUTED_MODEL  # v14 redraft rule
+            return ctx["engine"], ctx["draft_model"]
+        if rung == 0 and not hard:
+            return "nimfast", DRAFTER_SIMPLE_MODEL
+        return "nim", DRAFTER_MODEL
+
+    def _try_generate(engine, model, instr):
+        """Generate with the v15 fallback chains: a dead NIM seat
+        never fails an ask (hard falls to the demoted 14B,
+        simple to the 9B, whose own fallback _generate owns)."""
+        try:
+            return _generate(engine, model, ctx["unit_q"],
+                             ctx["hits"], instr)
+        except Exception:
+            if engine in ("nim", "nimfast"):
+                if engine == "nim" or hard:
+                    _unload_others(ROUTED_MODEL)
+                    return _generate("local", ROUTED_MODEL,
+                                     ctx["unit_q"], ctx["hits"],
+                                     instr)
+                return _generate("local", LOCAL_MODEL,
+                                 ctx["unit_q"], ctx["hits"], instr)
+            raise
+
     for rung in range(3):  # draft + two redrafts (James's decision)
+        if deadline and time.monotonic() > deadline:
+            cap_hit = True
+            break
         rungs = rung + 1
-        if rung == 0:
-            use_model = ctx["draft_model"]
-        elif ctx["engine"] == "local":
-            use_model = ROUTED_MODEL  # redrafts are the 14B's job
-            if ctx["draft_model"] != ROUTED_MODEL:
-                _unload_others(ROUTED_MODEL)
-        else:
-            use_model = ctx["draft_model"]
+        _set_stage("drafting" if rung == 0
+                   else f"redrafting (round {rung + 1})")
         instr = ctx["instructions"]
         if draft_extra:
             instr = (instr + "\n\n" + draft_extra).strip()
+        instr = (instr + "\n\n" + CITATION_CONTRACT).strip()
         if objections:
             instr = (instr + "\n\n" + objections).strip()
+        eng, mdl = _draft_choice(rung)
+        draft_b_text = None
         try:
-            draft, prompt, served, dg, fb = _generate(
-                ctx["engine"], use_model, ctx["unit_q"], ctx["hits"],
-                instr)
+            if rung == 0 and diverge:
+                # Item 4: the independent second draft (local 14B
+                # as oracle) generates in parallel with draft A.
+                _unload_others(ROUTED_MODEL)
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    fa = pool.submit(_try_generate, eng, mdl, instr)
+                    fb = pool.submit(_generate, "local", ROUTED_MODEL,
+                                     ctx["unit_q"], ctx["hits"],
+                                     instr)
+                    res = fa.result()
+                    try:
+                        draft_b_text = fb.result()[0]
+                    except Exception:
+                        draft_b_text = None
+            else:
+                res = _try_generate(eng, mdl, instr)
         except Exception as e:
             gen_error = str(e)[:200]
             draft = None
             break
+        draft, prompt, served, dg, fb = res
         ctx["_served"], ctx["_dg"], ctx["_fb"] = served, dg, fb
         ctx["_prompt"] = prompt
         _a, ungrounded = _check_figures(
@@ -3312,34 +4372,106 @@ def _run_unit(ctx):
             extra_allowed=ctx["allowed_extra"])
         mech_failures = _mech_required_failures(
             draft, ctx["mechanisms"], ctx.get("csra_comp"))
-        if ctx["engine"] == "local" and use_model == LOCAL_MODEL:
-            # The second judge is the 14B; do not load it alongside a
-            # resident 9B (the v12 bake-off 500s). The 9B reloads on
-            # the next ask that needs it. (v14.1: _judge_round's
-            # warm-up now does this on every path; this early unload
-            # still frees the VRAM sooner on the local-draft path.)
+        quantities = _check_quantities(draft, ctx["question"])
+        parsed = _parse_citations(draft, ctx["hits"])
+        uncited_lb = parsed["uncited_lb"]
+        c_claims, c_forced = _conflict_claims(conflicts, draft)
+        extra_claims = parsed["cited_claims"] + c_claims
+        if served and served.startswith(LOCAL_MODEL):
+            # A resident 9B draft is done; free its VRAM before
+            # judging in case a local fallback seat is needed.
             _unload_others(ROUTED_MODEL)
+        _set_stage(f"judging round {rung + 1}")
         jt0 = time.monotonic()
         jr = _judge_round(ctx["unit_q"], ctx["hits"], draft,
-                          ctx["hard"], judge_block)
+                          hard, judge_block, corp=ctx.get("corp"),
+                          mechanisms=ctx["mechanisms"],
+                          extra_claims=extra_claims)
         judge_ms += int((time.monotonic() - jt0) * 1000)
+        refute_ms += jr.get("refute_ms", 0)
+        judged_draft = draft
+        if c_forced:
+            for c in jr["claims"]:
+                if c.get("origin") == "conflict" \
+                        and c["text"] in c_forced:
+                    c["final"] = "contradicted"
+            jr["pass"] = bool(jr["claims"]) and all(
+                c["final"] == "supported" for c in jr["claims"]
+                if not c.get("meta"))
+        if rung == 0 and diverge and draft_b_text:
+            # Divergence mapping: B-only load-bearing claims the
+            # NIM extractor confirms become required points the
+            # final draft must cover; contested overlaps are
+            # recorded (their A-side claims already went through
+            # refutation as load-bearing claims).
+            bj = _primary_judgment("nim", ctx["unit_q"],
+                                   ctx["hits"], draft_b_text,
+                                   judge_block)
+            if bj["available"]:
+                a_toks = [{w for w in re.findall(
+                    r"[a-z]{4,}", c["text"].lower()) if w not in STOP}
+                    for c in jr["claims"]]
+                points, contested = [], []
+                for bc in bj["claims"]:
+                    if not bc["load_bearing"] \
+                            or bc["verdict"] != "supported":
+                        continue
+                    btoks = {w for w in re.findall(
+                        r"[a-z]{4,}", bc["text"].lower())
+                        if w not in STOP}
+                    best = max((len(btoks & at) / max(1, len(btoks))
+                                for at in a_toks), default=0.0)
+                    if best < 0.5:
+                        points.append(bc["text"])
+                for c in jr["claims"]:
+                    if c["final"] == "supported":
+                        continue
+                    ctoks = {w for w in re.findall(
+                        r"[a-z]{4,}", c["text"].lower())
+                        if w not in STOP}
+                    for bc in bj["claims"]:
+                        btoks = {w for w in re.findall(
+                            r"[a-z]{4,}", bc["text"].lower())
+                            if w not in STOP}
+                        if ctoks and len(ctoks & btoks) / max(
+                                1, len(ctoks)) >= 0.3:
+                            contested.append(c["text"])
+                            break
+                required_points = points
+                divergence = {"b_claims": len(bj["claims"]),
+                              "required_points": points,
+                              "contested": contested}
+        missing_points = _points_missing(required_points, draft)
         if jr["mode"] == "none":
             break  # no judge can run: redrafting blind helps nothing
-        if jr["pass"] and not ungrounded and not mech_failures:
+        if jr["pass"] and not ungrounded and not mech_failures \
+                and not quantities and not uncited_lb \
+                and not missing_points:
             break  # every gate passed: ship this draft
-        objections = _build_objections(jr, mech_failures, ungrounded)
+        objections = _build_objections(
+            jr, mech_failures, ungrounded, uncited_lb, quantities,
+            missing_points,
+            conflicts if any(c.get("origin") == "conflict"
+                             and c["final"] != "supported"
+                             for c in jr["claims"]) else ())
         draft = None if rung < 2 else draft
     shipped = False
     if draft is not None and jr is not None and jr["mode"] != "none":
-        if jr["pass"] and not ungrounded and not mech_failures:
+        if jr["pass"] and not ungrounded and not mech_failures \
+                and not quantities and not uncited_lb \
+                and not missing_points:
             shipped = True
+        elif deadline and time.monotonic() > deadline:
+            cap_hit = True  # no budget left for the final ruling
         else:
             # Final rung (plan section 5): Flash rules once on the
             # last draft's failed claims; its ruling is final.
             failed = [i for i, c in enumerate(jr["claims"])
                       if c["final"] != "supported"
-                      and c["flash"] is None]
-            if failed and not ungrounded and not mech_failures:
+                      and c["flash"] is None and not c.get("meta")]
+            if failed and not ungrounded and not mech_failures \
+                    and not quantities and not uncited_lb \
+                    and not missing_points:
                 rulings = _flash_arbitrate(ctx["unit_q"], ctx["hits"],
                                            jr["claims"], failed)
                 if rulings:
@@ -3348,15 +4480,18 @@ def _run_unit(ctx):
                     for idx, verdict in rulings.items():
                         jr["claims"][idx]["flash"] = verdict
                         jr["claims"][idx]["final"] = verdict
-                    jr["pass"] = all(c["final"] == "supported"
-                                     for c in jr["claims"])
+                    jr["pass"] = all(
+                        c["final"] == "supported" for c in jr["claims"]
+                        if not c.get("meta"))
                     shipped = jr["pass"]
     base = {"served": ctx.get("_served"), "fallback": ctx.get("_fb", False),
             "downgraded": ctx.get("_dg", False),
             "prompt": ctx.get("_prompt", ""), "rungs": rungs,
-            "judge_ms": judge_ms,
+            "judge_ms": judge_ms, "refute_ms": refute_ms,
+            "cap_hit": cap_hit,
             "figure_check": {"ungrounded": list(ungrounded),
-                             "regenerated": rungs > 1}}
+                             "regenerated": rungs > 1},
+            "divergence": divergence}
     if shipped:
         answer, _fixes = _check_arithmetic(draft)
         badge = "verified" if jr["mode"] in ("dual", "arbitrated",
@@ -3368,8 +4503,37 @@ def _run_unit(ctx):
                              "errors": jr["errors"],
                              "panel": jr.get("panel")},
                     claims=jr["claims"], missing=[], gate=None)
+    if cap_hit and judged_draft is not None and jr is not None \
+            and jr["mode"] != "none":
+        # The cap stopped the ladder: ship ONLY the claims the
+        # panel already verified, as a Partial.
+        assembled = _assemble_capped_partial(
+            judged_draft, jr, ctx["question"], ctx["hits"],
+            ctx["allowed_extra"])
+        if assembled:
+            badge = "partial" if jr["mode"] in (
+                "dual", "arbitrated", "panel") else "partial_single"
+            cut = [c["text"] for c in jr["claims"]
+                   if c["final"] != "supported" and not c.get("meta")]
+            return dict(base, answer=assembled, badge=badge,
+                        judging={"mode": jr["mode"],
+                                 "flash_used": jr["flash_used"],
+                                 "errors": jr["errors"],
+                                 "panel": jr.get("panel")},
+                        claims=jr["claims"],
+                        missing=["the ask reached its time budget "
+                                 f"({ASK_TIME_CAP_S} seconds); only "
+                                 "panel-verified claims are shown",
+                                 *[f"not verified in time: \"{t}\""
+                                   for t in cut[:4]]],
+                        gate=None)
     # IDK: assemble what is missing from the failed gates.
     missing, gate = [], "judging"
+    if cap_hit:
+        gate = "time"
+        missing.append("the ask reached its time budget "
+                       f"({ASK_TIME_CAP_S} seconds) before a "
+                       "verified answer could be assembled")
     if gen_error:
         missing.append("the answering model could not run "
                        f"({gen_error})")
@@ -3378,19 +4542,27 @@ def _run_unit(ctx):
                        "(" + "; ".join(jr["errors"]) + ")")
     for f in mech_failures:
         missing.append("the answer did not establish: " + f["label"])
+    for f in quantities:
+        missing.append("quantity check failed: " + f["label"])
+    if uncited_lb:
+        missing.append("factual sentences carried no citation: "
+                       + "; ".join(f"\"{s[:120]}\"" for s in
+                                   uncited_lb[:3]))
     if ungrounded:
         missing.append("the draft used figures found in none of the "
                        "excerpts: " + ", ".join(
                            _fmt_money(v) for v in ungrounded[:4]))
     if jr is not None:
         for c in jr["claims"]:
-            if c["final"] != "supported":
+            if c["final"] != "supported" and not c.get("meta"):
                 missing.append(f"unverified claim: \"{c['text']}\" "
                                f"(judged {c['final']})")
                 if c["final"] == "not_addressed":
                     gate = "grounding"
                 if c["flash"] is not None:
                     gate = "arbitration"
+    if cap_hit:
+        gate = "time"
     return dict(base, answer=None, badge="idk",
                 judging={"mode": (jr or {}).get("mode", "none"),
                          "flash_used": (jr or {}).get("flash_used", False),
@@ -3398,8 +4570,6 @@ def _run_unit(ctx):
                          "panel": (jr or {}).get("panel")},
                 claims=(jr or {}).get("claims", []),
                 missing=missing[:8], gate=gate)
-
-
 def _idk_answer(missing, hits, lead):
     """The full IDK payload (James's decision): a plain refusal, what
     is missing, and the closest excerpts, inline."""
@@ -3546,13 +4716,40 @@ async function ask(){
   btn.disabled = true;
   document.getElementById('spin').style.display = 'block';
   document.getElementById('answer').style.display = 'none';
+  const spin = document.getElementById('spin');
   try{
-    const r = await fetch('/ask', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({question:q, model:model, corpus:corpus, fresh:document.getElementById('fresh').checked})
-    });
-    const d = await r.json();
+    // v15: job-based flow — submit the ask as a job and poll for
+    // the result, showing the server's live stage. Falls back to
+    // the synchronous request if job submission fails.
+    const payload = {question:q, model:model, corpus:corpus, fresh:document.getElementById('fresh').checked};
+    let d = null;
+    try{
+      const r0 = await fetch('/ask?async=1', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      const j0 = await r0.json();
+      if(!j0.job_id) throw new Error('no job id');
+      spin.textContent = 'Working: ' + (j0.stage || 'retrieving') + '...';
+      for(let i = 0; i < 400 && !d; i++){
+        await new Promise(res => setTimeout(res, 2000));
+        const rp = await fetch('/ask/result/' + j0.job_id);
+        const jp = await rp.json();
+        if(jp.status === 'done'){ d = jp.result; }
+        else if(jp.status === 'error'){ throw new Error(jp.error || 'job failed'); }
+        else { spin.textContent = 'Working: ' + (jp.stage || 'retrieving') + '...'; }
+      }
+      if(!d) throw new Error('timed out waiting for the answer');
+    }catch(jobErr){
+      if(d) throw jobErr;
+      const r = await fetch('/ask', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      d = await r.json();
+    }
     document.getElementById('answerText').textContent = d.answer || ('Error: ' + (d.error||'unknown'));
     const badgeMap = {
       verified: ['ok', 'Verified'],
@@ -3567,8 +4764,8 @@ async function ask(){
     const vn = document.getElementById('verifyNote');
     if(d.judging){
       let note = 'Verification: ' + d.judging.mode;
-      if(d.judging.panel && (d.judging.panel.judges||[]).length >= 3)
-        note += ' · 3 judges';
+      if(d.judging.panel && (d.judging.panel.judges||[]).length)
+        note += ' · ' + d.judging.panel.judges.length + ' judge(s)';
       if(d.judging.flash_used) note += ' · Flash arbitration used';
       if(d.timing && d.timing.rungs) note += ' · ' + d.timing.rungs + ' ladder rung(s)';
       vn.textContent = note;
@@ -3616,6 +4813,50 @@ loadModels();
 """
 
 
+def _run_job(rec, raw_body, headers):
+    """v15 (S5): run one async ask job. The synchronous do_POST
+    logic executes on a capture shim (the async flag stripped
+    first), so a completed job's payload is EXACTLY the
+    synchronous /ask response; the stage thread-local points at
+    this job's record so the pipeline's stage updates land
+    here."""
+    _STAGE_TLS.job = rec
+    try:
+        payload = json.loads(raw_body)
+        if isinstance(payload, dict):
+            payload.pop("async", None)
+            raw_body = json.dumps(payload).encode()
+    except Exception:
+        pass
+    shim = type("_JobShim", (), {})()
+    shim.headers = headers
+    shim.rfile = io.BytesIO(raw_body)
+    shim.path = "/ask"
+    shim.wfile = io.BytesIO()
+    captured = {}
+
+    def _cap(obj, code=200):
+        captured["obj"] = obj
+        captured["code"] = code
+
+    shim._json = _cap
+    shim.send_response = lambda *a, **k: None
+    shim.send_header = lambda *a, **k: None
+    shim.end_headers = lambda *a, **k: None
+    shim.log_message = lambda *a: None
+    try:
+        Handler.do_POST(shim)
+        rec["result"] = captured.get("obj")
+        code = captured.get("code", 200)
+        rec["status"] = "done" if code < 400 else "error"
+        if rec["status"] == "error":
+            rec["error"] = str(captured.get("obj"))[:300]
+    except Exception as e:
+        rec["status"] = "error"
+        rec["error"] = str(e)[:300]
+    rec["stage"] = "done"
+
+
 class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode()
@@ -3644,6 +4885,20 @@ class Handler(BaseHTTPRequestHandler):
             # v14: the gap log (IDKs, abstained parts, failed gates)
             # for the monthly rescrape watchlist and registry growth.
             self._json({"gaps": _read_gaps()})
+        elif u.path.startswith("/ask/result/"):
+            # v15 (S5): poll an async ask job: live stage while it
+            # runs, the exact /ask payload when it completes.
+            job = _job_get(u.path.rsplit("/", 1)[-1])
+            if job is None:
+                self._json({"error": "unknown job"}, 404)
+            else:
+                out = {"job_id": job["id"], "status": job["status"],
+                       "stage": job["stage"]}
+                if job["status"] == "done":
+                    out["result"] = job["result"]
+                elif job["status"] == "error":
+                    out["error"] = job["error"]
+                self._json(out)
         elif u.path == "/models":
             # Q&A dropdown is deliberately limited to the 9b local model
             # plus Gemini (James's call, 2026-10-12); Ollama may host many
@@ -3693,7 +4948,21 @@ class Handler(BaseHTTPRequestHandler):
             if length > MAX_BODY:
                 self._json({"error": f"request too large (max {MAX_BODY} bytes)"}, 413)
                 return
-            req = json.loads(self.rfile.read(length))
+            raw = self.rfile.read(length)
+            req = json.loads(raw)
+            # v15 (S5): the async job path (POST /ask?async=1 or
+            # "async": true in the body). The job runs the SAME
+            # synchronous logic on a capture shim; callers poll
+            # GET /ask/result/<id>. Sync callers are untouched.
+            if parse_qs(u.query).get("async") or req.get("async"):
+                rec = _job_create()
+                threading.Thread(target=_run_job,
+                                 args=(rec, raw, self.headers),
+                                 daemon=True).start()
+                self._json({"job_id": rec["id"],
+                            "status": "running",
+                            "stage": rec["stage"]}, 202)
+                return
             question = req.get("question", "").strip()
             model = req.get("model", "").strip()
             corpus_name = req.get("corpus", "in")
@@ -3705,6 +4974,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "empty question"}, 400)
                 return
             t_start = time.monotonic()
+            _set_stage("retrieving")
+            # v15: the per-ask wall-clock cap (config
+            # ASK_TIME_CAP_S); the ladder and the units loop
+            # consult this deadline and never ship unverified.
+            deadline = t_start + ASK_TIME_CAP_S
             # Determine if using Gemini or local Ollama
             use_gemini = model.startswith("gemini")
             # v13: fresh/nocache (JSON body or query string) skips the
@@ -3804,7 +5078,8 @@ class Handler(BaseHTTPRequestHandler):
 
             def _respond(answer_text, badge, judging, verification,
                          figure_check, served, fallback, downgraded,
-                         full_prompt, rungs, judge_ms):
+                         full_prompt, rungs, judge_ms, refute_ms=0,
+                         cap_hit=False):
                 t_end = time.monotonic()
                 timing = {"retrieve_ms": int((t_retrieved - t_start)
                                              * 1000),
@@ -3812,7 +5087,8 @@ class Handler(BaseHTTPRequestHandler):
                                              * 1000),
                           "total_ms": int((t_end - t_start) * 1000),
                           "sufficiency_ms": sufficiency_ms,
-                          "judge_ms": judge_ms, "rungs": rungs}
+                          "judge_ms": judge_ms, "rungs": rungs,
+                          "refute_ms": refute_ms, "cap_hit": cap_hit}
                 print(f"[ask] served={served} route={route_reason or '-'} "
                       f"reg={[e['id'] for e in registry_entries]} "
                       f"badge={badge} judging={judging.get('mode')} "
@@ -3963,8 +5239,41 @@ class Handler(BaseHTTPRequestHandler):
                        "allowed_extra": spec["allowed_extra"],
                        "hard": hard,
                        "reg_in_instructions":
-                           spec["reg_in_instructions"]}
-                unit = _run_unit(ctx)
+                           spec["reg_in_instructions"],
+                       # v15: corpus for refutation/hunt retrieval,
+                       # the ask deadline, divergence eligibility
+                       # (single-unit asks only, never per-part),
+                       # and the explicit-model guard.
+                       "corp": corp, "deadline": deadline,
+                       "diverge": spec["part"] is None
+                       and not discovery,
+                       "explicit_model": bool(
+                           model and not use_gemini
+                           and model != LOCAL_MODEL)}
+                if time.monotonic() > deadline:
+                    # Cap reached between parts: this part is an
+                    # IDK with a time gate, never a rushed answer.
+                    unit = {
+                        "answer": None, "badge": "idk", "served": None,
+                        "fallback": False, "downgraded": False,
+                        "prompt": "", "rungs": 0, "judge_ms": 0,
+                        "refute_ms": 0, "cap_hit": True,
+                        "figure_check": {"ungrounded": [],
+                                         "regenerated": False},
+                        "judging": {"mode": "none",
+                                    "flash_used": False,
+                                    "errors": ["ask time cap "
+                                               "reached before "
+                                               "this part ran"],
+                                    "panel": no_judging["panel"]},
+                        "claims": [],
+                        "missing": ["the ask reached its time "
+                                    f"budget ({ASK_TIME_CAP_S} "
+                                    "seconds) before this part "
+                                    "could be verified"],
+                        "gate": "time", "divergence": None}
+                else:
+                    unit = _run_unit(ctx)
                 unit["part"] = spec["part"]
                 unit["hits"] = spec["hits"]
                 units.append(unit)
@@ -3972,6 +5281,17 @@ class Handler(BaseHTTPRequestHandler):
                     log_gap(question, "idk", unit["gate"] or "judging",
                             unit["missing"], part=spec["part"])
                     n_gaps += 1
+                # v15 (item 1): claims killed by retrieved
+                # contradictions feed the growth loop too.
+                for c in unit.get("claims", ()):
+                    if c.get("refutations") \
+                            and c["final"] != "supported":
+                        log_gap(question, unit["badge"], "refutation",
+                                [f"claim judged {c['final']} after "
+                                 f"refutation retrieval: "
+                                 f"\"{c['text']}\""],
+                                part=spec["part"])
+                        n_gaps += 1
             # --- assembly + badges ----------------------------------
             if len(units) == 1:
                 u = units[0]
@@ -4052,14 +5372,24 @@ class Handler(BaseHTTPRequestHandler):
                                "provider": THIRD_JUDGE_PROVIDER,
                                "model": THIRD_JUDGE_MODEL,
                                "status": third_status},
-                           "third_calls_today": _third_calls_today()}}
+                           "third_calls_today": _third_calls_today(),
+                           "cached_claims": sum(
+                               (u["judging"].get("panel") or {})
+                               .get("cached_claims", 0)
+                               for u in units),
+                           "refuted_claims": sum(
+                               (u["judging"].get("panel") or {})
+                               .get("refuted_claims", 0)
+                               for u in units)}}
             verification = [{
                 "part": u["part"], "badge": u["badge"],
                 "claims": len(u["claims"]),
                 "failed_claims": [c["text"] for c in u["claims"]
-                                  if c["final"] != "supported"],
+                                  if c["final"] != "supported"
+                                  and not c.get("meta")],
                 "gate": u["gate"], "rungs": u["rungs"],
-                "judging_mode": u["judging"]["mode"]} for u in units]
+                "judging_mode": u["judging"]["mode"],
+                "divergence": u.get("divergence")} for u in units]
             figure_check = {
                 "ungrounded": sorted({v for u in units
                                       for v in
@@ -4082,7 +5412,10 @@ class Handler(BaseHTTPRequestHandler):
                      any(u["downgraded"] for u in units),
                      units[0]["prompt"] if units else "",
                      max((u["rungs"] for u in units), default=0),
-                     sum(u["judge_ms"] for u in units))
+                     sum(u["judge_ms"] for u in units),
+                     refute_ms=sum(u.get("refute_ms", 0)
+                                   for u in units),
+                     cap_hit=any(u.get("cap_hit") for u in units))
         except Exception as e:
             self._json({"error": str(e)[:300]}, 500)
 
