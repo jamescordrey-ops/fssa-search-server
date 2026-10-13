@@ -19,11 +19,28 @@ bundled-question decomposition also drives the prompt's part list; hard
 questions asked of the local default route to qwen3:14b (9B unloaded
 first, 9B fallback on error); /ask accepts fresh/nocache to bypass the
 answer cache for manual retests. See v13/PLAN.md.
+
+v14 (2026-10-13): verification-first pipeline, "no unverified answer
+ships" (see v14/PLAN.md). Every /ask ends VERIFIED, PARTIAL (verified
+parts + inline IDK parts), or IDK. Adds: a retrieval sufficiency gate
+keyed to a mechanism registry (the v13 figures registry grown into
+mechanisms with required elements checked in code; QIT/Miller trust
+seeded from manual test #1); claim-level grounding (claims extracted
+and judged claim-by-claim, extending the figure checker to rules);
+dual judging (Gemini Lite primary, local qwen3:14b second, both must
+pass) with Gemini Flash arbitration on disagreements (budgeted);
+an escalation ladder (draft, judge, two 14B redrafts with the judges'
+objections attached, Flash, IDK); Verified/Partial/IDK badges in the
+API metadata and the webapp, with a visibly different badge when only
+one judge could run (degraded); and a JSONL gap log (gap_log.jsonl,
+GET /gaps) feeding the monthly rescrape and registry growth. Gemini
+down degrades to local judging, never to unverified answers.
 """
 import json
 import os
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 import urllib.error
@@ -322,6 +339,20 @@ _TOPIC_BRIDGES = (
     ({"able"}, ("able account", "stable account"),
      (("able account resources excluded medicaid ssi", "able"),),
      None, ()),
+    # v14: over-the-income-cap questions are governed by the Qualified
+    # Income Trust (Miller trust). The vocabulary ("qualified income
+    # trust") shares almost no words with how the question is asked, so
+    # without this pin the QIT material never surfaces and the model
+    # improvises around the hole (manual test #1, 2026-10-13).
+    (set(), ("over the income limit", "over the limit", "income cap",
+             "over the medicaid income limit", "over the medicaid limit",
+             "is over the income limit", "miller trust",
+             "qualified income trust"),
+     (("qualified income trust medicaid eligibility",
+       "qualified income trust"),
+      ("miller trust income limit medicaid", "miller trust")),
+     None, ({"medicaid", "waiver"}, ("nursing home", "long-term care",
+                                     "long term care"))),
 )
 
 US_STATES = (
@@ -1709,23 +1740,26 @@ VERIFIED_FIGURES = [
 ]
 
 
+def _groups_hit(groups, q_low, q_tokens):
+    """True when EVERY trigger group hits: a group hits when any of its
+    word tokens or substring phrases appears in the question. Shared by
+    the figures registry and the v14 mechanism registry so the two can
+    never drift apart."""
+    for group in groups:
+        if q_tokens & group.get("tokens", set()):
+            continue
+        if any(p in q_low for p in group.get("phrases", ())):
+            continue
+        return False
+    return True
+
+
 def _registry_matches(question):
     """Registry entries whose trigger groups all hit on the question."""
     q_low = (question or "").lower()
     q_tokens = set(re.findall(r"[a-z]+", q_low))
-    matched = []
-    for entry in VERIFIED_FIGURES:
-        fires = True
-        for group in entry["groups"]:
-            if q_tokens & group.get("tokens", set()):
-                continue
-            if any(p in q_low for p in group.get("phrases", ())):
-                continue
-            fires = False
-            break
-        if fires:
-            matched.append(entry)
-    return matched
+    return [e for e in VERIFIED_FIGURES
+            if _groups_hit(e["groups"], q_low, q_tokens)]
 
 
 def _registry_block(entries):
@@ -1802,6 +1836,280 @@ def _csra_block(comp):
     return txt + ". Use this figure; do not recompute it differently."
 
 
+# --- v14: mechanism registry ----------------------------------------------
+# The v13 figures registry grown into mechanisms: a question shape, the
+# governing answer mechanism, and the elements a complete answer MUST
+# contain, checked in code the same way v13 checks figures. An answer
+# that omits the mechanism (or uses a forbidden substitute) fails the
+# gate no matter how fluent it is. Detection reuses the registry's
+# trigger-group format and _groups_hit, so the layers cannot drift.
+# Growth rule (plan section 2): every graded failure and every IDK is
+# a candidate entry, written up here with its required elements.
+MECHANISMS = [
+    {
+        "id": "qit_over_cap",
+        "title": "Qualified Income Trust (Miller trust)",
+        "groups": [
+            {"tokens": set(),
+             "phrases": ("over the income limit", "over the limit",
+                         "above the income limit",
+                         "exceeds the income limit",
+                         "exceeds the limit", "income cap",
+                         "over the cap", "miller trust",
+                         "qualified income trust",
+                         "over the medicaid income limit",
+                         "over the medicaid limit",
+                         "above the medicaid income limit",
+                         "exceeds the medicaid income limit",
+                         "is over the income limit",
+                         "income is too high", "too much income")},
+            {"tokens": {"medicaid", "waiver"},
+             "phrases": ("nursing home", "long-term care",
+                         "long term care")},
+        ],
+        "required": [
+            {"label": "names the Qualified Income Trust (Miller trust)",
+             "any": ("qualified income trust", "miller trust",
+                     "income trust", "qit")},
+            {"label": "says the excess income is deposited into the "
+                      "trust (monthly)",
+             "any": ("deposit", "goes into the trust",
+                     "placed in the trust", "paid into the trust",
+                     "put into the trust", "into the trust each month",
+                     "excess income")},
+        ],
+        "forbidden": (),
+        "prompt": (
+            "For income over the Medicaid cap, the governing mechanism "
+            "is a Qualified Income Trust (Miller trust): the excess "
+            "income is deposited to the trust each month, and that is "
+            "what makes the person eligible. Do NOT substitute spousal "
+            "impoverishment or a cost-sharing program for the trust; "
+            "mention them, if at all, only as separate topics."),
+        "sufficiency_terms": ("qualified income trust", "miller trust",
+                              "income trust"),
+        "retry_query": "qualified income trust medicaid eligibility",
+        "missing": ("no excerpt covers a Qualified Income Trust "
+                    "(Miller trust), the mechanism that lets someone "
+                    "over the Medicaid income cap qualify"),
+    },
+    {
+        "id": "backpay_nine_months",
+        "title": "Retroactive benefits: nine-month exclusion",
+        "groups": [
+            {"tokens": {"backpay"},
+             "phrases": ("back pay", "lump sum", "lump-sum",
+                         "retroactive benefit", "retroactive ssi",
+                         "retroactive social security",
+                         "retroactive payment", "past-due",
+                         "past due")},
+        ],
+        "required": [
+            {"label": "states the nine-month exclusion for retroactive "
+                      "benefits",
+             "any": ("nine months", "nine-month", "9 months",
+                     "9-month")},
+        ],
+        "forbidden": ("excluded for six months", "excluded for 6 months",
+                      "excluded for six-month"),
+        "prompt": (
+            "Retroactive benefits are excluded from resources for "
+            "NINE months; the six-month figure in representative-payee "
+            "material is not the exclusion and must not be given as "
+            "the answer."),
+        "sufficiency_terms": ("nine months", "nine-month", "9 months"),
+        "retry_query": "retroactive SSI Social Security benefits "
+                       "excluded nine months",
+        "missing": ("no excerpt states the nine-month exclusion for "
+                    "retroactive SSI/Social Security benefits"),
+    },
+    {
+        "id": "snap_lump_sum",
+        "title": "SNAP lump sum: not income, resource in the month "
+                 "received, Indiana $5,000 limit",
+        "groups": [
+            {"tokens": {"snap"},
+             "phrases": ("food stamps", "food assistance")},
+            {"tokens": {"lump", "resource", "resources", "limit"},
+             "phrases": ("lump sum", "lump-sum", "back payment",
+                         "back-payment", "resource limit")},
+        ],
+        "required": [
+            {"label": "says the lump sum is not counted as SNAP income",
+             "any": ("not income", "excluded from income",
+                     "does not count as income",
+                     "not counted as income", "excluded as income")},
+            {"label": "states the Indiana SNAP resource limit of "
+                      "$5,000",
+             "any": ("$5,000", "5,000")},
+        ],
+        "forbidden": (),
+        "prompt": (
+            "A nonrecurring lump sum / back payment is excluded from "
+            "SNAP income and counts as a resource only in the month "
+            "received; the Indiana SNAP resource limit under BBCE is "
+            "$5,000 (the $3,000 federal figure is not the Indiana "
+            "limit)."),
+        "sufficiency_terms": ("$5,000", "broad-based categorical",
+                              "bbce"),
+        "retry_query": "Indiana SNAP resource limit broad-based "
+                       "categorical eligibility 5000",
+        "missing": ("no excerpt states the Indiana SNAP resource "
+                    "limit ($5,000 under BBCE)"),
+    },
+    {
+        "id": "csra_half_clamp",
+        "title": "CSRA: half of combined countable assets, clamped",
+        "groups": [
+            {"tokens": set(),
+             "phrases": ("community spouse", "csra",
+                         "spousal resource",
+                         "community spouse resource")},
+            {"tokens": {"savings", "assets", "resources", "countable"},
+             "phrases": ()},
+        ],
+        "required": [
+            {"label": "states the one-half share of combined countable "
+                      "assets",
+             "any": ("half", "one-half", "one half", "50%")},
+            {"label": "the server-computed CSRA figure",
+             "computed": "csra"},
+        ],
+        "forbidden": (),
+        "prompt": (
+            "The community spouse resource allowance is one half of "
+            "the couple's combined countable assets at the snapshot, "
+            "clamped to [$32,532, $162,660]; use the server-computed "
+            "figure when one is provided."),
+        "sufficiency_terms": ("community spouse resource", "csra",
+                              "spousal impoverishment"),
+        "retry_query": "community spouse resource allowance half "
+                       "combined countable assets",
+        "missing": ("no excerpt covers the community spouse resource "
+                    "allowance (CSRA)"),
+    },
+    {
+        "id": "difficulty_of_care_exclusion",
+        "title": "Difficulty-of-care exclusion (Notice 2014-7)",
+        "groups": [
+            {"tokens": {"caregiver", "caregiving"},
+             "phrases": ("caregiver pay", "paid caregiver",
+                         "difficulty of care")},
+            {"tokens": {"hip", "magi"},
+             "phrases": ("healthy indiana", "household income")},
+        ],
+        "required": [
+            {"label": "names the difficulty-of-care exclusion "
+                      "(IRS Notice 2014-7)",
+             "any": ("difficulty of care", "notice 2014-7", "2014-7")},
+            {"label": "concludes the caregiver pay is excluded / does "
+                      "not count as household income",
+             "any": ("excluded", "does not count", "not count",
+                     "excludable", "not income", "not counted")},
+        ],
+        "forbidden": (),
+        "prompt": (
+            "Caregiver pay under a Medicaid waiver to a caregiver who "
+            "lives with the care recipient is a difficulty-of-care "
+            "payment excluded from income under IRS Notice 2014-7; "
+            "for HIP/MAGI it does not count as household income."),
+        "sufficiency_terms": ("difficulty of care", "2014-7",
+                              "notice 2014"),
+        "retry_query": "difficulty of care payments excluded income "
+                       "notice 2014-7 medicaid waiver caregiver",
+        "missing": ("no excerpt covers the difficulty-of-care "
+                    "exclusion (IRS Notice 2014-7) for caregiver pay"),
+    },
+]
+
+
+def _mechanism_matches(question, pool=None):
+    """Mechanism entries whose trigger groups all hit on the question
+    (or on any text, e.g. one part of a bundled question)."""
+    q_low = (question or "").lower()
+    q_tokens = set(re.findall(r"[a-z]+", q_low))
+    return [m for m in (pool or MECHANISMS)
+            if _groups_hit(m["groups"], q_low, q_tokens)]
+
+
+def _mechanism_block(mechanisms):
+    """Prompt block naming the required mechanisms for this ask."""
+    if not mechanisms:
+        return ""
+    lines = ["REQUIRED MECHANISMS (checked by the server; an answer "
+             "that omits the governing mechanism, or substitutes a "
+             "different program or rule for it, fails verification):"]
+    for m in mechanisms:
+        lines.append(f"- {m['title']}: {m['prompt']}")
+    return "\n".join(lines)
+
+
+def _mech_required_failures(answer, mechanisms, csra_comp=None):
+    """Code check: every required element of every matched mechanism
+    must be present in the answer, and no forbidden substitute may
+    appear. Returns a list of {id, label} failures."""
+    a_low = (answer or "").lower()
+    failures = []
+    for m in mechanisms or ():
+        for el in m["required"]:
+            if el.get("computed") == "csra":
+                # Required only when the question supplied an amount
+                # and the server computed a figure; a rule-only CSRA
+                # question has no computed figure to state.
+                if not csra_comp:
+                    continue
+                ok = (_fmt_money(csra_comp["csra"]) in (answer or "")
+                      or f"{csra_comp['csra']:,.0f}" in (answer or "")
+                      or f"{csra_comp['csra']:.0f}" in (answer or ""))
+                if not ok:
+                    failures.append({"id": m["id"], "label": el["label"]})
+                continue
+            if not any(s in a_low for s in el["any"]):
+                failures.append({"id": m["id"], "label": el["label"]})
+        for bad in m.get("forbidden", ()):
+            if bad in a_low:
+                failures.append(
+                    {"id": m["id"],
+                     "label": f"uses the forbidden substitute '{bad}'"})
+    return failures
+
+
+def _hit_text(h):
+    return ((h.get("title") or "") + " " + (h.get("excerpt") or "")).lower()
+
+
+def _sufficiency_missing(mechanisms, hits):
+    """Mechanisms whose governing material is absent from the excerpt
+    set: none of the mechanism's sufficiency terms appears in any
+    hit's title or excerpt."""
+    missing = []
+    for m in mechanisms or ():
+        if not any(any(t in _hit_text(h) for t in m["sufficiency_terms"])
+                   for h in hits or ()):
+            missing.append(m)
+    return missing
+
+
+def _sufficiency_retry(corp, hits, missing):
+    """Gate retry (plan section 1): direct keyword searches for the
+    missing mechanisms' governing material; chunks that carry a
+    sufficiency term are merged ahead of the current set."""
+    extra, seen = [], {(h["url"], h["excerpt"][:60]) for h in hits}
+    for mech in missing:
+        try:
+            found = search(mech["retry_query"], corpus=corp, n=6)
+        except Exception:
+            found = []
+        for h in found:
+            key = (h["url"], h["excerpt"][:60])
+            if key in seen:
+                continue
+            if any(t in _hit_text(h) for t in mech["sufficiency_terms"]):
+                seen.add(key)
+                extra.append(h)
+    return extra + list(hits)
+
+
 # --- v13: decomposition + difficulty routing ------------------------------
 
 def decompose_question(question):
@@ -1827,6 +2135,18 @@ def is_hard_question(question):
             toks & {"resource", "resources", "asset", "assets", "limit",
                     "lump"}:
         return "SNAP limit figures"
+    # v14: over-cap income questions route like the other contested
+    # topics (manual test #1: the Miller trust question was answered
+    # unrouted on the 9B and missed the governing mechanism entirely).
+    if any(p in q_low for p in ("over the income limit", "over the limit",
+                                "over the medicaid income limit",
+                                "over the medicaid limit",
+                                "is over the income limit",
+                                "income cap", "over the cap",
+                                "miller trust", "qualified income trust")) \
+            and (toks & {"medicaid", "waiver"} or "nursing home" in q_low
+                 or "long-term care" in q_low or "long term care" in q_low):
+        return "income-cap figures"
     if decompose_question(question):
         return "bundled multi-part question"
     return ""
@@ -1980,6 +2300,607 @@ def ollama_ask(model, question, hits, instructions=""):
     return content, full_prompt
 
 
+# --- v14: gap log -----------------------------------------------------------
+# Every IDK, abstained part, and failed gate appends one JSONL record:
+# {ts, question, badge, gate, missing, part}. The file lives next to the
+# corpus (override with FSSA_GAP_LOG) and is the input to the monthly
+# rescrape watchlist and to mechanism-registry growth (plan section 7).
+GAP_LOG_PATH = os.environ.get("FSSA_GAP_LOG", "gap_log.jsonl")
+_GAP_LOCK = threading.Lock()
+
+
+def log_gap(question, badge, gate, missing, part=None):
+    rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+           "question": (question or "")[:300], "badge": badge,
+           "gate": gate, "missing": list(missing or ())[:8],
+           "part": part}
+    try:
+        with _GAP_LOCK:
+            with open(GAP_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # logging must never break an ask
+    return rec
+
+
+def _read_gaps(limit=200):
+    try:
+        with open(GAP_LOG_PATH, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return []
+    out = []
+    for line in lines[-limit:]:
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+
+# --- v14: Flash arbitration budget ------------------------------------------
+# Flash (gemini-3.8-flash) has a 20 requests/day free-tier cap; the
+# plan budgets arbitration at ~1-2 calls/day. The counter is a hard
+# stop, not a target: at the cap, disputed claims fail closed (cut /
+# IDK) rather than shipping unarbitrated.
+FLASH_MODEL = "gemini-3.8-flash"
+FLASH_DAILY_CAP = 18
+_FLASH_STATE = {"date": "", "count": 0}
+_FLASH_LOCK = threading.Lock()
+
+
+def _flash_calls_today():
+    with _FLASH_LOCK:
+        today = time.strftime("%Y-%m-%d")
+        if _FLASH_STATE["date"] != today:
+            _FLASH_STATE["date"] = today
+            _FLASH_STATE["count"] = 0
+        return _FLASH_STATE["count"]
+
+
+def _flash_spend():
+    """Reserve one Flash call; False when the daily budget is gone."""
+    with _FLASH_LOCK:
+        today = time.strftime("%Y-%m-%d")
+        if _FLASH_STATE["date"] != today:
+            _FLASH_STATE["date"] = today
+            _FLASH_STATE["count"] = 0
+        if _FLASH_STATE["count"] >= FLASH_DAILY_CAP:
+            return False
+        _FLASH_STATE["count"] += 1
+        return True
+
+
+# --- v14: judging -------------------------------------------------------------
+# Judges answer one question per claim: does the cited material
+# actually say this? Verdicts: supported / contradicted /
+# not_addressed. The PRIMARY judge (Gemini Lite; the local 14B when
+# Gemini is down) extracts the claim list and gives its verdicts in
+# the same call (plan section 4: extraction folded into the judgment
+# call). The SECOND judge verdicts the SAME numbered list and may
+# flag claims the extractor missed. Code, not a model, resolves the
+# verdicts into pass/fail per claim.
+
+
+def _ollama_chat_raw(model, system, user, timeout=300, num_predict=1536):
+    """One bare Ollama chat call for judge work (temperature 0)."""
+    payload = json.dumps({
+        "model": model,
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+        "stream": False, "think": False, "keep_alive": "30m",
+        "options": {"num_ctx": 8192, "num_predict": num_predict,
+                    "temperature": 0},
+    }).encode()
+    req = urllib.request.Request(OLLAMA + "/api/chat", data=payload,
+                                 headers={"Content-Type": "application/json"})
+    data = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+    msg = data.get("message", {})
+    text = (msg.get("content") or msg.get("thinking") or "").strip()
+    if not text:
+        raise RuntimeError("judge model returned an empty response")
+    return text
+
+
+def _gemini_text(api_model, system, user):
+    """One Gemini call for judge/arbitration work (temperature 0),
+    through the same spacing + retry discipline as answers."""
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": system + "\n\n" + user}]}],
+        "generationConfig": {"temperature": 0},
+    }).encode()
+    return _gemini_call(api_model, payload)
+
+
+def _parse_judge_json(text):
+    """Pull the first JSON object out of a judge reply (judges wrap
+    JSON in prose or fences despite instructions). None on failure."""
+    if not text:
+        return None
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        obj = json.loads(text[start:end + 1])
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _norm_verdict(v):
+    s = re.sub(r"[\s\-]+", "_", str(v or "").strip().lower())
+    if s in ("supported", "support", "pass", "true"):
+        return "supported"
+    if s in ("contradicted", "contradiction", "refuted", "false"):
+        return "contradicted"
+    return "not_addressed"
+
+
+_JUDGE_SYSTEM = (
+    "You are a strict fact-checking judge for a benefits Q&A system. "
+    "You do not grade style, tone, or completeness beyond the claims. "
+    "For each claim you answer exactly one question: do the document "
+    "excerpts, the verified-figures block, or the required-mechanism "
+    "notes actually say this? A claim that goes beyond what the "
+    "material states is not_addressed; a claim the material "
+    "contradicts is contradicted. Reply with ONLY a JSON object, no "
+    "prose, no code fences.")
+
+
+def _judge_excerpts(hits, cap=1000):
+    lines = []
+    for i, h in enumerate(hits or ()):
+        lines.append(f"[{i + 1}] {h.get('title', '')} "
+                     f"({h.get('url', '')})\n"
+                     f"{(h.get('excerpt') or '')[:cap]}")
+    return "\n\n".join(lines)
+
+
+def _primary_judgment(engine, question, hits, answer, mech_block):
+    """Extract the draft's claims AND verdict them in one call.
+    engine is 'lite' (Gemini) or 'local' (the 14B). Returns
+    {available, claims: [{text, load_bearing, verdict, note}], error}.
+    Only substantive factual claims are extracted: rules, figures,
+    conclusions. Connective text, citations, restatements of the
+    question, and the confidence line are not claims."""
+    user = (
+        f"Question: {question}\n\nDocument excerpts:\n"
+        f"{_judge_excerpts(hits)}\n\n{mech_block}\n\n"
+        f"Draft answer:\n{answer}\n\n"
+        "Extract the draft's substantive factual claims (at most 14; "
+        "merge duplicates; mark load_bearing=true for claims the "
+        "answer's conclusion rests on). For EACH claim give your "
+        "verdict: supported, contradicted, or not_addressed, judging "
+        "ONLY against the excerpts and blocks above, plus a one-line "
+        "note. Reply with ONLY this JSON:\n"
+        '{"claims": [{"text": "...", "load_bearing": true, '
+        '"verdict": "supported", "note": "..."}]}')
+    try:
+        if engine == "lite":
+            text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM, user)
+        else:
+            text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM, user)
+        obj = _parse_judge_json(text)
+        if not obj or not isinstance(obj.get("claims"), list):
+            return {"available": False, "claims": [],
+                    "error": "judge reply was not usable JSON"}
+        claims = []
+        for c in obj["claims"][:14]:
+            t = str(c.get("text") or "").strip()
+            if not t:
+                continue
+            claims.append({"text": t,
+                           "load_bearing": bool(c.get("load_bearing")),
+                           "verdict": _norm_verdict(c.get("verdict")),
+                           "note": str(c.get("note") or "")[:200]})
+        if not claims:
+            return {"available": False, "claims": [],
+                    "error": "judge extracted no claims"}
+        return {"available": True, "claims": claims, "error": None}
+    except Exception as e:
+        return {"available": False, "claims": [],
+                "error": str(e)[:200]}
+
+
+def _second_verdicts(engine, question, hits, claims, mech_block):
+    """The second judge verdicts the SAME numbered claim list, and
+    may flag substantive claims in the draft the extractor missed
+    (returned as extra claims, which then go through disagreement
+    resolution like any other claim)."""
+    numbered = "\n".join(
+        f"{i + 1}. {c['text']}" for i, c in enumerate(claims))
+    user = (
+        f"Question: {question}\n\nDocument excerpts:\n"
+        f"{_judge_excerpts(hits)}\n\n{mech_block}\n\n"
+        f"Claims to judge:\n{numbered}\n\n"
+        "Give a verdict for EVERY numbered claim: supported, "
+        "contradicted, or not_addressed, judging ONLY against the "
+        "excerpts and blocks above, with a one-line note each. If "
+        "the draft answer (which these claims were extracted from) "
+        "makes another substantive factual claim that is NOT in the "
+        "list, add it under \"missed\" with your verdict. Reply with "
+        "ONLY this JSON:\n"
+        '{"verdicts": [{"i": 1, "verdict": "supported", "note": "..."}], '
+        '"missed": [{"text": "...", "load_bearing": false, '
+        '"verdict": "not_addressed", "note": "..."}]}')
+    try:
+        if engine == "lite":
+            text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM, user)
+        else:
+            text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM, user)
+        obj = _parse_judge_json(text)
+        if not obj or not isinstance(obj.get("verdicts"), list):
+            return {"available": False, "verdicts": {}, "missed": [],
+                    "error": "judge reply was not usable JSON"}
+        verdicts = {}
+        for v in obj["verdicts"]:
+            try:
+                idx = int(v.get("i")) - 1
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(claims):
+                verdicts[idx] = {
+                    "verdict": _norm_verdict(v.get("verdict")),
+                    "note": str(v.get("note") or "")[:200]}
+        missed = []
+        for c in obj.get("missed") or []:
+            t = str(c.get("text") or "").strip()
+            if t:
+                missed.append({"text": t,
+                               "load_bearing": bool(c.get("load_bearing")),
+                               "verdict": _norm_verdict(c.get("verdict")),
+                               "note": str(c.get("note") or "")[:200]})
+        return {"available": True, "verdicts": verdicts,
+                "missed": missed[:4], "error": None}
+    except Exception as e:
+        return {"available": False, "verdicts": {}, "missed": [],
+                "error": str(e)[:200]}
+
+
+def _flash_arbitrate(question, hits, claims, indices):
+    """Flash rules on the disputed claims (one call for all of them).
+    Returns {index: verdict} or None when Flash is unavailable or
+    the daily arbitration budget is spent (callers then fail the
+    disputed claims closed)."""
+    if not indices or not _flash_spend():
+        return None
+    lines = []
+    for i in indices:
+        c = claims[i]
+        lines.append(
+            f"{i + 1}. {c['text']}\n"
+            f"   Gemini Lite: {c.get('lite') or '-'} "
+            f"({c.get('lite_note', '')})\n"
+            f"   Local 14B: {c.get('local') or '-'} "
+            f"({c.get('local_note', '')})")
+    user = (
+        f"Question: {question}\n\nDocument excerpts:\n"
+        f"{_judge_excerpts(hits)}\n\n"
+        "Two judges disagree on these claims. Rule on EACH claim from "
+        "the excerpts alone: supported, contradicted, or "
+        "not_addressed. Your ruling is final. Reply with ONLY this "
+        "JSON:\n"
+        '{"rulings": [{"i": 1, "verdict": "supported"}]}\n\n'
+        + "\n".join(lines))
+    try:
+        text = _gemini_text(FLASH_MODEL, _JUDGE_SYSTEM, user)
+        obj = _parse_judge_json(text)
+        if not obj or not isinstance(obj.get("rulings"), list):
+            return None
+        out = {}
+        for r in obj["rulings"]:
+            try:
+                idx = int(r.get("i")) - 1
+            except (TypeError, ValueError):
+                continue
+            if idx in indices:
+                out[idx] = _norm_verdict(r.get("verdict"))
+        return out or None
+    except Exception:
+        return None
+
+
+def _worse_verdict(a, b):
+    if "contradicted" in (a, b):
+        return "contradicted"
+    if "not_addressed" in (a, b):
+        return "not_addressed"
+    return "supported"
+
+
+def _judge_round(question, hits, answer, hard, mech_block=""):
+    """One full judging round over a draft: primary extraction +
+    verdicts, second-judge verdicts on the same list, disagreement
+    resolution (Flash arbitration for load-bearing claims, and for
+    any claim on hard/routed questions; peripheral disagreements on
+    routine questions fail closed without spending Flash).
+    Returns {mode, claims, flash_used, errors} where each claim has
+    lite/local/flash/final verdicts. mode is 'dual', 'arbitrated',
+    'gemini-only', 'local-only', or 'none' (no judge could run)."""
+    errors = []
+    primary = _primary_judgment("lite", question, hits, answer,
+                                mech_block)
+    primary_engine = "lite"
+    if not primary["available"]:
+        errors.append("lite judge: " + str(primary["error"]))
+        primary = _primary_judgment("local", question, hits, answer,
+                                    mech_block)
+        primary_engine = "local"
+    if not primary["available"]:
+        errors.append("local judge: " + str(primary["error"]))
+        return {"mode": "none", "claims": [], "flash_used": False,
+                "errors": errors}
+    claims = [{"text": c["text"], "load_bearing": c["load_bearing"],
+               "lite": None, "local": None, "flash": None,
+               "final": None, "notes": []} for c in primary["claims"]]
+    for i, c in enumerate(primary["claims"]):
+        claims[i][primary_engine] = c["verdict"]
+        if c["note"]:
+            claims[i]["notes"].append(c["note"])
+    second_engine = "local" if primary_engine == "lite" else "lite"
+    second = _second_verdicts(second_engine, question, hits,
+                               claims, mech_block)
+    mode = "dual" if second["available"] else (
+        "gemini-only" if primary_engine == "lite" else "local-only")
+    if second["available"]:
+        for idx, v in second["verdicts"].items():
+            claims[idx][second_engine] = v["verdict"]
+            if v["note"]:
+                claims[idx]["notes"].append(v["note"])
+        for m in second["missed"]:
+            claims.append({"text": m["text"],
+                           "load_bearing": m["load_bearing"],
+                           "lite": None, "local": None, "flash": None,
+                           "final": None,
+                           "notes": [m["note"]] if m["note"] else []})
+            claims[-1][second_engine] = m["verdict"]
+    else:
+        errors.append(second_engine + " judge: " + str(second["error"]))
+    # Resolution: agreement decides; disagreement on a load-bearing
+    # claim (or any claim on a hard question) goes to Flash; a lone
+    # judge's verdict stands in degraded modes.
+    disputed = []
+    for i, c in enumerate(claims):
+        lv, jv = c["lite"], c["local"]
+        if lv and jv:
+            if lv == jv:
+                c["final"] = lv
+            else:
+                disputed.append(i)
+        else:
+            c["final"] = lv or jv or "not_addressed"
+    flash_used = False
+    if disputed:
+        to_rule = [i for i in disputed
+                   if claims[i]["load_bearing"] or hard]
+        if to_rule:
+            rulings = _flash_arbitrate(question, hits, claims, to_rule)
+            if rulings:
+                flash_used = True
+                mode = "arbitrated"
+                for idx, verdict in rulings.items():
+                    claims[idx]["flash"] = verdict
+                    claims[idx]["final"] = verdict
+        for i in disputed:
+            if claims[i]["final"] is None:
+                claims[i]["final"] = _worse_verdict(claims[i]["lite"],
+                                                    claims[i]["local"])
+    passed = bool(claims) and all(c["final"] == "supported"
+                                  for c in claims)
+    return {"mode": mode, "claims": claims, "flash_used": flash_used,
+            "pass": passed, "errors": errors}
+
+
+# --- v14: the escalation ladder ----------------------------------------------
+# Per answering unit (the whole question, or one part of a bundled
+# question): draft, then up to TWO redrafts with the judges'
+# objections attached (James's decision, 2026-10-13), then a final
+# Flash ruling on the last draft's failed claims, then IDK. Code
+# gates (figures, mechanisms, arithmetic) run alongside the judges:
+# a draft ships only when every gate passes.
+
+
+def _generate(engine, model, question, hits, instructions):
+    """One draft generation with v13's fallback honesty. Returns
+    (answer, prompt, served_label, downgraded, fallback)."""
+    if engine == "gemini":
+        answer, prompt, gserved, dg = gemini_ask(
+            model, question, hits, instructions=instructions)
+        label = gserved + " (API)"
+        if dg:
+            label += " (downgraded: best Gemini unavailable)"
+        return answer, prompt, label, dg, False
+    try:
+        answer, prompt = ollama_ask(model, question, hits,
+                                    instructions=instructions)
+        return answer, prompt, model, False, False
+    except Exception:
+        if model == LOCAL_MODEL:
+            raise
+        answer, prompt = ollama_ask(LOCAL_MODEL, question, hits,
+                                    instructions=instructions)
+        return (answer, prompt,
+                LOCAL_MODEL + f" (fallback: routed {model} unavailable)",
+                False, True)
+
+
+def _build_objections(jr, mech_failures, ungrounded):
+    lines = ["CORRECTIONS REQUIRED: a previous draft of this answer "
+             "failed verification. Fix every item below. Ground each "
+             "claim in the excerpts or the verified figures, correct "
+             "it, or remove it; if the documents do not cover a point, "
+             "say so plainly instead of asserting it."]
+    for f in mech_failures or ():
+        lines.append(f"- Missing or wrong mechanism element: {f['label']}")
+    for v in ungrounded or ():
+        lines.append(f"- The figure {_fmt_money(v)} appears in none of "
+                     "the excerpts or verified figures; do not use it.")
+    for c in (jr or {}).get("claims", ()):
+        if c["final"] != "supported":
+            note = ("; ".join(c["notes"][:2])) or "no source supports it"
+            lines.append(f"- Claim judged {c['final']}: \"{c['text']}\" "
+                         f"({note})")
+    return "\n".join(lines)
+
+
+def _run_unit(ctx):
+    """Run the ladder for one answering unit. ctx keys: question
+    (full question, for figure provenance), unit_q (what this unit
+    answers), hits, engine ('local'|'gemini'), draft_model,
+    instructions (base prompt additions), mechanisms, allowed_extra
+    (figure-checker allowed values), csra_comp, hard (bool).
+    Returns the unit record: {answer (None when IDK), badge, served,
+    fallback, downgraded, judging, claims, figure_check, rungs,
+    judge_ms, missing, gate, prompt}."""
+    reg_block = _registry_block(ctx.get("registry_entries") or ())
+    mech_only = _mechanism_block(ctx["mechanisms"])
+    # Judges see the registry + mechanism blocks. Drafters get the
+    # mechanism block, plus the registry block unless the caller's
+    # instructions already carry it (the single-question path reuses
+    # the v13 instruction blob, which does).
+    judge_block = "\n\n".join(x for x in (reg_block, mech_only) if x)
+    draft_extra = mech_only
+    if not ctx.get("reg_in_instructions") and reg_block:
+        draft_extra = "\n\n".join(x for x in (reg_block, mech_only)
+                                  if x)
+    draft = None
+    jr = None
+    mech_failures, ungrounded = [], []
+    judge_ms = 0
+    rungs = 0
+    objections = ""
+    gen_error = None
+    for rung in range(3):  # draft + two redrafts (James's decision)
+        rungs = rung + 1
+        if rung == 0:
+            use_model = ctx["draft_model"]
+        elif ctx["engine"] == "local":
+            use_model = ROUTED_MODEL  # redrafts are the 14B's job
+            if ctx["draft_model"] != ROUTED_MODEL:
+                ollama_unload(LOCAL_MODEL)
+        else:
+            use_model = ctx["draft_model"]
+        instr = ctx["instructions"]
+        if draft_extra:
+            instr = (instr + "\n\n" + draft_extra).strip()
+        if objections:
+            instr = (instr + "\n\n" + objections).strip()
+        try:
+            draft, prompt, served, dg, fb = _generate(
+                ctx["engine"], use_model, ctx["unit_q"], ctx["hits"],
+                instr)
+        except Exception as e:
+            gen_error = str(e)[:200]
+            draft = None
+            break
+        ctx["_served"], ctx["_dg"], ctx["_fb"] = served, dg, fb
+        ctx["_prompt"] = prompt
+        _a, ungrounded = _check_figures(
+            draft, ctx["question"], ctx["hits"],
+            extra_allowed=ctx["allowed_extra"])
+        mech_failures = _mech_required_failures(
+            draft, ctx["mechanisms"], ctx.get("csra_comp"))
+        if ctx["engine"] == "local" and use_model == LOCAL_MODEL:
+            # The second judge is the 14B; do not load it alongside a
+            # resident 9B (the v12 bake-off 500s). The 9B reloads on
+            # the next ask that needs it.
+            ollama_unload(LOCAL_MODEL)
+        jt0 = time.monotonic()
+        jr = _judge_round(ctx["unit_q"], ctx["hits"], draft,
+                          ctx["hard"], judge_block)
+        judge_ms += int((time.monotonic() - jt0) * 1000)
+        if jr["mode"] == "none":
+            break  # no judge can run: redrafting blind helps nothing
+        if jr["pass"] and not ungrounded and not mech_failures:
+            break  # every gate passed: ship this draft
+        objections = _build_objections(jr, mech_failures, ungrounded)
+        draft = None if rung < 2 else draft
+    shipped = False
+    if draft is not None and jr is not None and jr["mode"] != "none":
+        if jr["pass"] and not ungrounded and not mech_failures:
+            shipped = True
+        else:
+            # Final rung (plan section 5): Flash rules once on the
+            # last draft's failed claims; its ruling is final.
+            failed = [i for i, c in enumerate(jr["claims"])
+                      if c["final"] != "supported"
+                      and c["flash"] is None]
+            if failed and not ungrounded and not mech_failures:
+                rulings = _flash_arbitrate(ctx["unit_q"], ctx["hits"],
+                                           jr["claims"], failed)
+                if rulings:
+                    jr["flash_used"] = True
+                    jr["mode"] = "arbitrated"
+                    for idx, verdict in rulings.items():
+                        jr["claims"][idx]["flash"] = verdict
+                        jr["claims"][idx]["final"] = verdict
+                    jr["pass"] = all(c["final"] == "supported"
+                                     for c in jr["claims"])
+                    shipped = jr["pass"]
+    base = {"served": ctx.get("_served"), "fallback": ctx.get("_fb", False),
+            "downgraded": ctx.get("_dg", False),
+            "prompt": ctx.get("_prompt", ""), "rungs": rungs,
+            "judge_ms": judge_ms,
+            "figure_check": {"ungrounded": list(ungrounded),
+                             "regenerated": rungs > 1}}
+    if shipped:
+        answer, _fixes = _check_arithmetic(draft)
+        badge = "verified" if jr["mode"] in ("dual", "arbitrated") \
+            else "verified_single"
+        return dict(base, answer=answer, badge=badge,
+                    judging={"mode": jr["mode"],
+                             "flash_used": jr["flash_used"],
+                             "errors": jr["errors"]},
+                    claims=jr["claims"], missing=[], gate=None)
+    # IDK: assemble what is missing from the failed gates.
+    missing, gate = [], "judging"
+    if gen_error:
+        missing.append("the answering model could not run "
+                       f"({gen_error})")
+    if jr is not None and jr["mode"] == "none":
+        missing.append("no verification judge could run "
+                       "(" + "; ".join(jr["errors"]) + ")")
+    for f in mech_failures:
+        missing.append("the answer did not establish: " + f["label"])
+    if ungrounded:
+        missing.append("the draft used figures found in none of the "
+                       "excerpts: " + ", ".join(
+                           _fmt_money(v) for v in ungrounded[:4]))
+    if jr is not None:
+        for c in jr["claims"]:
+            if c["final"] != "supported":
+                missing.append(f"unverified claim: \"{c['text']}\" "
+                               f"(judged {c['final']})")
+                if c["final"] == "not_addressed":
+                    gate = "grounding"
+                if c["flash"] is not None:
+                    gate = "arbitration"
+    return dict(base, answer=None, badge="idk",
+                judging={"mode": (jr or {}).get("mode", "none"),
+                         "flash_used": (jr or {}).get("flash_used", False),
+                         "errors": (jr or {}).get("errors", [])},
+                claims=(jr or {}).get("claims", []),
+                missing=missing[:8], gate=gate)
+
+
+def _idk_answer(missing, hits, lead):
+    """The full IDK payload (James's decision): a plain refusal, what
+    is missing, and the closest excerpts, inline."""
+    lines = [lead, "",
+             "I don't know based on the available documents.", ""]
+    if missing:
+        lines.append("What is missing:")
+        for m in missing:
+            lines.append(f"- {m}")
+        lines.append("")
+    if hits:
+        lines.append("Closest documents found:")
+        for h in hits[:5]:
+            lines.append(f"- [{h['title']}]({h['url']})")
+    return "\n".join(lines)
+
+
 PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2041,6 +2962,8 @@ button:disabled{background:var(--ink-disabled); cursor:default;}
   vertical-align:middle;}
 .badge.ok{background:var(--surface-3); color:var(--success);}
 .badge.no{background:var(--surface-3); color:var(--warning);}
+.badge.err{background:var(--surface-3); color:var(--error);}
+#verifyNote{margin-top:12px; font-size:13px; color:var(--ink-tertiary);}
 .spinner{display:none; margin-top:16px; color:var(--ink-tertiary); font-size:14px;}
 footer{margin-top:48px; font-size:12px; color:var(--ink-disabled); text-align:center; max-width:65ch;}
 </style>
@@ -2072,8 +2995,9 @@ footer{margin-top:48px; font-size:12px; color:var(--ink-disabled); text-align:ce
   </div>
   <div id="answer">
     <div class="card">
-      <h2>Answer</h2>
+      <h2>Answer<span id="answerBadge"></span></h2>
       <div id="answerText"></div>
+      <div id="verifyNote"></div>
       <div id="sources"><h3>Sources</h3><div id="sourceList"></div></div>
     </div>
   </div>
@@ -2114,6 +3038,23 @@ async function ask(){
     });
     const d = await r.json();
     document.getElementById('answerText').textContent = d.answer || ('Error: ' + (d.error||'unknown'));
+    const badgeMap = {
+      verified: ['ok', 'Verified'],
+      verified_single: ['no', 'Verified · one judge only'],
+      partial: ['no', 'Partial · some parts could not be verified'],
+      partial_single: ['no', 'Partial · one judge only'],
+      idk: ['err', 'IDK · not verified']
+    };
+    const bm = badgeMap[d.badge];
+    document.getElementById('answerBadge').innerHTML = bm
+      ? '<span class="badge ' + bm[0] + '">' + bm[1] + '</span>' : '';
+    const vn = document.getElementById('verifyNote');
+    if(d.judging){
+      let note = 'Verification: ' + d.judging.mode;
+      if(d.judging.flash_used) note += ' · Flash arbitration used';
+      if(d.timing && d.timing.rungs) note += ' · ' + d.timing.rungs + ' ladder rung(s)';
+      vn.textContent = note;
+    } else { vn.textContent = ''; }
     const sl = document.getElementById('sourceList');
     sl.innerHTML = '';
     (d.hits||[]).forEach(h=>{
@@ -2181,6 +3122,10 @@ class Handler(BaseHTTPRequestHandler):
                         "docs": len(CORPUS_IN),
                         "embeddings_loaded": len(EMBEDDINGS),
                         "hybrid_active": len(EMBEDDINGS) > 0})
+        elif u.path == "/gaps":
+            # v14: the gap log (IDKs, abstained parts, failed gates)
+            # for the monthly rescrape watchlist and registry growth.
+            self._json({"gaps": _read_gaps()})
         elif u.path == "/models":
             # Q&A dropdown is deliberately limited to the 9b local model
             # plus Gemini (James's call, 2026-10-12); Ollama may host many
@@ -2329,135 +3274,266 @@ class Handler(BaseHTTPRequestHandler):
                     f"{len(parts)} parts. Answer EVERY part, in order, "
                     f"each under its own short heading:\n"
                     f"{numbered}").strip()
-            if not hits:
-                self._json({"answer": "No matching documents found in the selected corpus.",
-                            "hits": []})
-                return
             t_retrieved = time.monotonic()
-            served, fallback, downgraded = model, False, False
-            # v13: the local model that actually generates (None while
-            # a Gemini answer stands); the figure-check regeneration
-            # re-asks this same engine.
-            answer_model = None
-            if use_gemini:
-                try:
-                    # NOTE: no excerpt cap for the API path. A 10-cap
-                    # (tried briefly in v12) cut the spousal chunk out
-                    # of bundled questions and Lite answered "not in
-                    # the documents"; excerpt count is already bounded
-                    # by the retrieval design.
-                    answer, full_prompt, gserved, downgraded = gemini_ask(
-                        model, question, hits,
-                        instructions=instructions)
-                    served = gserved + " (API)"
-                    if downgraded:
-                        served += " (downgraded: best Gemini unavailable)"
-                except Exception:
-                    # Never dead-end on a Gemini outage: answer with the
-                    # local model and say so in the response metadata.
-                    answer, full_prompt = ollama_ask(
-                        LOCAL_MODEL, question, hits,
-                        instructions=instructions)
-                    served = LOCAL_MODEL + " (fallback: Gemini unavailable)"
-                    fallback = True
-                    answer_model = LOCAL_MODEL
-            else:
-                # Use local 9b model if user didn't specify (avoids VRAM thrashing)
-                if model in ("", "default"):
-                    model = LOCAL_MODEL
-                gen_model = routed_model if route_reason else model
-                if route_reason:
-                    # v13: free the 9B's VRAM before the 14B loads;
-                    # holding both on the 8GB card is what produced
-                    # the v12 bake-off HTTP 500s.
-                    ollama_unload(LOCAL_MODEL)
-                try:
-                    answer, full_prompt = ollama_ask(
-                        gen_model, question, hits,
-                        instructions=instructions)
-                    served = gen_model
-                    answer_model = gen_model
-                except Exception:
-                    if not route_reason:
-                        raise
-                    # The routed 14B failed: the 9B answers, and the
-                    # metadata says so.
-                    answer, full_prompt = ollama_ask(
-                        LOCAL_MODEL, question, hits,
-                        instructions=instructions)
-                    served = (LOCAL_MODEL + " (fallback: routed "
-                              + ROUTED_MODEL + " unavailable)")
-                    fallback = True
-                    answer_model = LOCAL_MODEL
-            # v11: figure provenance first (which dollar figures in
-            # the answer trace to the excerpts), then the v9 equation
-            # verification; both notes ride along in the answer text.
-            # v13: the registry figures and the computed CSRA values
-            # count as supported, and an unsupported figure now forces
-            # ONE regeneration naming the problem figure (never two).
+            # --- v14 pipeline: sufficiency gate -> ladder -> badges --
+            mechanisms_all = _mechanism_matches(question)
             allowed_extra = _registry_values(registry_entries)
             if csra_comp:
                 allowed_extra += [csra_comp["assets"], csra_comp["half"],
                                   csra_comp["csra"]]
-            answer, ungrounded = _check_figures(
-                answer, question, hits, extra_allowed=allowed_extra)
-            figure_check = {"ungrounded": list(ungrounded),
-                            "regenerated": False}
-            if ungrounded:
-                bad = ", ".join(_fmt_money(v) for v in ungrounded[:4])
-                fix = ((instructions + "\n\n") if instructions else "") \
-                    + ("CORRECTION: a previous draft of this answer "
-                       "used these dollar figures, which appear in "
-                       "NONE of the excerpts or the verified figures "
-                       "above: " + bad + ". Do not use them. Answer "
-                       "the question again using only figures from "
-                       "the excerpts or the verified figures.")
-                try:
-                    if answer_model is None:
-                        a2, p2, gs2, dg2 = gemini_ask(
-                            model, question, hits, instructions=fix)
-                        served2 = gs2 + " (API)"
-                        if dg2:
-                            served2 += (" (downgraded: best Gemini "
-                                        "unavailable)")
+            sufficiency_ms = 0
+            n_gaps = 0
+
+            def _respond(answer_text, badge, judging, verification,
+                         figure_check, served, fallback, downgraded,
+                         full_prompt, rungs, judge_ms):
+                t_end = time.monotonic()
+                timing = {"retrieve_ms": int((t_retrieved - t_start)
+                                             * 1000),
+                          "generate_ms": int((t_end - t_retrieved)
+                                             * 1000),
+                          "total_ms": int((t_end - t_start) * 1000),
+                          "sufficiency_ms": sufficiency_ms,
+                          "judge_ms": judge_ms, "rungs": rungs}
+                print(f"[ask] served={served} route={route_reason or '-'} "
+                      f"reg={[e['id'] for e in registry_entries]} "
+                      f"badge={badge} judging={judging.get('mode')} "
+                      f"rungs={rungs} gaps={n_gaps} "
+                      f"retrieve={timing['retrieve_ms']}ms "
+                      f"generate={timing['generate_ms']}ms "
+                      f"total={timing['total_ms']}ms "
+                      f"q={question[:60]!r}", flush=True)
+                result = {"answer": answer_text, "hits": hits,
+                          "model": served, "prompt": full_prompt,
+                          "fallback": fallback, "downgraded": downgraded,
+                          "discovery": discovery, "timing": timing,
+                          "registry": [e["id"] for e in registry_entries],
+                          "routed": route_reason or None,
+                          "figure_check": figure_check,
+                          "parts": len(parts), "badge": badge,
+                          "judging": judging,
+                          "verification": verification,
+                          "mechanisms": [m["id"] for m in mechanisms_all]}
+                _cache_put(_ASK_CACHE, ask_key, result)
+                self._json(result)
+
+            no_judging = {"mode": "none", "flash_used": False,
+                          "flash_calls_today": _flash_calls_today()}
+            if not hits:
+                missing = ["no documents in the selected corpus "
+                           "matched the question"]
+                log_gap(question, "idk", "sufficiency", missing)
+                n_gaps += 1
+                _respond(_idk_answer(
+                    missing, hits,
+                    "No matching documents were found in the selected "
+                    "corpus."), "idk", no_judging, [],
+                    {"ungrounded": [], "regenerated": False},
+                    "none (abstained before generation)",
+                    False, False, "", 0, 0)
+                return
+            # --- retrieval sufficiency gate (plan section 1): the
+            # excerpt set must contain each matched mechanism's
+            # governing material. Retry once with the mechanisms'
+            # own searches; still missing -> IDK, no generation
+            # around the hole.
+            if mechanisms_all and not discovery:
+                t_suff = time.monotonic()
+                missing_mechs = _sufficiency_missing(mechanisms_all,
+                                                     hits)
+                if missing_mechs:
+                    hits = _drop_payee_admin(
+                        question,
+                        _sufficiency_retry(corp, hits, missing_mechs))
+                    missing_mechs = _sufficiency_missing(mechanisms_all,
+                                                         hits)
+                sufficiency_ms = int((time.monotonic() - t_suff) * 1000)
+                if missing_mechs:
+                    missing = [m["missing"] for m in missing_mechs]
+                    log_gap(question, "idk", "sufficiency", missing)
+                    n_gaps += 1
+                    _respond(_idk_answer(
+                        missing, hits,
+                        "The documents retrieved do not cover the "
+                        "mechanism this question turns on."),
+                        "idk", no_judging, [],
+                        {"ungrounded": [], "regenerated": False},
+                        "none (abstained before generation)",
+                        False, False, "", 0, 0)
+                    return
+            # --- answering units: per part for bundled questions
+            # (v13 decomposition; each part verified on its own), a
+            # single unit otherwise. Discovery runs as one unit
+            # under its survey instructions.
+            engine = "gemini" if use_gemini else "local"
+            draft_model = model if use_gemini else routed_model
+            if not use_gemini and route_reason:
+                # v13: free the 9B's VRAM before the 14B loads.
+                ollama_unload(LOCAL_MODEL)
+            hard = bool(route_reason) or bool(mechanisms_all)
+            unit_specs = []
+            if parts and not discovery:
+                part_reg_ids = []
+                part_mech_ids = []
+                for part in parts:
+                    p_reg = _registry_matches(part)
+                    p_mechs = _mechanism_matches(part)
+                    part_reg_ids += [e["id"] for e in p_reg]
+                    part_mech_ids += [m["id"] for m in p_mechs]
+                    p_hits = []
+                    if EMBEDDINGS:
+                        p_hits = hybrid_search(
+                            part, corpus=corp, n=6,
+                            use_rewrite=use_rewrite,
+                            use_rerank=use_rerank)
                     else:
-                        a2, p2 = ollama_ask(
-                            answer_model, question, hits,
-                            instructions=fix)
-                        served2 = served
-                    # The regenerated answer replaces the draft (and
-                    # its caution note); it is re-checked, and if it
-                    # still invents a figure the note stays. No second
-                    # regeneration, ever.
-                    answer, full_prompt, served = a2, p2, served2
-                    figure_check["regenerated"] = True
-                    answer, ungrounded = _check_figures(
-                        answer, question, hits,
-                        extra_allowed=allowed_extra)
-                    figure_check["ungrounded"] = list(ungrounded)
-                except Exception:
-                    pass  # keep the first answer and its caution note
-            answer, _arith_fixes = _check_arithmetic(answer)
-            t_end = time.monotonic()
-            timing = {"retrieve_ms": int((t_retrieved - t_start) * 1000),
-                      "generate_ms": int((t_end - t_retrieved) * 1000),
-                      "total_ms": int((t_end - t_start) * 1000)}
-            print(f"[ask] served={served} route={route_reason or '-'} "
-                  f"reg={[e['id'] for e in registry_entries]} "
-                  f"retrieve={timing['retrieve_ms']}ms "
-                  f"generate={timing['generate_ms']}ms "
-                  f"total={timing['total_ms']}ms q={question[:60]!r}",
-                  flush=True)
-            result = {"answer": answer, "hits": hits, "model": served,
-                      "prompt": full_prompt, "fallback": fallback,
-                      "downgraded": downgraded, "discovery": discovery,
-                      "timing": timing,
-                      "registry": [e["id"] for e in registry_entries],
-                      "routed": route_reason or None,
-                      "figure_check": figure_check,
-                      "parts": len(parts)}
-            _cache_put(_ASK_CACHE, ask_key, result)
-            self._json(result)
+                        p_hits = search(part, corpus=corp, n=6)
+                    p_hits = _drop_payee_admin(part, p_hits)
+                    if len(p_hits) < 2:
+                        seen_k = {(h["url"], h["excerpt"][:60])
+                                  for h in p_hits}
+                        p_hits += [h for h in hits
+                                   if (h["url"], h["excerpt"][:60])
+                                   not in seen_k]
+                    p_csra = None
+                    if any(e["id"] == "csra" for e in p_reg):
+                        p_csra = compute_csra(part)
+                    p_allowed = _registry_values(p_reg) + [
+                        v for v in allowed_extra
+                        if v not in _registry_values(p_reg)]
+                    if p_csra:
+                        p_allowed += [p_csra["assets"], p_csra["half"],
+                                      p_csra["csra"]]
+                    unit_specs.append({
+                        "unit_q": part, "part": part, "hits": p_hits,
+                        "registry_entries": p_reg, "mechanisms": p_mechs,
+                        "csra_comp": p_csra, "allowed_extra": p_allowed,
+                        "instructions": "",
+                        "reg_in_instructions": False})
+                # Registry/mechanism entries that match the whole
+                # question but no single part (the splitter can split
+                # a trigger across parts): their figures stay allowed
+                # everywhere (folded into p_allowed above), and the
+                # mechanism check runs on the assembled answer below.
+                global_mechs = [m for m in mechanisms_all
+                                if m["id"] not in part_mech_ids]
+            else:
+                global_mechs = []
+                unit_specs.append({
+                    "unit_q": question, "part": None, "hits": hits,
+                    "registry_entries": registry_entries,
+                    "mechanisms": mechanisms_all,
+                    "csra_comp": csra_comp,
+                    "allowed_extra": allowed_extra,
+                    "instructions": instructions,
+                    "reg_in_instructions": True})
+            units = []
+            for spec in unit_specs:
+                ctx = {"question": question, "unit_q": spec["unit_q"],
+                       "hits": spec["hits"], "engine": engine,
+                       "draft_model": draft_model,
+                       "instructions": spec["instructions"],
+                       "registry_entries": spec["registry_entries"],
+                       "mechanisms": spec["mechanisms"],
+                       "csra_comp": spec["csra_comp"],
+                       "allowed_extra": spec["allowed_extra"],
+                       "hard": hard,
+                       "reg_in_instructions":
+                           spec["reg_in_instructions"]}
+                unit = _run_unit(ctx)
+                unit["part"] = spec["part"]
+                unit["hits"] = spec["hits"]
+                units.append(unit)
+                if unit["badge"] == "idk":
+                    log_gap(question, "idk", unit["gate"] or "judging",
+                            unit["missing"], part=spec["part"])
+                    n_gaps += 1
+            # --- assembly + badges ----------------------------------
+            if len(units) == 1:
+                u = units[0]
+                answer_text = u["answer"] if u["answer"] is not None \
+                    else _idk_answer(
+                        u["missing"], hits,
+                        "I could not verify an answer to this question "
+                        "against the source documents.")
+                overall_badge = u["badge"]
+            else:
+                sections = []
+                for i, u in enumerate(units):
+                    head = f"{i + 1}. {u['part']}"
+                    if u["answer"] is not None:
+                        sections.append(head + "\n" + u["answer"])
+                    else:
+                        sections.append(head + "\n" + _idk_answer(
+                            u["missing"], u["hits"],
+                            "For this part, the documents do not "
+                            "settle it."))
+                answer_text = "\n\n".join(sections)
+                badges = [u["badge"] for u in units]
+                if all(b == "verified" for b in badges):
+                    overall_badge = "verified"
+                elif all(b in ("verified", "verified_single")
+                         for b in badges) and \
+                        any(b == "verified_single" for b in badges):
+                    overall_badge = "verified_single"
+                elif all(b == "idk" for b in badges):
+                    overall_badge = "idk"
+                elif any(b == "verified" for b in badges):
+                    overall_badge = "partial"
+                else:
+                    overall_badge = "partial_single"
+                if global_mechs:
+                    g_fail = _mech_required_failures(
+                        answer_text, global_mechs, csra_comp)
+                    if g_fail:
+                        labels = "; ".join(f["label"] for f in g_fail)
+                        answer_text += (
+                            "\n\nNote: the retrieved documents do not "
+                            "fully settle every part of this question "
+                            f"(missing: {labels}).")
+                        if overall_badge == "verified":
+                            overall_badge = "partial"
+                        elif overall_badge == "verified_single":
+                            overall_badge = "partial_single"
+                        log_gap(question, overall_badge, "mechanism",
+                                [f["label"] for f in g_fail])
+                        n_gaps += 1
+            modes = {u["judging"]["mode"] for u in units}
+            judging = {"mode": modes.pop() if len(modes) == 1
+                       else "mixed",
+                       "flash_used": any(u["judging"]["flash_used"]
+                                         for u in units),
+                       "flash_calls_today": _flash_calls_today()}
+            verification = [{
+                "part": u["part"], "badge": u["badge"],
+                "claims": len(u["claims"]),
+                "failed_claims": [c["text"] for c in u["claims"]
+                                  if c["final"] != "supported"],
+                "gate": u["gate"], "rungs": u["rungs"],
+                "judging_mode": u["judging"]["mode"]} for u in units]
+            figure_check = {
+                "ungrounded": sorted({v for u in units
+                                      for v in
+                                      u["figure_check"]["ungrounded"]}),
+                "regenerated": any(u["figure_check"]["regenerated"]
+                                   for u in units)}
+            served_labels = []
+            for u in units:
+                if u["served"] and u["served"] not in served_labels:
+                    served_labels.append(u["served"])
+            if len(served_labels) == 1:
+                served = served_labels[0]
+            elif served_labels:
+                served = "mixed: " + ", ".join(served_labels)
+            else:
+                served = "none (generation failed)"
+            _respond(answer_text, overall_badge, judging, verification,
+                     figure_check, served,
+                     any(u["fallback"] for u in units),
+                     any(u["downgraded"] for u in units),
+                     units[0]["prompt"] if units else "",
+                     max((u["rungs"] for u in units), default=0),
+                     sum(u["judge_ms"] for u in units))
         except Exception as e:
             self._json({"error": str(e)[:300]}, 500)
 
