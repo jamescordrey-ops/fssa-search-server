@@ -35,6 +35,17 @@ API metadata and the webapp, with a visibly different badge when only
 one judge could run (degraded); and a JSONL gap log (gap_log.jsonl,
 GET /gaps) feeding the monthly rescrape and registry growth. Gemini
 down degrades to local judging, never to unverified answers.
+
+v14.1 (2026-10-13): no-loss judging speedups; verdict logic, badges,
+gates, and the ladder are unchanged. The local judge now gets the
+GPU to itself (every other resident chat model is unloaded before
+14B judge/redraft work, not just the 9B), the Lite primary judgment
+runs concurrently with the local judge's GPU preparation (unload +
+model load), second-judge and arbitration prompts carry per-claim
+scoped evidence (only the excerpts each claim rests on, mapped by
+the primary judgment; full set as fallback), and local judge calls
+size their context window to the prompt with a verdict-sized output
+budget instead of the answer-generation settings.
 """
 import json
 import os
@@ -2181,6 +2192,47 @@ def ollama_unload(model):
         return False
 
 
+def _resident_models():
+    """Names of the models Ollama currently holds in memory (/api/ps).
+    Empty list when Ollama cannot be reached."""
+    try:
+        req = urllib.request.Request(OLLAMA + "/api/ps")
+        data = json.loads(urllib.request.urlopen(req, timeout=10).read())
+        return [m.get("name") or m.get("model") or ""
+                for m in data.get("models", [])]
+    except Exception:
+        return []
+
+
+def _unload_others(keep):
+    """v14.1: unload every resident CHAT model except `keep`, so a
+    local 14B judge or redraft call gets the 8GB VRAM to itself
+    (v14 unloaded only the 9B, and only on the local-draft path).
+    The embedding model stays resident: retrieval needs it and it
+    is small. Best effort throughout, exactly like ollama_unload."""
+    for name in _resident_models():
+        if name and name != keep and "embed" not in name.lower():
+            ollama_unload(name)
+
+
+def _warm_local_judge():
+    """v14.1: prepare the local judge's GPU while the Gemini primary
+    judgment runs (see _judge_round): free the VRAM, then ask
+    Ollama to load ROUTED_MODEL (an /api/generate call with no
+    prompt loads the model without generating). Best effort: the
+    judge calls work either way, just cold."""
+    _unload_others(ROUTED_MODEL)
+    try:
+        payload = json.dumps({"model": ROUTED_MODEL,
+                              "keep_alive": "30m"}).encode()
+        req = urllib.request.Request(
+            OLLAMA + "/api/generate", data=payload,
+            headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=180).read()
+    except Exception:
+        pass
+
+
 def _gemini_normalize(model):
     """Map a requested model string ('gemini-3.8-flash (API)', 'gemini',
     ...) to a chain entry; unknown or generic requests start at the head."""
@@ -2382,14 +2434,35 @@ def _flash_spend():
 # verdicts into pass/fail per claim.
 
 
+def _judge_num_ctx(system, user, num_predict):
+    """v14.1: size a judge call's context window to its prompt
+    instead of always taking the answer-generation 8192: estimated
+    prompt tokens (chars / 3.5, the usual rough ratio) plus the
+    output budget plus margin, bucketed, floored at 2048 and never
+    above the old 8192."""
+    est = int((len(system or "") + len(user or "")) / 3.5) \
+        + num_predict + 256
+    for bucket in (2048, 3072, 4096, 6144, 8192):
+        if est <= bucket:
+            return bucket
+    return 8192
+
+
 def _ollama_chat_raw(model, system, user, timeout=300, num_predict=1536):
     """One bare Ollama chat call for judge work (temperature 0)."""
+    if model == ROUTED_MODEL:
+        # v14.1: the local judge gets the GPU to itself; any other
+        # resident chat model (the 9B drafter above all) is unloaded
+        # first, on every judge path, not just local-drafted asks.
+        _unload_others(model)
     payload = json.dumps({
         "model": model,
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
         "stream": False, "think": False, "keep_alive": "30m",
-        "options": {"num_ctx": 8192, "num_predict": num_predict,
+        "options": {"num_ctx": _judge_num_ctx(system, user,
+                                              num_predict),
+                    "num_predict": num_predict,
                     "temperature": 0},
     }).encode()
     req = urllib.request.Request(OLLAMA + "/api/chat", data=payload,
@@ -2473,9 +2546,13 @@ def _primary_judgment(engine, question, hits, answer, mech_block):
         "answer's conclusion rests on). For EACH claim give your "
         "verdict: supported, contradicted, or not_addressed, judging "
         "ONLY against the excerpts and blocks above, plus a one-line "
-        "note. Reply with ONLY this JSON:\n"
+        "note. In sources, list the numbers of the excerpts (from "
+        "the numbered list above) the claim rests on; use an empty "
+        "list when it rests only on the verified-figures or "
+        "mechanism blocks. Reply with ONLY this JSON:\n"
         '{"claims": [{"text": "...", "load_bearing": true, '
-        '"verdict": "supported", "note": "..."}]}')
+        '"verdict": "supported", "note": "...", '
+        '"sources": [1]}]}')
     try:
         if engine == "lite":
             text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM, user)
@@ -2490,10 +2567,24 @@ def _primary_judgment(engine, question, hits, answer, mech_block):
             t = str(c.get("text") or "").strip()
             if not t:
                 continue
+            # v14.1: the excerpts this claim rests on (1-based in
+            # the judge prompt, stored 0-based), used to scope the
+            # second judge's and the arbitrator's evidence.
+            srcs = []
+            for s in c.get("sources") or []:
+                try:
+                    j = int(s) - 1
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= j < len(hits or ()) and j not in srcs:
+                    srcs.append(j)
+                if len(srcs) >= 4:
+                    break
             claims.append({"text": t,
                            "load_bearing": bool(c.get("load_bearing")),
                            "verdict": _norm_verdict(c.get("verdict")),
-                           "note": str(c.get("note") or "")[:200]})
+                           "note": str(c.get("note") or "")[:200],
+                           "sources": srcs})
         if not claims:
             return {"available": False, "claims": [],
                     "error": "judge extracted no claims"}
@@ -2503,17 +2594,41 @@ def _primary_judgment(engine, question, hits, answer, mech_block):
                 "error": str(e)[:200]}
 
 
+def _claim_evidence(hits, claim):
+    """v14.1: the excerpt text ONE claim rests on: its mapped
+    sources, or the full excerpt set when it has no mapping."""
+    src = [j for j in (claim.get("sources") or [])
+           if 0 <= j < len(hits or ())]
+    use = src if src else list(range(len(hits or ())))
+    return "\n\n".join(
+        f"[{j + 1}] {hits[j].get('title', '')} "
+        f"({hits[j].get('url', '')})\n"
+        f"{(hits[j].get('excerpt') or '')[:1000]}" for j in use)
+
+
+def _scoped_evidence(hits, claims, labels=None):
+    """v14.1: per-claim evidence for judge prompts: each claim is
+    followed by ONLY the excerpts the primary judgment mapped it
+    to (see _claim_evidence). Returns None when there are no
+    hits or NO claim carries a mapping, so callers keep the
+    legacy full-set prompt. `labels` gives the number each claim
+    is cited by (defaults to 1..n in list order)."""
+    if not hits or not any(c.get("sources") for c in claims):
+        return None
+    labels = labels or [i + 1 for i in range(len(claims))]
+    return "\n\n".join(
+        f"Claim {lab}: {c['text']}\n{_claim_evidence(hits, c)}"
+        for c, lab in zip(claims, labels))
+
+
 def _second_verdicts(engine, question, hits, claims, mech_block):
     """The second judge verdicts the SAME numbered claim list, and
     may flag substantive claims in the draft the extractor missed
     (returned as extra claims, which then go through disagreement
-    resolution like any other claim)."""
-    numbered = "\n".join(
-        f"{i + 1}. {c['text']}" for i, c in enumerate(claims))
-    user = (
-        f"Question: {question}\n\nDocument excerpts:\n"
-        f"{_judge_excerpts(hits)}\n\n{mech_block}\n\n"
-        f"Claims to judge:\n{numbered}\n\n"
+    resolution like any other claim). v14.1: when the primary
+    judgment mapped claims to their excerpts, the prompt carries
+    per-claim scoped evidence instead of the whole set."""
+    verdict_instr = (
         "Give a verdict for EVERY numbered claim: supported, "
         "contradicted, or not_addressed, judging ONLY against the "
         "excerpts and blocks above, with a one-line note each. If "
@@ -2524,11 +2639,25 @@ def _second_verdicts(engine, question, hits, claims, mech_block):
         '{"verdicts": [{"i": 1, "verdict": "supported", "note": "..."}], '
         '"missed": [{"text": "...", "load_bearing": false, '
         '"verdict": "not_addressed", "note": "..."}]}')
+    scoped = _scoped_evidence(hits, claims)
+    if scoped is not None:
+        user = (
+            f"Question: {question}\n\n{mech_block}\n\n"
+            f"Claims to judge, each followed by the excerpts it "
+            f"rests on:\n{scoped}\n\n" + verdict_instr)
+    else:
+        numbered = "\n".join(
+            f"{i + 1}. {c['text']}" for i, c in enumerate(claims))
+        user = (
+            f"Question: {question}\n\nDocument excerpts:\n"
+            f"{_judge_excerpts(hits)}\n\n{mech_block}\n\n"
+            f"Claims to judge:\n{numbered}\n\n" + verdict_instr)
     try:
         if engine == "lite":
             text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM, user)
         else:
-            text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM, user)
+            text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM, user,
+                                    num_predict=1024)
         obj = _parse_judge_json(text)
         if not obj or not isinstance(obj.get("verdicts"), list):
             return {"available": False, "verdicts": {}, "missed": [],
@@ -2565,24 +2694,40 @@ def _flash_arbitrate(question, hits, claims, indices):
     disputed claims closed)."""
     if not indices or not _flash_spend():
         return None
+    subset = [claims[i] for i in indices]
+    scoped = _scoped_evidence(hits, subset,
+                              labels=[i + 1 for i in indices])
     lines = []
     for i in indices:
         c = claims[i]
-        lines.append(
+        line = (
             f"{i + 1}. {c['text']}\n"
             f"   Gemini Lite: {c.get('lite') or '-'} "
             f"({c.get('lite_note', '')})\n"
             f"   Local 14B: {c.get('local') or '-'} "
             f"({c.get('local_note', '')})")
-    user = (
-        f"Question: {question}\n\nDocument excerpts:\n"
-        f"{_judge_excerpts(hits)}\n\n"
-        "Two judges disagree on these claims. Rule on EACH claim from "
-        "the excerpts alone: supported, contradicted, or "
-        "not_addressed. Your ruling is final. Reply with ONLY this "
-        "JSON:\n"
-        '{"rulings": [{"i": 1, "verdict": "supported"}]}\n\n'
-        + "\n".join(lines))
+        if scoped is not None:
+            line += f"\n   Evidence:\n{_claim_evidence(hits, c)}"
+        lines.append(line)
+    if scoped is not None:
+        user = (
+            f"Question: {question}\n\n"
+            "Two judges disagree on these claims. Rule on EACH "
+            "claim from the evidence shown with it alone: "
+            "supported, contradicted, or not_addressed. Your "
+            "ruling is final. Reply with ONLY this JSON:\n"
+            '{"rulings": [{"i": 1, "verdict": "supported"}]}\n\n'
+            + "\n".join(lines))
+    else:
+        user = (
+            f"Question: {question}\n\nDocument excerpts:\n"
+            f"{_judge_excerpts(hits)}\n\n"
+            "Two judges disagree on these claims. Rule on EACH claim from "
+            "the excerpts alone: supported, contradicted, or "
+            "not_addressed. Your ruling is final. Reply with ONLY this "
+            "JSON:\n"
+            '{"rulings": [{"i": 1, "verdict": "supported"}]}\n\n'
+            + "\n".join(lines))
     try:
         text = _gemini_text(FLASH_MODEL, _JUDGE_SYSTEM, user)
         obj = _parse_judge_json(text)
@@ -2619,21 +2764,35 @@ def _judge_round(question, hits, answer, hard, mech_block=""):
     lite/local/flash/final verdicts. mode is 'dual', 'arbitrated',
     'gemini-only', 'local-only', or 'none' (no judge could run)."""
     errors = []
-    primary = _primary_judgment("lite", question, hits, answer,
-                                mech_block)
-    primary_engine = "lite"
-    if not primary["available"]:
-        errors.append("lite judge: " + str(primary["error"]))
-        primary = _primary_judgment("local", question, hits, answer,
-                                    mech_block)
-        primary_engine = "local"
+    # v14.1: the Lite primary judgment and the local judge's GPU
+    # preparation run concurrently. The second verdict call depends
+    # on the primary's claim list, so it cannot start sooner; what
+    # parallelism removes is everything it used to wait on serially
+    # AFTER the claims existed (unloading the 9B, loading the 14B).
+    # Verdict combination below is exactly the sequential logic.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_primary = pool.submit(_primary_judgment, "lite",
+                                  question, hits, answer, mech_block)
+        fut_warm = pool.submit(_warm_local_judge)
+        primary = fut_primary.result()
+        primary_engine = "lite"
+        if not primary["available"]:
+            errors.append("lite judge: " + str(primary["error"]))
+            fut_warm.result()  # GPU ready before the local primary
+            primary = _primary_judgment("local", question, hits,
+                                        answer, mech_block)
+            primary_engine = "local"
+        else:
+            fut_warm.result()  # GPU ready before the second judge
     if not primary["available"]:
         errors.append("local judge: " + str(primary["error"]))
         return {"mode": "none", "claims": [], "flash_used": False,
                 "errors": errors}
     claims = [{"text": c["text"], "load_bearing": c["load_bearing"],
                "lite": None, "local": None, "flash": None,
-               "final": None, "notes": []} for c in primary["claims"]]
+               "final": None, "notes": [],
+               "sources": list(c.get("sources") or [])}
+              for c in primary["claims"]]
     for i, c in enumerate(primary["claims"]):
         claims[i][primary_engine] = c["verdict"]
         if c["note"]:
@@ -2653,7 +2812,8 @@ def _judge_round(question, hits, answer, hard, mech_block=""):
                            "load_bearing": m["load_bearing"],
                            "lite": None, "local": None, "flash": None,
                            "final": None,
-                           "notes": [m["note"]] if m["note"] else []})
+                           "notes": [m["note"]] if m["note"] else [],
+                           "sources": []})
             claims[-1][second_engine] = m["verdict"]
     else:
         errors.append(second_engine + " judge: " + str(second["error"]))
@@ -2778,7 +2938,7 @@ def _run_unit(ctx):
         elif ctx["engine"] == "local":
             use_model = ROUTED_MODEL  # redrafts are the 14B's job
             if ctx["draft_model"] != ROUTED_MODEL:
-                ollama_unload(LOCAL_MODEL)
+                _unload_others(ROUTED_MODEL)
         else:
             use_model = ctx["draft_model"]
         instr = ctx["instructions"]
@@ -2804,8 +2964,10 @@ def _run_unit(ctx):
         if ctx["engine"] == "local" and use_model == LOCAL_MODEL:
             # The second judge is the 14B; do not load it alongside a
             # resident 9B (the v12 bake-off 500s). The 9B reloads on
-            # the next ask that needs it.
-            ollama_unload(LOCAL_MODEL)
+            # the next ask that needs it. (v14.1: _judge_round's
+            # warm-up now does this on every path; this early unload
+            # still frees the VRAM sooner on the local-draft path.)
+            _unload_others(ROUTED_MODEL)
         jt0 = time.monotonic()
         jr = _judge_round(ctx["unit_q"], ctx["hits"], draft,
                           ctx["hard"], judge_block)
@@ -3368,8 +3530,9 @@ class Handler(BaseHTTPRequestHandler):
             engine = "gemini" if use_gemini else "local"
             draft_model = model if use_gemini else routed_model
             if not use_gemini and route_reason:
-                # v13: free the 9B's VRAM before the 14B loads.
-                ollama_unload(LOCAL_MODEL)
+                # v13: free the 9B's VRAM before the 14B loads
+                # (v14.1: every other resident chat model goes too).
+                _unload_others(ROUTED_MODEL)
             hard = bool(route_reason) or bool(mechanisms_all)
             unit_specs = []
             if parts and not discovery:
