@@ -1,0 +1,40 @@
+# Secrets: never commit keys. The Gemini chain reads gemini_key.txt
+# from the server directory at runtime; keep yours local.
+gemini_key.txt
+*_key.txt
+*.key
+.env
+.env.*
+
+# Generated embeddings: rebuild with the scripts (see README).
+embeddings.json
+embeddings.jsonl
+embeddings.npz
+embeddings*.bak*
+
+# Data backups and pipeline byproducts
+*.bak
+*.bak-*
+corpus*.json.bak*
+dedupe_log.jsonl
+dedupe_skip.json
+
+# QA / test working files (answer sets, harness output)
+answers*.json
+*_answers.json
+answers/
+situational/
+test*.json
+t_*.json
+
+# Logs
+*.log
+*.err
+
+# Build-session status/report docs
+STATUS.md
+*_REPORT.md
+
+# Python
+__pycache__/
+*.pyc
