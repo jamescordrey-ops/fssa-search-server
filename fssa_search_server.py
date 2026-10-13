@@ -73,10 +73,16 @@ moonshotai/kimi-k3, the standing second judging seat is the NIM
 Nemotron (the v14.2 third seat promoted), and ladder redrafts
 generate on NIM; simple questions may draft on a fast NIM model
 (nemotron-3.5-lightning) with automatic fallback to the local 9B.
-The 14B is DEMOTED, not removed: behind LOCAL_FALLBACK_JUDGE it
-remains the fallback judge (v14 degradation shapes), the
-divergence oracle on hard questions, and the fallback
-drafter/redrafter when NIM is down. Drafters must cite excerpt
+The 14B is DEMOTED, not removed: it remains the last-resort
+judge when both remote seats are down (behind
+LOCAL_FALLBACK_JUDGE) and the fallback drafter/redrafter when
+NIM as a whole is down. v15.1 narrows it further (James's
+ruling, 2026-10-13; see V151_AUDIT.md): the local models stay
+cold on the remote path — the retrieval utilities and the
+divergence oracle run on NIM, a single failed remote seat
+degrades instead of seating the 14B, disputes get no local
+tiebreak, and every local call carries keep_alive 0.
+Drafters must cite excerpt
 numbers at birth; uncited load-bearing sentences are unverified
 by construction. A quantity checker widens the figure checker
 to periods and period conversions. Source-conflict claims force
@@ -240,10 +246,13 @@ except FileNotFoundError:
 # by the panel, else an IDK with its gap log entry); timing records
 # cap_hit. The cap can never make an unverified answer ship.
 ASK_TIME_CAP_S = 600
-# The demoted local 14B as fallback judge (v15 plan item 2): when a
-# remote judge cannot run, the 14B takes its seat (and both-remotes-
-# down degrades to local-only judging, the v14 shape). Off = a
-# missing remote judge degrades to the surviving remote judge alone.
+# The demoted local 14B as LAST-RESORT judge. v15.1 (James's
+# ruling, 2026-10-13): the flag gates ONLY the both-remotes-down
+# degradation (Lite AND the NIM seat unable to extract -> the
+# 14B judges alone, the v14 shape). A single failed remote seat
+# degrades to the surviving remote judge alone, and disputes
+# never go to a local tiebreak: the 14B is used only when it
+# absolutely has to be (or the caller picked a local model).
 LOCAL_FALLBACK_JUDGE = True
 
 # --- v15 speedup S3: persistent remote connections -------------------------
@@ -399,22 +408,34 @@ def _clean_llm_list_output(text):
             return line
     return lines[0] if lines else ""
 
+def _utility_text(prompt, max_tokens=256, timeout=30):
+    """v15.1: one bare chat call for the retrieval utilities
+    (query rewrite, policy-phrase rewrite, rerank). Through v15.0
+    these ran on the local 9B, which loaded it into VRAM on every
+    ask; they now run on the NIM fast tier (the same seat that
+    drafts simple questions), so the local models stay cold.
+    Raises on any failure: the utilities degrade to their empty
+    result, exactly as they did when the local call failed.
+    (_nim_text and the DRAFTER_* constants are defined later in
+    this file; this resolves at call time.)"""
+    return _nim_text(
+        DRAFTER_BASE_URL, DRAFTER_KEY_ENV, DRAFTER_KEY_FILE,
+        DRAFTER_SIMPLE_MODEL,
+        "You are a precise retrieval utility. Reply with only "
+        "the requested output, no explanations.",
+        prompt, temperature=0, max_tokens=max_tokens,
+        timeout=timeout, provider=DRAFTER_PROVIDER)
+
+
 def rewrite_query(question):
-    """Use the single local model to rewrite a question into better search terms."""
+    """Rewrite a question into better search terms (v15.1: NIM
+    fast tier; see _utility_text)."""
     try:
         prompt = (f"Rewrite this question as 5-8 keywords for document search. "
                   f"Output ONLY the keywords, comma-separated, no other text.\n\n"
                   f"Question: {question}\nKeywords:")
-        payload = json.dumps({
-            "model": LOCAL_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False, "think": False,
-            "options": {"temperature": 0},
-        }).encode()
-        req = urllib.request.Request(OLLAMA + "/api/chat", data=payload,
-                                     headers={"Content-Type": "application/json"})
-        data = json.loads(urllib.request.urlopen(req, timeout=30).read())
-        text = _clean_llm_list_output(data["message"]["content"])
+        text = _clean_llm_list_output(
+            _utility_text(prompt, max_tokens=128, timeout=30))
         return [t.strip() for t in text.split(",") if t.strip()][:8]
     except Exception:
         return []
@@ -434,16 +455,8 @@ def rewrite_policy_phrase(question):
                   "countable, eligibility, transfer of assets, benefits. "
                   "Output ONLY the phrase, no other text.\n\n"
                   f"Question: {question}\nPhrase:")
-        payload = json.dumps({
-            "model": LOCAL_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False, "think": False,
-            "options": {"temperature": 0},
-        }).encode()
-        req = urllib.request.Request(OLLAMA + "/api/chat", data=payload,
-                                     headers={"Content-Type": "application/json"})
-        data = json.loads(urllib.request.urlopen(req, timeout=30).read())
-        text = data["message"]["content"].strip().split("\n")[0]
+        text = _utility_text(prompt, max_tokens=128,
+                             timeout=30).strip().split("\n")[0]
         text = text.strip().strip('"').strip()
         return text if 3 < len(text) < 120 else ""
     except Exception:
@@ -1066,7 +1079,8 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
     return result
 
 def rerank_with_llm(query, hits):
-    """Use the single local model to rerank search hits by relevance to the query."""
+    """Rerank search hits by relevance to the query (v15.1: NIM
+    fast tier; see _utility_text)."""
     try:
         # Build a compact list for the LLM to rank
         items = []
@@ -1081,16 +1095,8 @@ def rerank_with_llm(query, hits):
                   f"over state-specific ones. "
                   f"Output ONLY the numbers in order from most to least relevant, comma-separated.\n\n"
                   + "\n".join(items) + "\n\nRanking:")
-        payload = json.dumps({
-            "model": LOCAL_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False, "think": False,
-            "options": {"temperature": 0},
-        }).encode()
-        req = urllib.request.Request(OLLAMA + "/api/chat", data=payload,
-                                     headers={"Content-Type": "application/json"})
-        data = json.loads(urllib.request.urlopen(req, timeout=30).read())
-        text = _clean_llm_list_output(data["message"]["content"])
+        text = _clean_llm_list_output(
+            _utility_text(prompt, max_tokens=256, timeout=45))
         # Parse numbers
         order = []
         for part in text.replace(",", " ").split():
@@ -2598,22 +2604,14 @@ def _unload_others(keep):
             ollama_unload(name)
 
 
-def _warm_local_judge():
-    """v14.1: prepare the local judge's GPU while the Gemini primary
-    judgment runs (see _judge_round): free the VRAM, then ask
-    Ollama to load ROUTED_MODEL (an /api/generate call with no
-    prompt loads the model without generating). Best effort: the
-    judge calls work either way, just cold."""
-    _unload_others(ROUTED_MODEL)
-    try:
-        payload = json.dumps({"model": ROUTED_MODEL,
-                              "keep_alive": "30m"}).encode()
-        req = urllib.request.Request(
-            OLLAMA + "/api/generate", data=payload,
-            headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=180).read()
-    except Exception:
-        pass
+# v15.1: _warm_local_judge (v14.1) is REMOVED. It speculatively
+# loaded the local 14B with a 30-minute keep-alive whenever a
+# fallback judge seat MIGHT be needed, which put the 14B in VRAM
+# on remote-path asks. The fallback judge seats in _judge_round
+# now load the model cold, on demand, only when a remote seat
+# has actually failed — and every local judge call carries
+# keep_alive 0 (see _ollama_chat_raw), so the model unloads
+# again immediately after the call.
 
 
 def _gemini_normalize(model):
@@ -2724,7 +2722,10 @@ def ollama_ask(model, question, hits, instructions=""):
         ],
         "stream": False,
         "think": False,
-        "keep_alive": "30m",
+        # v15.1: unload immediately after the call. A local
+        # generation is a genuine fallback or an explicit pick;
+        # it never leaves the model resident behind it.
+        "keep_alive": 0,
         # 8-10 excerpt prompts run ~4.5k tokens; Ollama's default context
         # (~4k) silently squeezes generation and answers stop mid-sentence
         # (seen on the discovery survey, 2026-10-12). Give real headroom.
@@ -2904,6 +2905,17 @@ DRAFTER_SIMPLE_MODEL = _DRAFT_CFG["simple_model"]
 DRAFTER_KEY_FILE = _DRAFT_CFG["key_file"]
 DRAFTER_KEY_ENV = _DRAFT_CFG["key_env"]
 DRAFTER_TIMEOUT = 240  # cold flagship drafts are slow (see header)
+# v15.1 (see V151_AUDIT.md): two NIM seats that keep the local
+# models cold. The divergence oracle (item 4) and the emergency
+# draft seat both run on the NIM judge-seat model (Nemotron
+# Super: strong, fast warm, and independent of the Kimi
+# drafter). In v15.0 the oracle drafted on the local 14B, and a
+# failed Kimi draft fell straight to local generation; now a
+# single slow or dead NIM seat degrades to another NIM seat,
+# and the local models generate only when NIM as a whole
+# cannot run (or the caller explicitly picked a local model).
+DIVERGENCE_ORACLE_MODEL = THIRD_JUDGE_MODEL
+EMERGENCY_DRAFT_MODEL = THIRD_JUDGE_MODEL
 _NIM_KEYS = {}
 
 
@@ -3024,12 +3036,15 @@ def _third_judge_text(system, user):
     return content
 
 
-def nim_ask(model, question, hits, instructions=""):
+def nim_ask(model, question, hits, instructions="", timeout=None):
     """One NIM draft generation (v15 item 2 / S4): the same prompt
     shape as the local and Gemini drafters (SYSTEM_PROMPT +
     instructions, numbered excerpts), temperature 0.3. Returns
     (answer, prompt). Raises when the seat cannot run; callers
-    fall back to the local models."""
+    fall back per the v15/v15.1 chains. `timeout` overrides
+    DRAFTER_TIMEOUT (the v15.1 emergency seat uses a tighter
+    bound: it answers in about a second warm, so a long silence
+    means the provider is down, not slow)."""
     context = _numbered_context(hits)
     user_msg = f"Question: {question}\n\nDocument excerpts:\n{context}"
     sys_prompt = SYSTEM_PROMPT + (("\n\n" + instructions) if instructions
@@ -3037,7 +3052,7 @@ def nim_ask(model, question, hits, instructions=""):
     content = _nim_text(DRAFTER_BASE_URL, DRAFTER_KEY_ENV,
                         DRAFTER_KEY_FILE, model, sys_prompt, user_msg,
                         temperature=0.3, max_tokens=2048,
-                        timeout=DRAFTER_TIMEOUT,
+                        timeout=timeout or DRAFTER_TIMEOUT,
                         provider=DRAFTER_PROVIDER)
     # Hosted open models occasionally trail control-token debris
     # (kimi-k3's catalog smoke ended "<|close|>response"); it is
@@ -3106,7 +3121,9 @@ def _ollama_chat_raw(model, system, user, timeout=300, num_predict=1536):
         "model": model,
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
-        "stream": False, "think": False, "keep_alive": "30m",
+        # v15.1: keep_alive 0 — a fallback judge call unloads
+        # the model again as soon as it returns.
+        "stream": False, "think": False, "keep_alive": 0,
         "options": {"num_ctx": _judge_num_ctx(system, user,
                                               num_predict),
                     "num_predict": num_predict,
@@ -3748,8 +3765,10 @@ def _judge_round(question, hits, answer, hard, mech_block="",
     the NIM seat when Lite is down; the demoted local 14B only
     when both remotes are down). The SECOND judge verdicts the
     same list (the NIM seat by default; Lite when the NIM seat
-    extracted; the local 14B behind LOCAL_FALLBACK_JUDGE when a
-    remote seat cannot run). Refutation retrieval (item 1) runs
+    extracted). v15.1 (James's ruling, 2026-10-13): the local
+    14B is NEVER seated on a remote ask — a failed second seat
+    degrades to the surviving remote judge alone, and there is
+    no local tiebreak. Refutation retrieval (item 1) runs
     CONCURRENTLY with the verdict stage (S1) and joins before
     resolution: claims whose refutation surfaced new material
     are re-verdicted against the union evidence, and a
@@ -3757,10 +3776,8 @@ def _judge_round(question, hits, answer, hard, mech_block="",
     disputed pool. Cached claims (S2) resolve from the verdict
     cache without new judge calls unless the join's refutation
     invalidates them. Disputes go to Flash (load-bearing, or
-    any claim on hard questions); when Flash cannot rule and
-    the local fallback is on and has not yet verdicted, the 14B
-    casts a tiebreak verdict and majority rules. Whatever no
-    judge rules on fails closed on the worst verdict. Returns
+    any claim on hard questions); whatever Flash does not rule
+    on fails closed on the worst verdict. Returns
     {mode, claims, flash_used, pass, errors, panel, refute_ms}
     where each claim carries lite/nim/local/flash/final
     verdicts (plus the v14.2-era 'third' alias of nim). mode is
@@ -3792,7 +3809,6 @@ def _judge_round(question, hits, answer, hard, mech_block="",
             nim_status = "unavailable"
             nim_error = str(primary["error"])
             if LOCAL_FALLBACK_JUDGE:
-                _warm_local_judge()
                 primary = _primary_judgment("local", question, hits,
                                             answer, mech_block)
                 primary_engine = "local"
@@ -3902,27 +3918,15 @@ def _judge_round(question, hits, answer, hard, mech_block="",
             nim_error = str(second["error"])
     if "nim" in judges:
         panel_ms["third"] = panel_ms["second"]
-    # --- Fallback second seat: a remote seat failed and the
-    # demoted 14B is flagged on. It verdicts the live claims the
-    # failed seat never reached.
-    if not second["available"] and second_engine \
-            and LOCAL_FALLBACK_JUDGE and primary_engine != "local":
-        _warm_local_judge()
-        fb = _second_verdicts("local", question, hits,
-                              [claims[i] for i in live_idx],
-                              mech_block)
-        if fb["available"]:
-            judges.append("local")
-            panel_ms["second"] = int((time.monotonic() - st0) * 1000)
-            for sub_idx, v in fb["verdicts"].items():
-                claims[live_idx[sub_idx]]["local"] = v["verdict"]
-                if v["note"]:
-                    claims[live_idx[sub_idx]]["notes"].append(
-                        v["note"])
-            second = fb
-            second_engine = "local"
-        else:
-            errors.append("local judge: " + str(fb["error"]))
+    # --- v15.1 (James's ruling, 2026-10-13): NO local second
+    # seat. Through v15.0 a failed remote second seat was filled
+    # by the local 14B, which put the 14B on the panel of
+    # ordinary remote asks. The 14B now judges ONLY in
+    # local-only degradation (both remote seats down; stage 1
+    # above) or on an explicit local pick. A failed second seat
+    # degrades the round to the surviving remote judge alone
+    # (mode gemini-only / nim-only, the *_single badges); the
+    # seat's error is already recorded above.
     # --- The join (S1): cached claims whose refutation returned
     # NEW material lose their cached verdict (their evidence
     # changed); every claim carrying refutation candidates is
@@ -4004,35 +4008,14 @@ def _judge_round(question, hits, answer, hard, mech_block="",
                 for idx, verdict in rulings.items():
                     claims[idx]["flash"] = verdict
                     claims[idx]["final"] = verdict
-        # Local tiebreak: Flash could not rule on everything and
-        # the demoted 14B is flagged on and has not verdicted.
-        rest = [i for i in disputed if claims[i]["final"] is None]
-        if rest and LOCAL_FALLBACK_JUDGE \
-                and "local" not in judges:
-            _warm_local_judge()
-            tb = _second_verdicts("local", question, hits,
-                                  [claims[i] for i in rest],
-                                  mech_block)
-            if tb["available"]:
-                if "local" not in judges:
-                    judges.append("local")
-                for sub_idx, v in tb["verdicts"].items():
-                    ci = rest[sub_idx]
-                    claims[ci]["local"] = v["verdict"]
-                    if v["note"]:
-                        claims[ci]["notes"].append(v["note"])
-                    vs = [claims[ci][k] for k in ("lite", "nim",
-                                                  "local")
-                          if claims[ci].get(k)]
-                    if len(vs) >= 3:
-                        f = _majority_final(vs)
-                        claims[ci]["final"] = f if f is not None \
-                            else _worse_verdict(
-                                vs[0], _worse_verdict(vs[1], vs[2]))
-                    elif claims[ci].get("refute_verdict") \
-                            and claims[ci]["refute_verdict"] \
-                            != "supported":
-                        claims[ci]["final"] = "contradicted"
+        # v15.1 (James's ruling, 2026-10-13): NO local
+        # tiebreak. Through v15.0, disputes Flash could not
+        # rule on went to the local 14B for a tiebreak verdict
+        # (the Miller smoke's [lite, nim, local] panel). That
+        # seat is removed: a disputed claim with no Flash
+        # ruling FAILS CLOSED in the loop below (worst verdict
+        # on record, or not_addressed). The local model is
+        # never seated on a remote ask.
         for i in disputed:
             if claims[i]["final"] is None:
                 vs = [claims[i][k] for k in ("lite", "nim", "local")
@@ -4313,12 +4296,28 @@ def _run_unit(ctx):
     def _try_generate(engine, model, instr):
         """Generate with the v15 fallback chains: a dead NIM seat
         never fails an ask (hard falls to the demoted 14B,
-        simple to the 9B, whose own fallback _generate owns)."""
+        simple to the 9B, whose own fallback _generate owns).
+        v15.1: a failed NIM draft first retries on the NIM
+        emergency seat (EMERGENCY_DRAFT_MODEL). One slow seat
+        (the Kimi drafter timing out) is not "the remote path
+        is down" and must not pull the ladder onto the local
+        GPU; the local models generate only when NIM as a
+        whole cannot run."""
         try:
             return _generate(engine, model, ctx["unit_q"],
                              ctx["hits"], instr)
         except Exception:
             if engine in ("nim", "nimfast"):
+                if model != EMERGENCY_DRAFT_MODEL:
+                    try:
+                        ans, prm = nim_ask(
+                            EMERGENCY_DRAFT_MODEL, ctx["unit_q"],
+                            ctx["hits"], instr, timeout=120)
+                        return (ans, prm,
+                                EMERGENCY_DRAFT_MODEL
+                                + " (NIM API)", False, False)
+                    except Exception:
+                        pass
                 if engine == "nim" or hard:
                     _unload_others(ROUTED_MODEL)
                     return _generate("local", ROUTED_MODEL,
@@ -4345,12 +4344,17 @@ def _run_unit(ctx):
         draft_b_text = None
         try:
             if rung == 0 and diverge:
-                # Item 4: the independent second draft (local 14B
-                # as oracle) generates in parallel with draft A.
-                _unload_others(ROUTED_MODEL)
+                # Item 4: the independent second draft (the
+                # oracle) generates in parallel with draft A.
+                # v15.1: the oracle drafts on NIM
+                # (DIVERGENCE_ORACLE_MODEL: strong, hosted, and
+                # independent of the Kimi draft A), NOT on the
+                # local 14B as in v15.0 — the local models stay
+                # cold on the remote path.
                 with ThreadPoolExecutor(max_workers=2) as pool:
                     fa = pool.submit(_try_generate, eng, mdl, instr)
-                    fb = pool.submit(_generate, "local", ROUTED_MODEL,
+                    fb = pool.submit(_generate, "nim",
+                                     DIVERGENCE_ORACLE_MODEL,
                                      ctx["unit_q"], ctx["hits"],
                                      instr)
                     res = fa.result()
