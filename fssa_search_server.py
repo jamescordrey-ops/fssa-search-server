@@ -46,6 +46,23 @@ scoped evidence (only the excerpts each claim rests on, mapped by
 the primary judgment; full set as fallback), and local judge calls
 size their context window to the prompt with a verdict-sized output
 budget instead of the answer-generation settings.
+
+v14.2 (2026-10-13): a THIRD judge seat joins the panel: a hosted
+open-weight model on a free tier (shipped default: NVIDIA NIM's
+Nemotron 3 Super 120B). It verdicts the same claim list as the
+second judge, in parallel with it, with the same claim-scoped
+evidence. Three verdicts resolve by majority (see
+_majority_final); Flash is then spent only on genuine 3-way splits
+and its final-rung role. The seat is config-driven: NVIDIA NIM,
+Groq, and Cerebras configs all live at the top of the judging
+section and one constant (THIRD_JUDGE_PROVIDER) picks the active
+provider, so moving the seat is a one-line change. The seat is
+DORMANT without the active provider's key (its key file in the
+server dir, or its env var): the seat then simply never runs and
+judging is exactly v14.1 dual judging. It ships dormant; the key
+arrives with James's provider signup. The panel (which judges
+ran, per-judge ms, third-judge status) rides in the response's
+judging metadata.
 """
 import json
 import os
@@ -180,6 +197,12 @@ try:
         GEMINI_API_KEY = f.read().strip()
 except FileNotFoundError:
     pass
+
+# v14.2: the third judge's API key is loaded lazily by
+# _third_judge_key() from the provider config at the top of the
+# judging section (env var first, then the provider's gitignored
+# key file in the server dir, the same pattern as the Gemini key
+# above). Absent key = the seat stays dormant, exactly v14.1.
 
 def _cache_get(cache, key):
     return cache.get(key)
@@ -2423,6 +2446,160 @@ def _flash_spend():
         return True
 
 
+# --- v14.2: third judge seat --------------------------------------------------
+# A third, independent verdict on every claim, from a hosted
+# open-weight model on a generous free tier. Provider decision
+# (James, 2026-10-13): NVIDIA NIM is the shipped default
+# (Nemotron 3 Super 120B; the Cerebras signup began demanding a
+# card, which reopened the choice). All three candidate providers
+# are configured here and THIRD_JUDGE_PROVIDER alone picks the
+# active one: flip that one line (and supply that provider's key)
+# to move the seat. Nothing outside this block names a provider.
+# All endpoints are OpenAI-compatible chat completions with
+# Bearer auth, so the client below is provider-agnostic. The
+# seat is DORMANT without the active provider's key:
+# _third_verdicts reports unavailable and the panel resolves
+# exactly as v14.1 dual judging. Politeness mirrors the house
+# rules for hosted free tiers: a ~60s cap (the seat answers in
+# seconds), ONE retry on 5xx, and NO retry on 429 — a
+# rate-limited judge is simply unavailable for that ask and the
+# panel degrades.
+THIRD_JUDGE_PROVIDERS = {
+    "nvidia": {
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "key_file": "nvidia_key.txt",
+        "key_env": "NVIDIA_API_KEY",
+    },
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": "openai/gpt-oss-120b",
+        "key_file": "groq_key.txt",
+        "key_env": "GROQ_API_KEY",
+    },
+    "cerebras": {
+        "base_url": "https://api.cerebras.ai/v1",
+        "model": "gpt-oss-120b",
+        "key_file": "cerebras_key.txt",
+        "key_env": "CEREBRAS_API_KEY",
+    },
+}
+THIRD_JUDGE_PROVIDER = "nvidia"  # <-- the one-line provider flip
+_THIRD_CFG = THIRD_JUDGE_PROVIDERS[THIRD_JUDGE_PROVIDER]
+THIRD_JUDGE_BASE_URL = _THIRD_CFG["base_url"]
+THIRD_JUDGE_MODEL = _THIRD_CFG["model"]
+THIRD_JUDGE_KEY_FILE = _THIRD_CFG["key_file"]
+THIRD_JUDGE_KEY_ENV = _THIRD_CFG["key_env"]
+THIRD_JUDGE_TIMEOUT = 60
+_THIRD_STATE = {"date": "", "count": 0}
+_THIRD_LOCK = threading.Lock()
+_THIRD_KEY = {"loaded": False, "value": None}
+
+
+def _third_judge_key():
+    """The active provider's API key, loaded once: its env var
+    first, else its key file in the server dir (the Gemini-key
+    pattern). None when absent; the seat then stays dormant."""
+    if not _THIRD_KEY["loaded"]:
+        _THIRD_KEY["loaded"] = True
+        val = os.environ.get(THIRD_JUDGE_KEY_ENV) or None
+        if not val:
+            try:
+                with open(THIRD_JUDGE_KEY_FILE,
+                          encoding="utf-8") as f:
+                    val = f.read().strip() or None
+            except FileNotFoundError:
+                pass
+        _THIRD_KEY["value"] = val
+    return _THIRD_KEY["value"]
+
+
+def _third_calls_today():
+    with _THIRD_LOCK:
+        today = time.strftime("%Y-%m-%d")
+        if _THIRD_STATE["date"] != today:
+            _THIRD_STATE["date"] = today
+            _THIRD_STATE["count"] = 0
+        return _THIRD_STATE["count"]
+
+
+def _third_count_one():
+    """Count one completed third-judge call (soft telemetry for the
+    free tier's daily token budget; in memory, resets on restart,
+    like the Flash counter)."""
+    with _THIRD_LOCK:
+        today = time.strftime("%Y-%m-%d")
+        if _THIRD_STATE["date"] != today:
+            _THIRD_STATE["date"] = today
+            _THIRD_STATE["count"] = 0
+        _THIRD_STATE["count"] += 1
+
+
+def _third_judge_text(system, user):
+    """One chat call to the ACTIVE third-judge provider for judge
+    work (temperature 0, OpenAI-compatible). Returns the reply
+    text; raises RuntimeError when the seat cannot run (no key,
+    429, persistent 5xx, bad reply) so the caller degrades the
+    panel instead of failing."""
+    key = _third_judge_key()
+    if not key:
+        raise RuntimeError("third judge API key not configured "
+                           f"({THIRD_JUDGE_KEY_FILE} missing)")
+    payload = json.dumps({
+        "model": THIRD_JUDGE_MODEL,
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+        "temperature": 0,
+        "max_tokens": 2048,
+    }).encode()
+    url = THIRD_JUDGE_BASE_URL + "/chat/completions"
+    last_err = None
+    for attempt in (0, 1):
+        req = urllib.request.Request(url, data=payload, headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + key})
+        try:
+            data = json.loads(urllib.request.urlopen(
+                req, timeout=THIRD_JUDGE_TIMEOUT).read())
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                raise RuntimeError(
+                    f"{THIRD_JUDGE_PROVIDER} rate limited (HTTP 429)")
+            if e.code in (500, 502, 503, 504) and attempt == 0:
+                last_err = e
+                continue
+            raise RuntimeError(
+                f"{THIRD_JUDGE_PROVIDER} HTTP {e.code}")
+        try:
+            content = data["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError, TypeError, AttributeError):
+            raise RuntimeError(
+                f"{THIRD_JUDGE_PROVIDER} returned an unexpected "
+                "response")
+        if not content:
+            raise RuntimeError(
+                f"{THIRD_JUDGE_PROVIDER} returned an empty response")
+        _third_count_one()
+        return content
+    raise RuntimeError(
+        f"{THIRD_JUDGE_PROVIDER} unavailable after retry: {last_err}")
+
+
+def _panel_info(judges, ms, third_status, third_error=None):
+    """The judging-metadata panel record: which judges produced
+    verdicts, per-seat wall-clock ms, and the third seat's status
+    ('ok', 'no-key', 'unavailable', or 'not-run')."""
+    return {"judges": list(judges),
+            "primary_ms": ms.get("primary"),
+            "second_ms": ms.get("second"),
+            "third_ms": ms.get("third"),
+            "third": {"provider": THIRD_JUDGE_PROVIDER,
+                      "model": THIRD_JUDGE_MODEL,
+                      "status": third_status,
+                      "error": third_error},
+            "third_calls_today": _third_calls_today()}
+
+
 # --- v14: judging -------------------------------------------------------------
 # Judges answer one question per claim: does the cited material
 # actually say this? Verdicts: supported / contradicted /
@@ -2687,6 +2864,65 @@ def _second_verdicts(engine, question, hits, claims, mech_block):
                 "error": str(e)[:200]}
 
 
+def _third_verdicts(question, hits, claims, mech_block):
+    """v14.2: the THIRD judge (the active provider's model, see
+    THIRD_JUDGE_PROVIDER) verdicts the SAME numbered
+    claim list as the second judge, with the same claim-scoped
+    evidence (v14.1). Verdicts only: spotting claims the extractor
+    missed stays the second judge's job. available is False
+    whenever the seat cannot run (no key, rate limited, error,
+    unusable reply); the caller then resolves the round exactly
+    as v14.1 dual judging."""
+    if not _third_judge_key():
+        return {"available": False, "verdicts": {},
+                "error": "no key configured "
+                         f"({THIRD_JUDGE_KEY_FILE} missing)"}
+    verdict_instr = (
+        "Give a verdict for EVERY numbered claim: supported, "
+        "contradicted, or not_addressed, judging ONLY against the "
+        "excerpts and blocks above, with a one-line note each. "
+        "Reply with ONLY this JSON:\n"
+        '{"verdicts": [{"i": 1, "verdict": "supported", '
+        '"note": "..."}]}')
+    scoped = _scoped_evidence(hits, claims)
+    if scoped is not None:
+        user = (
+            f"Question: {question}\n\n{mech_block}\n\n"
+            f"Claims to judge, each followed by the excerpts it "
+            f"rests on:\n{scoped}\n\n" + verdict_instr)
+    else:
+        numbered = "\n".join(
+            f"{i + 1}. {c['text']}" for i, c in enumerate(claims))
+        user = (
+            f"Question: {question}\n\nDocument excerpts:\n"
+            f"{_judge_excerpts(hits)}\n\n{mech_block}\n\n"
+            f"Claims to judge:\n{numbered}\n\n" + verdict_instr)
+    try:
+        text = _third_judge_text(_JUDGE_SYSTEM, user)
+        obj = _parse_judge_json(text)
+        if not obj or not isinstance(obj.get("verdicts"), list):
+            return {"available": False, "verdicts": {},
+                    "error": "judge reply was not usable JSON"}
+        verdicts = {}
+        for v in obj["verdicts"]:
+            try:
+                idx = int(v.get("i")) - 1
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(claims):
+                verdicts[idx] = {
+                    "verdict": _norm_verdict(v.get("verdict")),
+                    "note": str(v.get("note") or "")[:200]}
+        if not verdicts:
+            return {"available": False, "verdicts": {},
+                    "error": "judge returned no verdicts"}
+        return {"available": True, "verdicts": verdicts,
+                "error": None}
+    except Exception as e:
+        return {"available": False, "verdicts": {},
+                "error": str(e)[:200]}
+
+
 def _flash_arbitrate(question, hits, claims, indices):
     """Flash rules on the disputed claims (one call for all of them).
     Returns {index: verdict} or None when Flash is unavailable or
@@ -2697,6 +2933,12 @@ def _flash_arbitrate(question, hits, claims, indices):
     subset = [claims[i] for i in indices]
     scoped = _scoped_evidence(hits, subset,
                               labels=[i + 1 for i in indices])
+    # v14.2: with the third judge seated, arbitration sees its
+    # verdict too and the wording stops saying "two judges". The
+    # dual-judge prompt text below is byte-identical to v14.1.
+    panel_split = any(claims[i].get("third") for i in indices)
+    who = "The judges disagree" if panel_split \
+        else "Two judges disagree"
     lines = []
     for i in indices:
         c = claims[i]
@@ -2706,13 +2948,16 @@ def _flash_arbitrate(question, hits, claims, indices):
             f"({c.get('lite_note', '')})\n"
             f"   Local 14B: {c.get('local') or '-'} "
             f"({c.get('local_note', '')})")
+        if c.get("third"):
+            line += (f"\n   Third judge ({THIRD_JUDGE_MODEL} via "
+                     f"{THIRD_JUDGE_PROVIDER}): {c['third']}")
         if scoped is not None:
             line += f"\n   Evidence:\n{_claim_evidence(hits, c)}"
         lines.append(line)
     if scoped is not None:
         user = (
             f"Question: {question}\n\n"
-            "Two judges disagree on these claims. Rule on EACH "
+            f"{who} on these claims. Rule on EACH "
             "claim from the evidence shown with it alone: "
             "supported, contradicted, or not_addressed. Your "
             "ruling is final. Reply with ONLY this JSON:\n"
@@ -2722,7 +2967,7 @@ def _flash_arbitrate(question, hits, claims, indices):
         user = (
             f"Question: {question}\n\nDocument excerpts:\n"
             f"{_judge_excerpts(hits)}\n\n"
-            "Two judges disagree on these claims. Rule on EACH claim from "
+            f"{who} on these claims. Rule on EACH claim from "
             "the excerpts alone: supported, contradicted, or "
             "not_addressed. Your ruling is final. Reply with ONLY this "
             "JSON:\n"
@@ -2754,22 +2999,57 @@ def _worse_verdict(a, b):
     return "supported"
 
 
+def _majority_final(verdicts):
+    """v14.2: resolve ONE claim from THREE judges' verdicts.
+    Majority rules, fail-closed:
+    - 2+ contradicted -> contradicted (the claim fails).
+    - exactly 1 contradicted and no majority (2+) supporting ->
+      contradicted (the claim fails: an unrebutted contradiction
+      never ships).
+    - 2+ supported -> supported (the claim passes; a lone
+      not_addressed or a lone contradicted outvoted 2-to-1 does
+      not sink it).
+    - otherwise (fewer than 2 supports, no contradiction) ->
+      not_addressed (the claim is unverified: redraft fodder).
+    - one of EACH verdict (a genuine 3-way split) -> None: the
+      caller routes it to Flash arbitration under the usual
+      conditions, else fails it closed with the worst verdict.
+    """
+    s = verdicts.count("supported")
+    c = verdicts.count("contradicted")
+    if s == 1 and c == 1:
+        return None  # 1 supported + 1 contradicted + 1 not_addressed
+    if c >= 2 or (c == 1 and s < 2):
+        return "contradicted"
+    if s >= 2:
+        return "supported"
+    return "not_addressed"
+
+
 def _judge_round(question, hits, answer, hard, mech_block=""):
     """One full judging round over a draft: primary extraction +
-    verdicts, second-judge verdicts on the same list, disagreement
-    resolution (Flash arbitration for load-bearing claims, and for
-    any claim on hard/routed questions; peripheral disagreements on
-    routine questions fail closed without spending Flash).
-    Returns {mode, claims, flash_used, errors} where each claim has
-    lite/local/flash/final verdicts. mode is 'dual', 'arbitrated',
-    'gemini-only', 'local-only', or 'none' (no judge could run)."""
+    verdicts, second-judge verdicts on the same list, and (v14.2)
+    the third judge's verdicts on the same list, run concurrently
+    with the second judge's. Resolution: with three verdicts,
+    majority rules (_majority_final) and Flash is spent only on
+    genuine 3-way splits (load-bearing, or any claim on hard
+    questions) plus its final-rung role in _run_unit; with two or
+    fewer verdicts the round resolves EXACTLY as v14.1 (agreement
+    decides, disagreement to Flash under the same conditions,
+    else the worse verdict, fail closed). Returns {mode, claims,
+    flash_used, errors, panel} where each claim has lite/local/
+    third/flash/final verdicts. mode is 'panel' (three judges),
+    'dual', 'arbitrated', 'gemini-only', 'local-only', or 'none'
+    (no judge could run)."""
     errors = []
+    panel_ms = {"primary": None, "second": None, "third": None}
     # v14.1: the Lite primary judgment and the local judge's GPU
     # preparation run concurrently. The second verdict call depends
     # on the primary's claim list, so it cannot start sooner; what
     # parallelism removes is everything it used to wait on serially
     # AFTER the claims existed (unloading the 9B, loading the 14B).
     # Verdict combination below is exactly the sequential logic.
+    pt0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=2) as pool:
         fut_primary = pool.submit(_primary_judgment, "lite",
                                   question, hits, answer, mech_block)
@@ -2784,12 +3064,17 @@ def _judge_round(question, hits, answer, hard, mech_block=""):
             primary_engine = "local"
         else:
             fut_warm.result()  # GPU ready before the second judge
+    panel_ms["primary"] = int((time.monotonic() - pt0) * 1000)
     if not primary["available"]:
         errors.append("local judge: " + str(primary["error"]))
         return {"mode": "none", "claims": [], "flash_used": False,
-                "errors": errors}
+                "errors": errors,
+                "panel": _panel_info(
+                    [], panel_ms,
+                    "no-key" if not _third_judge_key() else "not-run")}
     claims = [{"text": c["text"], "load_bearing": c["load_bearing"],
-               "lite": None, "local": None, "flash": None,
+               "lite": None, "local": None, "third": None,
+               "flash": None,
                "final": None, "notes": [],
                "sources": list(c.get("sources") or [])}
               for c in primary["claims"]]
@@ -2798,38 +3083,98 @@ def _judge_round(question, hits, answer, hard, mech_block=""):
         if c["note"]:
             claims[i]["notes"].append(c["note"])
     second_engine = "local" if primary_engine == "lite" else "lite"
-    second = _second_verdicts(second_engine, question, hits,
-                               claims, mech_block)
-    mode = "dual" if second["available"] else (
-        "gemini-only" if primary_engine == "lite" else "local-only")
+    # v14.2: the second and third judges verdict the same claim
+    # list concurrently (one local/hosted pair, no shared state:
+    # the local call manages Ollama, the third is a plain HTTPS
+    # call). Neither consumes the other's output; combination
+    # below is unchanged in spirit from the sequential logic.
+    st0 = time.monotonic()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_second = pool.submit(_second_verdicts, second_engine,
+                                 question, hits, claims, mech_block)
+        fut_third = pool.submit(_third_verdicts, question, hits,
+                                claims, mech_block)
+        second = fut_second.result()
+        panel_ms["second"] = int((time.monotonic() - st0) * 1000)
+        third = fut_third.result()
+        panel_ms["third"] = int((time.monotonic() - st0) * 1000)
+    judges = [primary_engine]
     if second["available"]:
+        judges.append(second_engine)
         for idx, v in second["verdicts"].items():
             claims[idx][second_engine] = v["verdict"]
             if v["note"]:
                 claims[idx]["notes"].append(v["note"])
         for m in second["missed"]:
+            # Appended after the third judge ran: it never saw
+            # these, so they carry no third verdict and resolve
+            # under the two-verdict rules below.
             claims.append({"text": m["text"],
                            "load_bearing": m["load_bearing"],
-                           "lite": None, "local": None, "flash": None,
+                           "lite": None, "local": None, "third": None,
+                           "flash": None,
                            "final": None,
                            "notes": [m["note"]] if m["note"] else [],
                            "sources": []})
             claims[-1][second_engine] = m["verdict"]
     else:
         errors.append(second_engine + " judge: " + str(second["error"]))
-    # Resolution: agreement decides; disagreement on a load-bearing
-    # claim (or any claim on a hard question) goes to Flash; a lone
-    # judge's verdict stands in degraded modes.
+    third_status, third_error = "not-run", None
+    if third["available"]:
+        judges.append("third")
+        third_status = "ok"
+        for idx, v in third["verdicts"].items():
+            claims[idx]["third"] = v["verdict"]
+            if v["note"]:
+                claims[idx]["notes"].append(v["note"])
+    else:
+        third_error = str(third["error"])
+        if _third_judge_key():
+            third_status = "unavailable"
+            errors.append("third judge: " + third_error)
+        else:
+            # Dormant by design (no key yet): not an error, and
+            # the round is exactly a v14.1 round.
+            third_status = "no-key"
+            third_error = None
+    if len(judges) >= 3:
+        mode = "panel"
+    elif len(judges) == 2:
+        mode = "dual"
+    else:
+        mode = "gemini-only" if primary_engine == "lite" \
+            else "local-only"
+    # Resolution (v14.2). Code resolves verdicts, never averages.
+    # A claim with THREE verdicts resolves by _majority_final; a
+    # genuine 3-way split (one of each) joins the disputed pool.
+    # A claim with TWO verdicts follows the v14.1 rules exactly:
+    # agreement decides, disagreement is disputed. ONE verdict
+    # stands alone (degraded modes); ZERO verdicts is
+    # not_addressed. Disputed claims go to Flash when load-bearing
+    # (or on any claim of a hard question); whatever Flash does
+    # not rule on fails closed with the worst of its verdicts —
+    # which for a two-verdict claim is exactly v14.1's
+    # _worse_verdict(lite, local). When the third judge did not
+    # run, every claim has at most two verdicts and this whole
+    # block reduces to the v14.1 logic unchanged.
     disputed = []
     for i, c in enumerate(claims):
-        lv, jv = c["lite"], c["local"]
-        if lv and jv:
-            if lv == jv:
-                c["final"] = lv
+        vs = [c[k] for k in ("lite", "local", "third") if c.get(k)]
+        if len(vs) >= 3:
+            f = _majority_final(vs)
+            if f is None:
+                disputed.append(i)
+            else:
+                c["final"] = f
+        elif len(vs) == 2:
+            if vs[0] == vs[1]:
+                c["final"] = vs[0]
             else:
                 disputed.append(i)
+        elif len(vs) == 1:
+            c["final"] = vs[0]
         else:
-            c["final"] = lv or jv or "not_addressed"
+            c["final"] = "not_addressed"
     flash_used = False
     if disputed:
         to_rule = [i for i in disputed
@@ -2844,12 +3189,18 @@ def _judge_round(question, hits, answer, hard, mech_block=""):
                     claims[idx]["final"] = verdict
         for i in disputed:
             if claims[i]["final"] is None:
-                claims[i]["final"] = _worse_verdict(claims[i]["lite"],
-                                                    claims[i]["local"])
+                vs = [claims[i][k] for k in ("lite", "local", "third")
+                      if claims[i].get(k)]
+                w = vs[0]
+                for v in vs[1:]:
+                    w = _worse_verdict(w, v)
+                claims[i]["final"] = w
     passed = bool(claims) and all(c["final"] == "supported"
                                   for c in claims)
     return {"mode": mode, "claims": claims, "flash_used": flash_used,
-            "pass": passed, "errors": errors}
+            "pass": passed, "errors": errors,
+            "panel": _panel_info(judges, panel_ms, third_status,
+                                 third_error)}
 
 
 # --- v14: the escalation ladder ----------------------------------------------
@@ -3008,12 +3359,14 @@ def _run_unit(ctx):
                              "regenerated": rungs > 1}}
     if shipped:
         answer, _fixes = _check_arithmetic(draft)
-        badge = "verified" if jr["mode"] in ("dual", "arbitrated") \
+        badge = "verified" if jr["mode"] in ("dual", "arbitrated",
+                                             "panel") \
             else "verified_single"
         return dict(base, answer=answer, badge=badge,
                     judging={"mode": jr["mode"],
                              "flash_used": jr["flash_used"],
-                             "errors": jr["errors"]},
+                             "errors": jr["errors"],
+                             "panel": jr.get("panel")},
                     claims=jr["claims"], missing=[], gate=None)
     # IDK: assemble what is missing from the failed gates.
     missing, gate = [], "judging"
@@ -3041,7 +3394,8 @@ def _run_unit(ctx):
     return dict(base, answer=None, badge="idk",
                 judging={"mode": (jr or {}).get("mode", "none"),
                          "flash_used": (jr or {}).get("flash_used", False),
-                         "errors": (jr or {}).get("errors", [])},
+                         "errors": (jr or {}).get("errors", []),
+                         "panel": (jr or {}).get("panel")},
                 claims=(jr or {}).get("claims", []),
                 missing=missing[:8], gate=gate)
 
@@ -3213,6 +3567,8 @@ async function ask(){
     const vn = document.getElementById('verifyNote');
     if(d.judging){
       let note = 'Verification: ' + d.judging.mode;
+      if(d.judging.panel && (d.judging.panel.judges||[]).length >= 3)
+        note += ' · 3 judges';
       if(d.judging.flash_used) note += ' · Flash arbitration used';
       if(d.timing && d.timing.rungs) note += ' · ' + d.timing.rungs + ' ladder rung(s)';
       vn.textContent = note;
@@ -3480,7 +3836,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(result)
 
             no_judging = {"mode": "none", "flash_used": False,
-                          "flash_calls_today": _flash_calls_today()}
+                          "flash_calls_today": _flash_calls_today(),
+                          "panel": _panel_info(
+                              [], {"primary": None, "second": None,
+                                   "third": None},
+                              "no-key" if not _third_judge_key()
+                              else "not-run")}
             if not hits:
                 missing = ["no documents in the selected corpus "
                            "matched the question"]
@@ -3662,11 +4023,36 @@ class Handler(BaseHTTPRequestHandler):
                                 [f["label"] for f in g_fail])
                         n_gaps += 1
             modes = {u["judging"]["mode"] for u in units}
+            # v14.2: aggregate the units' panel records (bundled
+            # parts share the same seat configuration): the union
+            # of judges that ran, and the third seat's status —
+            # 'ok' if it judged any unit, else the dormant/failed
+            # status every unit reported.
+            panel_judges = []
+            third_status = "no-key" if not _third_judge_key() \
+                else "not-run"
+            for u in units:
+                p = u["judging"].get("panel") or {}
+                for j in p.get("judges") or ():
+                    if j not in panel_judges:
+                        panel_judges.append(j)
+                st = (p.get("third") or {}).get("status")
+                if st == "ok":
+                    third_status = "ok"
+                elif st == "unavailable" and third_status != "ok":
+                    third_status = "unavailable"
             judging = {"mode": modes.pop() if len(modes) == 1
                        else "mixed",
                        "flash_used": any(u["judging"]["flash_used"]
                                          for u in units),
-                       "flash_calls_today": _flash_calls_today()}
+                       "flash_calls_today": _flash_calls_today(),
+                       "panel": {
+                           "judges": panel_judges,
+                           "third": {
+                               "provider": THIRD_JUDGE_PROVIDER,
+                               "model": THIRD_JUDGE_MODEL,
+                               "status": third_status},
+                           "third_calls_today": _third_calls_today()}}
             verification = [{
                 "part": u["part"], "badge": u["badge"],
                 "claims": len(u["claims"]),
