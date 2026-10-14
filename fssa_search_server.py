@@ -4376,15 +4376,24 @@ def _or_persist_locked():
 def _or_reconciled_floor():
     """The provider-side settled figure for the ledger day, from
     the cached /auth/key state's usage_daily (F11-3): the
-    maximum of the rows for the ledger day and the UTC day (the
-    provider's day frame). 0.0 when unknown; never fetches."""
+    maximum of the dated rows for the ledger day and the UTC
+    day (the provider's day frame). 0.0 when unknown; never
+    fetches.
+
+    Only a list of dated rows contributes. A scalar (or any
+    other non-list shape) returns 0.0: live observation
+    (2026-10-14) showed the provider returning a cumulative
+    scalar under this field, equal to the key's total usage,
+    and an undated figure cannot be attributed to the ledger
+    day; counting it would fence off every OpenRouter seat
+    once lifetime usage passed the daily ceiling. The
+    reservation ledger is the daily source of truth; dated
+    rows still reconcile as a floor."""
     data = _OR_KEY_STATE.get("data") or {}
     ud = data.get("usage_daily")
     days = {_ledger_today(), time.strftime("%Y-%m-%d",
                                            time.gmtime())}
     try:
-        if isinstance(ud, (int, float)):
-            return float(ud)
         if isinstance(ud, list):
             vals = [float(row.get("usage") or 0.0)
                     for row in ud
