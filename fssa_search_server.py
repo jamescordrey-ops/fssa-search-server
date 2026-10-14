@@ -3144,6 +3144,15 @@ def _third_count_one():
 # rolling median over budget; the job fails over to its next
 # measured candidate. Seats are never re-shopped per ask.
 SEAT_SLOTS = {
+    # v17.1: slot 0 is the OpenRouter pseudo-slot. Candidates
+    # pinned to it are served by _or_text (the v17 OpenRouter
+    # path: usage reporting, deny routing, cost ledgering)
+    # instead of a NIM key. _slot_has_key gates the slot on
+    # _or_available(), so a missing key or a tripped daily cap
+    # benches every OpenRouter candidate at once and the seat
+    # fails over to its NIM candidates, exactly as a keyless
+    # NIM slot degrades instead of burning retries.
+    0: ("OPENROUTER_API_KEY", "openrouter_key.txt"),
     1: ("NVIDIA_API_KEY", "nvidia_key.txt"),
     2: ("NVIDIA_API_KEY2", "nvidia_key2.txt"),
     3: ("NVIDIA_API_KEY3", "nvidia_key3.txt"),
@@ -3166,10 +3175,24 @@ SEATS = {
                        ("nvidia/nemotron-3.5-lightning-30b-a3b", 2)],
         "budget_median": 30.0, "budget_p95": 120.0},
     "judge_nim1": {
-        "candidates": [("nvidia/nemotron-3-super-120b-a12b", 1),
-                       ("nvidia/nemotron-3-ultra-550b-a55b", 1),
-                       ("deepseek-ai/deepseek-v4.1-flash", 1)],
-        "budget_median": 20.0, "budget_p95": None},
+        # v17.1 (James's ruling, 2026-10-14): the paid judges
+        # lead this seat — OpenRouter DeepSeek V3.1, then
+        # OpenRouter Qwen3-32B, with NIM Nemotron Super kept
+        # as the free failover (the seat's old runner-ups
+        # still serve in judge_nim2's chain). Evidence is the
+        # coordinator's 10-claim Miller-packet probe, accepted
+        # by James in place of a battery run: DeepSeek 10/10
+        # verdicts at $0.000573/call (31s), Qwen 10/10 at
+        # $0.000297 (23s), Super 8/10 (36s, one empty first
+        # attempt). The median budget rises from 20s to 45s
+        # because it was written for the old seat: at 20s the
+        # bench rule would bench the new primaries on their
+        # own measured latency and silently hand the seat
+        # back to the failover.
+        "candidates": [("deepseek/deepseek-chat-v3.1", 0),
+                       ("qwen/qwen3-32b", 0),
+                       ("nvidia/nemotron-3-super-120b-a12b", 1)],
+        "budget_median": 45.0, "budget_p95": None},
     "judge_nim2": {
         "candidates": [("nvidia/nemotron-3-ultra-550b-a55b", 3),
                        ("deepseek-ai/deepseek-v4.1-flash", 3),
@@ -3191,9 +3214,14 @@ def _seat_state(job, model):
 
 
 def _slot_has_key(slot):
-    """Whether a NIM key is configured for a key slot (env var
-    or the slot's key file). A seat whose slot has no key is
-    dormant, exactly as v15's seats were without their key."""
+    """Whether a key is configured for a key slot (env var or
+    the slot's key file). A seat whose slot has no key is
+    dormant, exactly as v15's seats were without their key.
+    Slot 0 is the OpenRouter pseudo-slot (v17.1): it counts as
+    keyed only while the OpenRouter seats may run at all (key
+    present and the daily spend cap untripped)."""
+    if slot == 0:
+        return _or_available()
     key_env, key_file = SEAT_SLOTS[slot]
     return _nim_key_for(key_env, key_file) is not None
 
@@ -3329,10 +3357,13 @@ def _retr_snapshot():
 
 
 def _judge_seat_text(job, system, user):
-    """One verdict call on a NIM judge seat, with seat health
+    """One verdict call on a judge seat, with seat health
     and failover to the seat's next measured candidate.
     Raises RuntimeError when every candidate fails (the caller
-    degrades per the panel rules)."""
+    degrades per the panel rules). v17.1: a candidate on the
+    OpenRouter pseudo-slot (slot 0) is served by _or_text with
+    a 4000-token budget (both pinned judges are reasoning
+    models; the NIM seats keep their 2048)."""
     tried = []
     while True:
         model, slot, failover = _seat_pick(job, skip=tried)
@@ -3340,14 +3371,21 @@ def _judge_seat_text(job, system, user):
             raise RuntimeError(
                 f"{job}: all seat candidates unavailable "
                 f"(tried {tried})")
-        key_env, key_file = SEAT_SLOTS[slot]
         t0 = time.monotonic()
         try:
-            content = _nim_text(SEAT_BASE_URL, key_env, key_file,
-                                model, system, user, temperature=0,
-                                max_tokens=2048,
-                                timeout=THIRD_JUDGE_TIMEOUT,
-                                provider="nim")
+            if slot == 0:
+                content = _or_text(
+                    model, system, user, temperature=0,
+                    max_tokens=4000,
+                    timeout=THIRD_JUDGE_TIMEOUT)
+            else:
+                key_env, key_file = SEAT_SLOTS[slot]
+                content = _nim_text(
+                    SEAT_BASE_URL, key_env, key_file,
+                    model, system, user, temperature=0,
+                    max_tokens=2048,
+                    timeout=THIRD_JUDGE_TIMEOUT,
+                    provider="nim")
             lat = time.monotonic() - t0
             _seat_report(job, model, lat, True)
             if failover:
@@ -3580,6 +3618,15 @@ _OR_ROUTES = {
     OPENROUTER_SIMPLE_MODEL: {
         "order": ["Groq"], "allow_fallbacks": True,
         "data_collection": "deny"},
+    # v17.1: the judge_nim1 seat's OpenRouter candidates. No
+    # backend order is pinned (no per-backend latency
+    # measurement exists for judging; the probe ran unpinned),
+    # but the deny restriction matches the drafting seats, so
+    # only backends that do not collect prompts may serve.
+    "deepseek/deepseek-chat-v3.1": {
+        "allow_fallbacks": True, "data_collection": "deny"},
+    "qwen/qwen3-32b": {
+        "allow_fallbacks": True, "data_collection": "deny"},
 }
 
 # The spend ledger (billing guardrail): a persistent daily
@@ -3823,9 +3870,11 @@ def _nim_text(base_url, key_env, key_file, model, system, user,
 
 
 def _third_judge_text(system, user):
-    """One verdict call to the judge_nim1 seat (v16: seat-based,
-    key slot 1; health-tracked with failover to the seat's
-    runner-up candidates). Temperature 0."""
+    """One verdict call to the judge_nim1 seat (v16: seat-based;
+    health-tracked with failover to the seat's runner-up
+    candidates; v17.1: the seat's lead candidates ride
+    OpenRouter, NIM Nemotron Super is its free failover).
+    Temperature 0."""
     content = _judge_seat_text("judge_nim1", system, user)
     _third_count_one()
     return content
@@ -3836,6 +3885,46 @@ def _nim2_judge_text(system, user):
     second standing NIM judge, on key slot 3, a different model
     family from seat 1 where the bake-off allowed)."""
     return _judge_seat_text("judge_nim2", system, user)
+
+
+# --- v17.1: GPT-OSS citation dialect normalization ------------------
+# GPT-OSS drafts cite in a dialect the citation parser does
+# not read (v17 acceptance diagnosis): load-bearing sentences
+# carrying these markers counted as uncited at the
+# citations-at-birth gate, drew objections, and the redrafts
+# repeated the dialect until the ladder exhausted. Two forms,
+# harvested verbatim from the v17 pest-control job records —
+# these are the only dialect forms the samples show:
+#   [Excerpt N] with the word and the number separated by a
+#       narrow no-break space (U+202F) inside square brackets
+#       (attempt 1's shipped answer and its prompt's quoted
+#       draft: 6 instances, adjacent markers chaining, e.g.
+#       "[Excerpt\u202f10][Excerpt\u202f12]"), in the answer
+#       always trailed by a zero-width space (U+200B).
+#   【N】 fullwidth brackets (U+3010/U+3011) around the
+#       number (attempt 2's judging feedback quoting draft
+#       sentences: 8 instances).
+# Both rewrite to the canonical [N]. The rewrite runs where
+# remote drafts are born (nim_ask / or_ask) so every consumer
+# downstream — the citation gate, the judges, the capped
+# assembly — sees one dialect. Canonical [n] markers match
+# neither pattern and pass through byte-identical; unbracketed
+# "Excerpt N" prose (the prompt's own excerpt labels) is not
+# a citation and is never matched (the bracket is required).
+_CITE_DIALECT_EXCERPT = re.compile(r"\[Excerpt\s+(\d+)\]\u200b?")
+_CITE_DIALECT_FULLWIDTH = re.compile(r"【(\d+)】")
+
+
+def _normalize_citations(text):
+    """Rewrite the harvested GPT-OSS citation dialect forms
+    (see the block above) into canonical [n] markers. The
+    trailing zero-width space is consumed only when it
+    directly follows a dialect marker (it is part of that
+    marker's observed typography, and left in place it would
+    sit between the canonical marker and the sentence-final
+    punctuation the citation tail regex reads)."""
+    text = _CITE_DIALECT_EXCERPT.sub(r"[\1]", text)
+    return _CITE_DIALECT_FULLWIDTH.sub(r"[\1]", text)
 
 
 def nim_ask(model, question, hits, instructions="", key_env=None,
@@ -3862,6 +3951,10 @@ def nim_ask(model, question, hits, instructions="", key_env=None,
     # never answer text, so cut anything from the first such
     # marker onward.
     content = re.split(r"<\|[^>]{0,40}>", content)[0].strip()
+    # v17.1: the GPT-OSS models serve these seats too (on NIM
+    # as fallback candidates); normalize their citation
+    # dialect before the pipeline reads the draft.
+    content = _normalize_citations(content)
     if not content:
         raise RuntimeError("NIM drafter returned an empty response")
     return content, sys_prompt + "\n\n" + user_msg
@@ -3881,6 +3974,9 @@ def or_ask(model, question, hits, instructions=""):
                        temperature=0.3, max_tokens=2048,
                        timeout=OPENROUTER_DRAFTER_TIMEOUT)
     content = re.split(r"<\|[^>]{0,40}>", content)[0].strip()
+    # v17.1: normalize the GPT-OSS citation dialect (the v17
+    # pest-control failure) before the pipeline reads the draft.
+    content = _normalize_citations(content)
     if not content:
         raise RuntimeError("openrouter drafter returned an "
                            "empty response")
@@ -3892,10 +3988,13 @@ def _panel_info(judges, ms, third_status, third_error=None,
     """The judging-metadata panel record: which judges produced
     verdicts, per-seat wall-clock ms, and the NIM seats' status
     ('ok', 'no-key', 'unavailable', or 'not-run'). v16: the
-    "third" record describes the judge_nim1 seat (key slot 1)
-    and a "nim2" record the judge_nim2 seat (key slot 3); the
-    model named is the seat's assigned candidate — the ask's
-    seat events record the model that actually served."""
+    "third" record describes the judge_nim1 seat and a "nim2"
+    record the judge_nim2 seat (key slot 3); the model named
+    is the seat's assigned candidate — the ask's seat events
+    record the model that actually served. v17.1: judge_nim1's
+    primary candidate rides the OpenRouter pseudo-slot, so
+    the third record's provider and key_slot are read off the
+    seat's active candidate instead of hardcoded to NIM."""
     nim1_model, _s1, _f1 = _seat_pick("judge_nim1")
     nim2_model, _s2, _f2 = _seat_pick("judge_nim2")
     return {"judges": list(judges),
@@ -3903,9 +4002,10 @@ def _panel_info(judges, ms, third_status, third_error=None,
             "second_ms": ms.get("second"),
             "third_ms": ms.get("third"),
             "nim2_ms": ms.get("nim2"),
-            "third": {"provider": "nim",
+            "third": {"provider": ("openrouter" if _s1 == 0
+                                   else "nim"),
                       "model": nim1_model or THIRD_JUDGE_MODEL,
-                      "key_slot": 1,
+                      "key_slot": _s1,
                       "status": third_status,
                       "error": third_error},
             "nim2": {"provider": "nim",
@@ -6599,7 +6699,14 @@ class Handler(BaseHTTPRequestHandler):
                        "panel": {
                            "judges": panel_judges,
                            "third": {
-                               "provider": THIRD_JUDGE_PROVIDER,
+                               # v17.1: judge_nim1's primary
+                               # rides OpenRouter; name the
+                               # provider of its active candidate.
+                               "provider": ("openrouter"
+                                            if _seat_pick(
+                                                "judge_nim1")[1] == 0
+                                            else
+                                            THIRD_JUDGE_PROVIDER),
                                "model": _seat_pick("judge_nim1")[0]
                                or THIRD_JUDGE_MODEL,
                                "status": third_status},
