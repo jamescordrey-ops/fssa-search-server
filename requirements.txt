@@ -1,2 +1,10 @@
-numpy>=1.26
-pymupdf>=1.24  # only needed by parse_pdfs.py (PDF ingest)
+# Runtime dependency of the server (embeddings matrix math).
+# Version verified against the reference deployment's Python 3.12
+# environment (pip list, 2026-10-14).
+numpy==2.5.3
+
+# Only needed by tools/parse_pdfs.py (PDF ingest for corpus building).
+# NOTE: no installed copy could be verified on the reference machine,
+# so this floor is carried over from the previous requirements file
+# rather than pinned to a verified install.
+pymupdf>=1.24

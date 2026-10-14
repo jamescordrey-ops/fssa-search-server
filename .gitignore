@@ -1,16 +1,29 @@
-# Secrets: never commit keys. The Gemini chain reads gemini_key.txt
-# from the server directory at runtime; keep yours local.
-gemini_key.txt
+# Repository layout note: the repo groups files by role (server/,
+# data/, tools/, tests/). At runtime the server expects a FLAT
+# directory: fssa_search_server.py + corpus files + embeddings +
+# key files side by side. Deployment copies server/ and data/
+# contents into that runtime directory.
+
+# Secrets: never commit keys. Providers read *_key.txt files from
+# the runtime server directory; keep yours local.
 *_key.txt
+*_key*.txt
 *.key
 .env
 .env.*
 
-# Generated embeddings: rebuild with the scripts (see README).
+# Generated embeddings: rebuild with the tools (see README).
 embeddings.json
 embeddings.jsonl
 embeddings.npz
 embeddings*.bak*
+
+# Runtime state written by the server (spend ledger, guard
+# counters, ask records): local to the runtime directory.
+*_spend.json
+*_usage.json
+ask_records.jsonl
+gap_log.jsonl
 
 # Data backups and pipeline byproducts
 *.bak
@@ -31,13 +44,11 @@ t_*.json
 *.log
 *.err
 
-# Build-session status/report docs
+# Build-session status/report docs (curated copies live in docs/
+# as STATUS-v*.md; raw session files stay out)
 STATUS.md
 *_REPORT.md
 
 # Python
 __pycache__/
 *.pyc
-nvidia_key2.txt
-nvidia_key3.txt
-*_key*.txt
