@@ -38,3 +38,6 @@ STATUS.md
 # Python
 __pycache__/
 *.pyc
+nvidia_key2.txt
+nvidia_key3.txt
+*_key*.txt
