@@ -7556,7 +7556,19 @@ def _run_job(rec, raw_body, headers):
     except Exception:
         pass
     shim = type("_JobShim", (), {})()
-    shim.headers = headers
+    # v18 fix (2026-10-14, live-found): the re-serialized body
+    # above can be LONGER than the original request body (the
+    # async strip re-dumps with default separators), while the
+    # shim's do_POST re-reads exactly the original
+    # Content-Length bytes: the body arrived truncated, the
+    # JSON parse failed, and v18's new except handler masked
+    # the real error behind an unbound _inf_entry. The shim
+    # therefore carries a corrected Content-Length for the
+    # body it actually holds (headers are read only for
+    # Content-Length in do_POST).
+    _shim_headers = dict(headers.items())
+    _shim_headers["Content-Length"] = str(len(raw_body))
+    shim.headers = _shim_headers
     shim.rfile = io.BytesIO(raw_body)
     shim.path = "/ask"
     shim.wfile = io.BytesIO()
@@ -7688,6 +7700,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        # v18 fix (2026-10-14, live-found): the dedupe handles
+        # are bound BEFORE the try, so the except handler can
+        # never mask an early failure (e.g. an unparseable
+        # body) behind an unbound-variable error.
+        _inf_entry = None  # v18 (F18): dedupe ownership
+        _inf_key = None
         try:
             length = int(self.headers.get("Content-Length", 0))
             # DoS protection: reject bodies over 100KB
