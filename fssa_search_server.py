@@ -4575,6 +4575,117 @@ def _parse_citations(answer, hits):
             "uncited_lb": uncited_lb}
 
 
+# --- v17.3: strip, don't sink (James's ruling, 2026-10-14) --------------------
+# In the v17.2 acceptance re-run every extracted claim passed
+# every judge, yet the answer failed closed to IDK because ONE
+# factual sentence in the final draft carried no citation: a
+# parenthetical aside. James's ruling: after a draft's repair
+# rungs are exhausted, a factual sentence that still fails
+# citations at birth AND maps to NO extracted claim (an aside,
+# not a claim-bearing sentence) is REMOVED from the draft
+# instead of failing the unit; the stripped draft then
+# re-enters the normal final disposition. Claim-bearing
+# sentences are NEVER stripped (a sentence tied to an
+# extracted claim that cannot be cited still fails closed
+# exactly as before), the mechanism lead sentence is never
+# stripped (load-bearing by construction, item 4), stripping
+# never happens when it would leave no cited factual content,
+# and every cut is recorded in the unit record's
+# stripped_sentences so the honesty surface shows it.
+
+def _sentence_maps_to_claim(sentence, claims):
+    """Does this draft sentence carry one of the extracted
+    claims? Tested by normalized-text containment, either way,
+    in full or by the 40-character prefix (the same containment
+    tests _assemble_capped_partial uses to tie sentences to
+    claims). Token overlap is deliberately NOT a signal here:
+    it measures topical relatedness, and the aside this ruling
+    targets shares most of its vocabulary with the claim it
+    parenthetically supports, so an overlap test would class
+    the exact target sentence as claim-bearing and the strip
+    could never fire."""
+    ns = _norm_claim_text(sentence)
+    if not ns:
+        return False
+    for c in claims or ():
+        nc = _norm_claim_text(c.get("text") or "")
+        if not nc:
+            continue
+        if ns in nc or nc in ns:
+            return True
+        if ns[:40] and nc[:40] and (ns[:40] in nc
+                                    or nc[:40] in ns):
+            return True
+    return False
+
+
+def _remove_sentence(text, sentence):
+    """Remove ONE occurrence of a sentence from a draft,
+    swallowing the whitespace that followed it (or, at the
+    end of the text, the whitespace that preceded it) so the
+    surviving text is touched nowhere else. Returns None when
+    the sentence is not found verbatim."""
+    i = text.find(sentence)
+    if i < 0:
+        return None
+    j = i + len(sentence)
+    k = j
+    while k < len(text) and text[k] in " \t\r\n":
+        k += 1
+    if k > j:
+        return text[:i] + text[k:]
+    h = i
+    while h > 0 and text[h - 1] in " \t\r\n":
+        h -= 1
+    return text[:h] + text[j:]
+
+
+def _strip_uncited_asides(draft, parsed, claims, lead_sentence=None):
+    """The v17.3 strip. Candidates are the draft's uncited
+    load-bearing sentences (parsed['uncited_lb']). A candidate
+    is strippable only when it maps to no extracted claim and
+    is not the mechanism lead sentence. Returns (new_draft,
+    [removed sentence texts]) when at least one sentence was
+    removed and the result verifies; (None, []) when nothing
+    may be stripped (no candidates, no judged claims, every
+    candidate claim-bearing or the lead, no cited factual
+    content to leave behind, or the removal does not verify).
+    Verification: the stripped draft's sentence list must be
+    exactly the original list minus the removed sentences,
+    byte-identical and in order; on any mismatch the strip is
+    abandoned and the draft fails closed as before."""
+    uncited = list(parsed.get("uncited_lb") or ())
+    if not uncited or not claims:
+        return None, []
+    if not parsed.get("cited_claims"):
+        return None, []
+    eligible, seen = [], set()
+    for s in uncited:
+        if s in seen:
+            continue
+        seen.add(s)
+        if lead_sentence is not None and s == lead_sentence:
+            continue
+        if _sentence_maps_to_claim(s, claims):
+            continue
+        eligible.append(s)
+    if not eligible:
+        return None, []
+    new_draft = draft
+    for s in eligible:
+        new_draft = _remove_sentence(new_draft, s)
+        if new_draft is None:
+            return None, []
+    expect = _split_sentences(draft)
+    for s in eligible:
+        if s not in expect:
+            return None, []
+        expect.remove(s)
+    if _split_sentences(new_draft) != expect:
+        return None, []
+    return new_draft, eligible
+
+
 # --- v15: refutation retrieval (item 1, parallel per S1) ----------------------
 def _refutation_queries(claim, mechanisms):
     """Search queries designed to DISPROVE one claim: its own
@@ -5401,6 +5512,7 @@ def _run_unit(ctx):
         and not ctx.get("explicit_model") and hard
     ev0 = len(_events())
     lead_repairs = 0
+    stripped_sentences = []
     conflicts = _conflict_scan(ctx["hits"])
     draft = None
     jr = None
@@ -5652,6 +5764,41 @@ def _run_unit(ctx):
                 + ". Rewrite the lead with that citation "
                 "attached; do not drop the mechanism.")
         draft = None if rung < 2 else draft
+    # v17.3: strip, don't sink. The ladder's repair rungs are
+    # exhausted; if the last judged draft still carries uncited
+    # load-bearing sentences, cut the ones that map to no
+    # extracted claim (asides) and let the stripped draft
+    # re-enter the normal final disposition below (ship test,
+    # Flash arbitration, capped assembly) with every
+    # deterministic gate re-run on the stripped text. The cuts
+    # are recorded in stripped_sentences. Claim-bearing
+    # uncited sentences are untouched: they fail closed below
+    # exactly as before.
+    if uncited_lb and judged_draft is not None and jr is not None \
+            and jr["mode"] != "none" and jr["claims"]:
+        lead_now = None
+        if ctx["mechanisms"]:
+            for s in parsed["sentences"]:
+                if s["factual"]:
+                    lead_now = s["text"]
+                    break
+        stripped_draft, stripped_sentences = _strip_uncited_asides(
+            judged_draft, parsed, jr["claims"], lead_now)
+        if stripped_draft is not None:
+            draft = stripped_draft
+            judged_draft = stripped_draft
+            parsed = _parse_citations(stripped_draft, ctx["hits"])
+            uncited_lb = parsed["uncited_lb"]
+            _a, ungrounded = _check_figures(
+                stripped_draft, ctx["question"], ctx["hits"],
+                extra_allowed=ctx["allowed_extra"])
+            mech_failures = _mech_required_failures(
+                stripped_draft, ctx["mechanisms"],
+                ctx.get("csra_comp"))
+            quantities = _check_quantities(stripped_draft,
+                                            ctx["question"])
+            missing_points = _points_missing(required_points,
+                                             stripped_draft)
     shipped = False
     if draft is not None and jr is not None and jr["mode"] != "none":
         if jr["pass"] and not ungrounded and not mech_failures \
@@ -5690,7 +5837,8 @@ def _run_unit(ctx):
                              "regenerated": rungs > 1},
             "divergence": divergence,
             "events": _events_since(ev0),
-            "lead_repairs": lead_repairs}
+            "lead_repairs": lead_repairs,
+            "stripped_sentences": stripped_sentences}
     if shipped:
         answer, _fixes = _check_arithmetic(draft)
         badge = "verified" if jr["mode"] in ("dual", "arbitrated",
@@ -6779,6 +6927,7 @@ class Handler(BaseHTTPRequestHandler):
                 "divergence": u.get("divergence"),
                 "events": u.get("events"),
                 "lead_repairs": u.get("lead_repairs"),
+                "stripped_sentences": u.get("stripped_sentences"),
                 "web": u.get("web"),
                 "web_used": bool(u.get("web_used"))}
                 for u in units]
