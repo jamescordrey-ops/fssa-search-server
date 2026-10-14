@@ -122,6 +122,29 @@ branch answers ship under the new badge verified_web with the
 fetch provenance in the record, and every branch-out gap-logs
 for rescrape absorption. Retrieval reports its sub-timings per
 ask (item 8). The 600s cap is unchanged.
+
+v17 (2026-10-13): the paid swap (James's go in chat): the
+primary seats move to OpenRouter, hand-picked from the v16
+bake-off measurements, NO new bake-off. GPT-OSS-120B (pinned
+to its fastest backend, Cerebras-hosted, fallbacks allowed)
+drafts hard questions; GPT-OSS-20B drafts simple questions
+and takes over the retrieval utilities (the v16 split showed
+rewrite + rerank were 80-95% of retrieval time); every
+OpenRouter seat failure falls back to the seat's v16 NIM
+assignment, and the local last-resort rules are untouched.
+Judges are UNCHANGED (Gemini Lite + the two NIM Nemotron
+seats), as are the divergence oracle and branch-out. Billing
+guardrails (James's hard requirement): every OpenRouter
+response reports its cost (usage include), accumulated into
+the answer metadata (cost_usd) and a persistent daily counter
+(openrouter_spend.json); at OPENROUTER_DAILY_CAP_USD (default
+$1.00/day) the OpenRouter seats are treated as unavailable
+and the fallback chain takes over, the trip logged. The
+key's own limit state (GET /auth/key) is read at startup and
+reported in /health, so a dashboard-side key cap is visible
+next to the code-side one. The key lives only in
+openrouter_key.txt (gitignored by name in both PC repos,
+verified before the file was created).
 """
 import hashlib
 import http.client
@@ -334,6 +357,22 @@ def _https_post(host, path, body, headers, timeout=60):
     return resp.status, data
 
 
+def _https_get(host, path, headers, timeout=30):
+    """One GET over the keep-alive pool (v17: the OpenRouter
+    key-state read). Same contract as _https_post."""
+    conn = _pool_acquire(host)
+    conn.timeout = timeout
+    try:
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        data = resp.read()
+    except Exception:
+        _pool_release(host, conn, False)
+        raise
+    _pool_release(host, conn, True)
+    return resp.status, data
+
+
 # --- v15 speedup S5: job stage tracking ------------------------------------
 # The webapp's async jobs report a live stage ("retrieving",
 # "drafting", "judging round 2", "arbitrating", "done"). The stage
@@ -457,7 +496,21 @@ def _utility_text(prompt, max_tokens=256, timeout=30):
     candidate and key slot (seat machinery defined later in this
     file; resolves at call time). Utility calls deliberately do
     not report to seat health: their short outputs would
-    pollute the drafting seat's latency median."""
+    pollute the drafting seat's latency median. v17: the
+    OpenRouter utility seat (GPT-OSS-20B) gets the call first —
+    the v16 split showed these calls were 80-95% of retrieval
+    time; any OpenRouter failure falls through to the NIM seat
+    path below, unchanged."""
+    if _or_available():
+        try:
+            return _or_text(
+                OPENROUTER_UTILITY_MODEL,
+                "You are a precise retrieval utility. Reply with "
+                "only the requested output, no explanations.",
+                prompt, temperature=0, max_tokens=max_tokens,
+                timeout=timeout)
+        except Exception:
+            pass  # the NIM seat path below takes over
     model, slot, _fo = _seat_pick("simple_draft")
     if model is None:
         model, key_env, key_file = (DRAFTER_SIMPLE_MODEL,
@@ -3494,26 +3547,234 @@ def _branch_out_hits(question, claims):
     return web_hits, rec
 
 
+# --- v17: OpenRouter primary seats ----------------------------------
+# The paid swap (James's go, 2026-10-13): OpenRouter takes the
+# primary drafting seats and the retrieval utilities; the v16
+# NIM seats remain as the fallback chain (see _generate and
+# _utility_text), judges and the divergence oracle are
+# untouched. Model slugs and backend labels verified against
+# OpenRouter's live catalog at build time: openai/gpt-oss-120b
+# is hosted by Cerebras (its fastest backend, fp16) and Groq;
+# openai/gpt-oss-20b by Groq (no Cerebras endpoint). Routing
+# pins the fastest backend first with fallbacks allowed to the
+# model's other backends, and data_collection "deny" restricts
+# the pool to backends that do not collect prompts for
+# training. Every call asks for usage reporting so the
+# response carries its exact cost (verified live: usage.cost
+# in USD alongside the token counts).
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_KEY_FILE = "openrouter_key.txt"
+OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
+OPENROUTER_HARD_MODEL = "openai/gpt-oss-120b"
+OPENROUTER_SIMPLE_MODEL = "openai/gpt-oss-20b"
+OPENROUTER_UTILITY_MODEL = "openai/gpt-oss-20b"
+OPENROUTER_DRAFTER_TIMEOUT = 120  # Cerebras drafts land in
+# seconds; the bound only caps a degraded backend before the
+# NIM seat takes over (the NIM path keeps DRAFTER_TIMEOUT).
+OPENROUTER_DAILY_CAP_USD = float(
+    os.environ.get("OPENROUTER_DAILY_CAP_USD", "1.00"))
+_OR_ROUTES = {
+    OPENROUTER_HARD_MODEL: {
+        "order": ["Cerebras", "Groq"], "allow_fallbacks": True,
+        "data_collection": "deny"},
+    OPENROUTER_SIMPLE_MODEL: {
+        "order": ["Groq"], "allow_fallbacks": True,
+        "data_collection": "deny"},
+}
+
+# The spend ledger (billing guardrail): a persistent daily
+# counter in the server dir, fed by _or_note_cost from every
+# OpenRouter response (_nim_text, or_route=True). The per-ask
+# share accumulates in a thread-local (an ask runs on one
+# thread end to end, sync or job) for the answer metadata.
+_OR_SPEND_FILE = "openrouter_spend.json"
+_OR_LOCK = threading.Lock()
+_OR_STATE = {"date": "", "spend": 0.0}
+_OR_TLS = threading.local()
+
+
+def _or_spend_today():
+    """Today's accumulated OpenRouter spend in USD (persisted
+    across restarts; a new day starts at zero)."""
+    today = time.strftime("%Y-%m-%d")
+    with _OR_LOCK:
+        if _OR_STATE["date"] != today:
+            spend = 0.0
+            try:
+                with open(_OR_SPEND_FILE, encoding="utf-8") as f:
+                    st = json.load(f)
+                if st.get("date") == today:
+                    spend = float(st.get("spend") or 0.0)
+            except Exception:
+                pass
+            _OR_STATE["date"] = today
+            _OR_STATE["spend"] = spend
+        return _OR_STATE["spend"]
+
+
+def _or_note_cost(cost):
+    """Record one OpenRouter call's reported cost: the daily
+    ledger (persisted) and this thread's per-ask total. The
+    moment the day's spend crosses the cap is logged once."""
+    if not cost or cost <= 0:
+        return
+    _OR_TLS.cost = getattr(_OR_TLS, "cost", 0.0) + cost
+    _or_spend_today()  # loads today's persisted total first
+    today = time.strftime("%Y-%m-%d")
+    with _OR_LOCK:
+        before = _OR_STATE["spend"]
+        _OR_STATE["spend"] = before + cost
+        try:
+            with open(_OR_SPEND_FILE, "w", encoding="utf-8") as f:
+                json.dump({"date": today,
+                           "spend": _OR_STATE["spend"]}, f)
+        except Exception:
+            pass
+        crossed = before < OPENROUTER_DAILY_CAP_USD \
+            <= _OR_STATE["spend"]
+        total = _OR_STATE["spend"]
+    if crossed:
+        print(f"[openrouter] daily spend cap reached "
+              f"(${total:.4f} >= ${OPENROUTER_DAILY_CAP_USD:.2f}); "
+              f"OpenRouter seats unavailable until tomorrow, "
+              f"the NIM fallback chain takes over", flush=True)
+
+
+def _or_reset_ask():
+    _OR_TLS.cost = 0.0
+
+
+def _or_ask_cost():
+    """This ask's OpenRouter spend in USD (0.0 on the free
+    paths), for the answer metadata's cost_usd."""
+    return round(getattr(_OR_TLS, "cost", 0.0), 6)
+
+
+def _or_key():
+    return _nim_key_for(OPENROUTER_KEY_ENV, OPENROUTER_KEY_FILE)
+
+
+def _or_cap_tripped():
+    return _or_spend_today() >= OPENROUTER_DAILY_CAP_USD
+
+
+def _or_available():
+    """The OpenRouter seats may run: a key is configured and
+    the day's spend is under the cap. Anything else and the
+    seats are treated as unavailable (spec: cap trip = seat
+    unavailable), exactly like a dormant NIM seat."""
+    return _or_key() is not None and not _or_cap_tripped()
+
+
+# The key's own state from OpenRouter's GET /auth/key: its
+# dashboard-side limit, what is left of it, and its recorded
+# usage. Read at startup and cached for /health (refreshed
+# when older than five minutes). Never includes the key.
+_OR_KEY_STATE = {"fetched_at": 0.0, "data": None, "error": None}
+_OR_KEY_STATE_LOCK = threading.Lock()
+
+
+def _or_key_state(force=False):
+    if not force and _OR_KEY_STATE["data"] is not None \
+            and time.monotonic() - _OR_KEY_STATE["fetched_at"] < 300:
+        return _OR_KEY_STATE
+    key = _or_key()
+    if not key:
+        with _OR_KEY_STATE_LOCK:
+            _OR_KEY_STATE.update(
+                {"fetched_at": time.monotonic(), "data": None,
+                 "error": "no key configured"})
+        return _OR_KEY_STATE
+    try:
+        status, raw = _https_get(
+            "openrouter.ai", "/api/v1/auth/key",
+            {"Authorization": "Bearer " + key}, timeout=15)
+        if status != 200:
+            raise RuntimeError(f"HTTP {status}")
+        data = (json.loads(raw) or {}).get("data") or {}
+        keep = {"limit": data.get("limit"),
+                "limit_remaining": data.get("limit_remaining"),
+                "usage": data.get("usage"),
+                "usage_daily": data.get("usage_daily"),
+                "is_free_tier": data.get("is_free_tier")}
+        with _OR_KEY_STATE_LOCK:
+            _OR_KEY_STATE.update(
+                {"fetched_at": time.monotonic(), "data": keep,
+                 "error": None})
+    except Exception as e:
+        with _OR_KEY_STATE_LOCK:
+            _OR_KEY_STATE.update(
+                {"fetched_at": time.monotonic(),
+                 "error": str(e)[:150]})
+    return _OR_KEY_STATE
+
+
+def _or_health_block():
+    """GET /health's openrouter block: the code-side guardrail
+    (today's spend vs the daily cap) next to the key's own
+    dashboard-side limit state."""
+    ks = _or_key_state()
+    data = ks.get("data") or {}
+    return {"configured": _or_key() is not None,
+            "hard_model": OPENROUTER_HARD_MODEL,
+            "simple_model": OPENROUTER_SIMPLE_MODEL,
+            "key_limit": data.get("limit"),
+            "key_limit_remaining": data.get("limit_remaining"),
+            "key_usage": data.get("usage"),
+            "key_state_error": ks.get("error"),
+            "spend_today_usd": round(_or_spend_today(), 6),
+            "daily_cap_usd": OPENROUTER_DAILY_CAP_USD,
+            "cap_tripped": _or_cap_tripped()}
+
+
+def _or_text(model, system, user, temperature=0, max_tokens=2048,
+             timeout=60):
+    """One OpenRouter chat call with usage reporting and the
+    model's pinned backend routing. Raises when the seat
+    cannot run (no key, cap tripped, provider failure) so the
+    caller falls back to the v16 NIM assignment."""
+    if not _or_available():
+        raise RuntimeError(
+            "openrouter unavailable (no key or daily cap reached)")
+    extra = {"usage": {"include": True}}
+    route = _OR_ROUTES.get(model)
+    if route:
+        extra["provider"] = route
+    return _nim_text(OPENROUTER_BASE_URL, OPENROUTER_KEY_ENV,
+                     OPENROUTER_KEY_FILE, model, system, user,
+                     temperature=temperature, max_tokens=max_tokens,
+                     timeout=timeout, provider="openrouter",
+                     extra=extra, or_route=True)
+
+
 def _nim_text(base_url, key_env, key_file, model, system, user,
               temperature=0, max_tokens=2048, timeout=60,
-              provider="nim"):
+              provider="nim", extra=None, or_route=False):
     """One chat call to a hosted OpenAI-compatible provider (the
     NIM layer's seats), over the keep-alive pool (v15 S3).
     Returns the reply text; raises RuntimeError when the seat
     cannot run (no key, 429, persistent 5xx, bad reply) so the
     caller degrades instead of failing. Politeness: ONE retry
-    on 5xx, NO retry on 429."""
+    on 5xx, NO retry on 429. v17: `extra` merges additional
+    payload fields (OpenRouter's usage include + provider
+    routing); `or_route` records the response's reported cost
+    into the OpenRouter spend ledger the moment it parses, so
+    even a served-but-unusable reply counts against the daily
+    cap."""
     key = _nim_key_for(key_env, key_file)
     if not key:
         raise RuntimeError(f"{provider} API key not configured "
                            f"({key_file} missing)")
-    payload = json.dumps({
+    payload_obj = {
         "model": model,
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": user}],
         "temperature": temperature,
         "max_tokens": max_tokens,
-    }).encode()
+    }
+    if extra:
+        payload_obj.update(extra)
+    payload = json.dumps(payload_obj).encode()
     u = urlparse(base_url)
     host, path = u.netloc, u.path.rstrip("/") + "/chat/completions"
     last_err = None
@@ -3540,6 +3801,16 @@ def _nim_text(base_url, key_env, key_file, model, system, user,
             raise RuntimeError(f"{provider} HTTP {status}")
         try:
             data = json.loads(raw)
+        except ValueError:
+            raise RuntimeError(f"{provider} returned an unexpected "
+                               "response")
+        if or_route:
+            try:
+                _or_note_cost(float(
+                    (data.get("usage") or {}).get("cost") or 0.0))
+            except (TypeError, ValueError):
+                pass
+        try:
             content = data["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, TypeError, AttributeError,
                 ValueError):
@@ -3593,6 +3864,26 @@ def nim_ask(model, question, hits, instructions="", key_env=None,
     content = re.split(r"<\|[^>]{0,40}>", content)[0].strip()
     if not content:
         raise RuntimeError("NIM drafter returned an empty response")
+    return content, sys_prompt + "\n\n" + user_msg
+
+
+def or_ask(model, question, hits, instructions=""):
+    """One OpenRouter draft generation (v17): nim_ask's exact
+    prompt shape and debris strip on the paid primary seat.
+    Returns (answer, prompt). Raises when the seat cannot run;
+    _generate then fails over to the drafting seat's v16 NIM
+    candidates."""
+    context = _numbered_context(hits)
+    user_msg = f"Question: {question}\n\nDocument excerpts:\n{context}"
+    sys_prompt = SYSTEM_PROMPT + (("\n\n" + instructions) if instructions
+                                  else "")
+    content = _or_text(model, sys_prompt, user_msg,
+                       temperature=0.3, max_tokens=2048,
+                       timeout=OPENROUTER_DRAFTER_TIMEOUT)
+    content = re.split(r"<\|[^>]{0,40}>", content)[0].strip()
+    if not content:
+        raise RuntimeError("openrouter drafter returned an "
+                           "empty response")
     return content, sys_prompt + "\n\n" + user_msg
 
 
@@ -4702,6 +4993,26 @@ def _generate(engine, model, question, hits, instructions):
         # (the caller then applies the genuine-unavailability
         # local fallback). Seat health records every call.
         job = "hard_draft" if engine == "nim" else "simple_draft"
+        # v17: the OpenRouter primary seat gets the first
+        # attempt (hard: GPT-OSS-120B; simple: GPT-OSS-20B).
+        # Any failure (provider error, timeout, spend-cap trip)
+        # falls through to the v16 NIM seat loop below,
+        # unchanged; a fully-down NIM seat still raises into the
+        # caller's genuine-unavailability local fallback.
+        if _or_available():
+            or_model = (OPENROUTER_HARD_MODEL if engine == "nim"
+                        else OPENROUTER_SIMPLE_MODEL)
+            try:
+                answer, prompt = or_ask(
+                    or_model, question, hits,
+                    instructions=instructions)
+                _note_seat(job, or_model, False)
+                return (answer, prompt,
+                        or_model + " (OpenRouter API)", False, False)
+            except Exception as e:
+                print(f"[openrouter] {job} primary failed: "
+                      f"{str(e)[:150]}; the NIM seat takes over",
+                      flush=True)
         tried, last_err = [], None
         while True:
             smodel, slot, failover = _seat_pick(job, skip=tried)
@@ -5650,7 +5961,11 @@ class Handler(BaseHTTPRequestHandler):
                                 and _tavily_key()),
                             "credits_month":
                                 _tavily_credits()["credits"],
-                            "credits_stop": BRANCH_MONTHLY_STOP}})
+                            "credits_stop": BRANCH_MONTHLY_STOP},
+                        # v17: the paid seats' guardrail state
+                        # (today's spend vs the code-side cap,
+                        # the key's own dashboard-side limit).
+                        "openrouter": _or_health_block()})
         elif u.path == "/gaps":
             # v14: the gap log (IDKs, abstained parts, failed gates)
             # for the monthly rescrape watchlist and registry growth.
@@ -5753,6 +6068,7 @@ class Handler(BaseHTTPRequestHandler):
             # retrieval sub-timings, branch-out accounting).
             _events_reset()
             _retr_reset()
+            _or_reset_ask()
             retr_split = None
             ask_web = {"attempted": False, "queries": [],
                        "urls": [], "credits": 0, "fetched": None}
@@ -5946,6 +6262,7 @@ class Handler(BaseHTTPRequestHandler):
                           "verification": verification,
                           "web": ask_web if ask_web["attempted"]
                           else None,
+                          "cost_usd": _or_ask_cost(),
                           "mechanisms": [m["id"] for m in mechanisms_all]}
                 _cache_put(_ASK_CACHE, ask_key, result)
                 self._json(result)
@@ -6350,4 +6667,17 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"FSSA Q&A server: {len(CORPUS_IN)} IN docs + {len(CORPUS_FED)} federal docs on port {PORT}", flush=True)
+    # v17: read the OpenRouter key's state once at startup (in
+    # a daemon thread, so a slow provider never delays the
+    # listener); /health serves the cached state from there.
+    def _or_warm():
+        ks = _or_key_state(force=True)
+        d = ks.get("data") or {}
+        print(f"[openrouter] key state: limit={d.get('limit')} "
+              f"limit_remaining={d.get('limit_remaining')} "
+              f"usage={d.get('usage')} error={ks.get('error')} "
+              f"spend_today=${_or_spend_today():.4f} "
+              f"cap=${OPENROUTER_DAILY_CAP_USD:.2f}", flush=True)
+
+    threading.Thread(target=_or_warm, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
