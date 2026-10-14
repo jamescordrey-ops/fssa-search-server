@@ -3,7 +3,7 @@
 
 Reads the server's gap log (a gap_log.jsonl file, or the JSON from
 GET /gaps via --gaps-url), clusters the gaps by gate and missing
-text, optionally folds in James's graded answers (--grades, a
+text, optionally folds in the operator's graded answers (--grades, a
 JSONL with {question, grade, notes} lines), and drafts up to
 --max (default 5) NEW registry candidates for the monthly review:
 mechanism entries in the server's exact registry shape, or
@@ -17,10 +17,10 @@ Drafting: with a NIM key available (NVIDIA_API_KEY env or
 --key-file), candidates are drafted by the NIM Nemotron seat and
 schema-validated. Without a key the tool runs in COLLECT MODE:
 candidates are labeled skeletons carrying the gap evidence, for
-James or a later keyed run to complete. (This VM holds no NIM
+the operator or a later keyed run to complete. (This VM holds no NIM
 key by design; keys live on the PC and in the Secure Vault.)
 
-Cadence (James's decision, 2026-10-13): monthly, aligned with
+Cadence (standing decision, 2026-10-13): monthly, aligned with
 the corpus rescrape; at most 5 candidates per run.
 """
 import argparse
@@ -267,7 +267,7 @@ def main():
               f"{cand['drafted_by']}, validation: "
               f"{cand['validation_errors'] or 'clean'}")
     print(f"queue written to {out_path} — status pending-approval; "
-          "nothing ships without James's review.")
+          "nothing ships without the operator's review.")
     return 0
 
 

@@ -17,18 +17,14 @@ python -m unittest discover -s tests
 ## Layout note
 
 Each test module loads the server from a path constant at the top of
-the file:
+the file, pointed at this repository's layout:
 
 ```python
-SERVER = os.path.join(HERE, "..", "fssa_search_server.py")
+SERVER = os.path.join(HERE, "..", "server", "fssa_search_server.py")
 ```
 
-The suite was written when the server lived one directory above the
-tests. In this repository layout the server is at
-`server/fssa_search_server.py`, so point the constant at
-`../server/fssa_search_server.py` (one line per module) before
-running, or copy `server/fssa_search_server.py` next to the corpus
-files in a flat working directory and run the suite there.
+(`test_replay.py` resolves the same path through its root constant
+and loads the replay harness from `tools/replay_harness.py`.)
 
 `golden_set.jsonl` is the golden question set: questions with
 known-good answers drawn from the corpus, used to grade models in

@@ -5,6 +5,32 @@ each version are in `docs/`. Corpus updates are manual: new documents
 are collected, verified against their sources, and merged alongside a
 version bump rather than synced automatically.
 
+## v20.2 — 2026-10-14
+
+Retrieval fixes, observability, and a comment scrub.
+
+- Retrieval: a topic bridge now pins the IHCP Vision Services module
+  for eyeglasses and vision questions (the module held the exact
+  answer but never reached the drafter on the natural phrasing);
+  "how often" and "how frequently" now fire the duration/frequency
+  boost; the fused-ranking demotion for titles containing "provider"
+  no longer applies to Provider Reference Modules, which are primary
+  sources.
+- Observability: ask records now persist per-seat failure reasons
+  (seat_fail / seat_down events carrying the error, latency, and
+  timeout flag for every failed judge leg) and the retrieval
+  candidate pool (per-entry ranks across the keyword, vector,
+  rewrite, and bridge lists, rerank-window membership, and final
+  selection), so a degraded panel and a retrieval miss are
+  diagnosable from the record alone.
+- A boot-time consistency check compares the loaded embeddings
+  against the corpora manifest and reports the verdict in /health.
+  It warns only; it never refuses to boot.
+- Code comments scrubbed of personal attributions; the dedupe
+  tool's hardcoded working path became a parameter.
+- The offline test suite's server path constants now point at the
+  repository layout (`server/fssa_search_server.py`).
+
 ## v20 — 2026-10-14
 
 The free-first layer route.

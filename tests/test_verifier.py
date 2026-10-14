@@ -19,7 +19,7 @@ import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SERVER = os.path.join(HERE, "..", "fssa_search_server.py")
+SERVER = os.path.join(HERE, "..", "server", "fssa_search_server.py")
 
 HIT_A = {"title": "Doc A", "url": "https://example.gov/a",
          "excerpt": "The waiver covers pest control services "

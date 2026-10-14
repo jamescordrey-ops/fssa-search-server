@@ -22,7 +22,7 @@ import urllib.request
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SERVER = os.path.join(HERE, "..", "fssa_search_server.py")
+SERVER = os.path.join(HERE, "..", "server", "fssa_search_server.py")
 MODEL = "qwen3.5:9b"
 HIT = {"title": "Doc A", "url": "https://example.gov/a",
        "excerpt": "The waiver covers pest control services."}

@@ -60,7 +60,7 @@ provider, so moving the seat is a one-line change. The seat is
 DORMANT without the active provider's key (its key file in the
 server dir, or its env var): the seat then simply never runs and
 judging is exactly v14.1 dual judging. It ships dormant; the key
-arrives with James's provider signup. The panel (which judges
+arrives with the operator's provider signup. The panel (which judges
 ran, per-judge ms, third-judge status) rides in the response's
 judging metadata.
 
@@ -76,7 +76,7 @@ generate on NIM; simple questions may draft on a fast NIM model
 The 14B is DEMOTED, not removed: it remains the last-resort
 judge when both remote seats are down (behind
 LOCAL_FALLBACK_JUDGE) and the fallback drafter/redrafter when
-NIM as a whole is down. v15.1 narrows it further (James's
+NIM as a whole is down. v15.1 narrows it further (the operator's
 ruling, 2026-10-13; see V151_AUDIT.md): the local models stay
 cold on the remote path — the retrieval utilities and the
 divergence oracle run on NIM, a single failed remote seat
@@ -104,7 +104,7 @@ key's ceiling, and runtime seat health benches a seat that
 times out repeatedly or drifts over its latency budget, failing
 the job over to the bake-off runner-up — never silently, never
 to local. The panel is Gemini Lite + two NIM judge seats; the
-local 14B's dispute tiebreak is GONE (James's ruling: disputed
+local 14B's dispute tiebreak is GONE (operator ruling: disputed
 claims without a Flash ruling fail closed) and locals load only
 on genuine remote unavailability or explicit user choice, with
 every load recorded (item 5). Miller accuracy (item 4):
@@ -123,7 +123,7 @@ fetch provenance in the record, and every branch-out gap-logs
 for rescrape absorption. Retrieval reports its sub-timings per
 ask (item 8). The 600s cap is unchanged.
 
-v17 (2026-10-13): the paid swap (James's go in chat): the
+v17 (2026-10-13): the paid swap (operator go in chat): the
 primary seats move to OpenRouter, hand-picked from the v16
 bake-off measurements, NO new bake-off. GPT-OSS-120B (pinned
 to its fastest backend, Cerebras-hosted, fallbacks allowed)
@@ -134,7 +134,7 @@ OpenRouter seat failure falls back to the seat's v16 NIM
 assignment, and the local last-resort rules are untouched.
 Judges are UNCHANGED (Gemini Lite + the two NIM Nemotron
 seats), as are the divergence oracle and branch-out. Billing
-guardrails (James's hard requirement): every OpenRouter
+guardrails (the operator's hard requirement): every OpenRouter
 response reports its cost (usage include), accumulated into
 the answer metadata (cost_usd) and a persistent daily counter
 (openrouter_spend.json); at OPENROUTER_DAILY_CAP_USD (default
@@ -179,7 +179,7 @@ key. Every finished ask persists a full record (per-claim
 verdicts with the model that served each, the judged draft,
 job-layer timestamps) to ask_records.jsonl for post-mortems
 and the judge-only replay harness. §D corpus work is deferred
-to v19/v20 (James's direction, 2026-10-14).
+to v19/v20 (operator direction, 2026-10-14).
 
 v19 (2026-10-14): the §D corpus incorporation build plus the
 registry corrections the chat battery and the 2027 COLA forced.
@@ -197,7 +197,7 @@ $752,000 limit (IHCPPM 3005.10.05, the federal floor); the
 MMMNA entry notes Indiana's manual prints the shelter
 standard as $812; the waiver-cap entry notes Indiana had not
 posted a 2027 cap; new ssa_2027_figures entry carries the
-2027 SSI/SGA/TWP amounts. §G speed build (James's direction,
+2027 SSI/SGA/TWP amounts. §G speed build (operator direction,
 2026-10-14, after a simple SFC ask took 535s): (G1) a
 completeness repair re-asks a verdict seat ONLY for the
 claims its batched reply silently omitted, instead of
@@ -214,10 +214,10 @@ questions keep the full panel. The offline companion is
 v19/route_report.py, which reads ask_records.jsonl and
 reports per-route wall time, cost, and badges.
 
-v20 (2026-10-14): the free-first route rewire (James's
+v20 (2026-10-14): the free-first route rewire (the operator's
 directive; see v20/STATUS.md). FREE + FAST providers become
 the primaries; every PREPAID provider sits behind them as a
-fallover. The final form is James's LAYER MODEL (later on
+fallover. The final form is the operator's LAYER MODEL (later on
 2026-10-14): strict free-before-paid layering in every
 chain, with the v19 latency ordering applying INSIDE a
 layer only (layer wins in _plan_panel and _seat_pick).
@@ -243,7 +243,7 @@ ungraded as a primary judge and Stage 3 compares this
 panel against the v19 panel on the anchors before the
 free-first panel is trusted; seat C (Alibaba): Groq
 Qwen3.8-27B, then the rationed Flash rung, then the
-proven Qwen3-235B on OpenRouter. Acceptance (James,
+proven Qwen3-235B on OpenRouter. Acceptance (the operator,
 2026-10-14): a unit returns in under 5 minutes and
 accurate — per-class budgets are 150s simple / 285s hard
 inside the 600s ask cap, NIM legs carry tight per-call
@@ -267,6 +267,31 @@ day, and every shed is logged in the ask record. All v19
 verification machinery (gates, badges, the diversity
 guard, panel planning, completeness repair, per-class
 budgets) is unchanged.
+
+v20.2 (2026-10-14): fixes + observability, from the
+eyeglasses diagnosis (the first live v20 ask: the IHCP
+Vision Services module held the exact answer and never
+reached the draft). Retrieval: "how often"/"how
+frequently" join the duration-boost triggers; a
+vision/eyeglasses topic bridge pins the Vision Services
+module (PROMOD00051); IHCP Provider Reference Modules
+are exempt from the v13 provider-title demotion.
+Observability: ask records now persist every judge
+seat's per-leg failure reasons (seat_fail/seat_down
+events), each unit's judge error strings, and the fused
+retrieval candidate pool per retrieval call (per-list
+ranks, rerank-window membership, final selection), so a
+silent seat death or a rerank-window miss is diagnosable
+from ask_records.jsonl alone. A boot-time consistency
+check compares the loaded embeddings against the chunk
+manifest the corpora produce under the GENERATION
+chunker (replicated in the check; the retrieval chunker
+is a different, coarser split) and reports in /health
+as "consistency" — WARN only, never a boot refusal.
+Plus the comment scrub:
+first-name attributions in comments/docstrings replaced
+with neutral wording (no logic, prompt, or behavior
+change beyond the items above). See v20.2/STATUS.md.
 """
 import calendar
 import contextvars
@@ -415,7 +440,7 @@ except FileNotFoundError:
 # above). Absent key = the seat stays dormant, exactly v14.1.
 
 # --- v15: pipeline config -------------------------------------------------
-# Per-ask wall-clock ceiling (James's decision, 2026-10-13): when an
+# Per-ask wall-clock ceiling (operator decision, 2026-10-13): when an
 # ask hits the cap mid-ladder it stops climbing and ships the best
 # state reached (a Partial built ONLY from claims already verified
 # by the panel, else an IDK with its gap log entry); timing records
@@ -425,10 +450,10 @@ ASK_TIME_CAP_S = 600
 # this line the ladder stops spending on redrafts and ships the
 # best capped Partial from the claims already judged (or IDKs);
 # it works alongside the time cap and the $2.00/day hard stop.
-# Tunable via env; James may retune after the first battery.
+# Tunable via env; the operator may retune after the first battery.
 PER_ASK_CEILING_USD = float(
     os.environ.get("FSSA_PER_ASK_CEILING_USD", "0.50"))
-# The demoted local 14B as LAST-RESORT judge. v15.1 (James's
+# The demoted local 14B as LAST-RESORT judge. v15.1 (the operator's
 # ruling, 2026-10-13): the flag gates ONLY the both-remotes-down
 # degradation (Lite AND the NIM seat unable to extract -> the
 # 14B judges alone, the v14 shape). A single failed remote seat
@@ -800,6 +825,19 @@ _TOPIC_BRIDGES = (
       ("miller trust income limit medicaid", "miller trust")),
      None, ({"medicaid", "waiver"}, ("nursing home", "long-term care",
                                      "long term care"))),
+    # v20.2: vision/eyeglasses questions are governed by the IHCP
+    # Vision Services provider reference module (PROMOD00051),
+    # whose operative text ("frequency limits", "every five
+    # years") shares almost no words with lay phrasing — and the
+    # module's chunks additionally ate ranking demotions — so on
+    # the natural question ("how often are eyeglasses covered
+    # for adults", 2026-10-14) the module never reached the
+    # excerpt set despite stating the exact answer.
+    ({"eyeglasses", "eyeglass", "glasses", "spectacles"},
+     ("vision services", "eye exam", "eye exams"),
+     (("eyeglasses one pair frequency", "one pair of eyeglasses"),
+      ("vision services eyeglasses coverage", "eyeglasses")),
+     None, ()),
 )
 
 US_STATES = (
@@ -1065,6 +1103,15 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
     # the cache entry for every later ask.
     cached = _cache_get(_SEARCH_CACHE, cache_key)
     if cached:
+        # v20.2 (observability): a cache hit still records
+        # WHAT it served, marked cached, so the ask record
+        # shows the excerpt set even when no fresh pool ran.
+        if boosts:
+            _retr_pool_note({
+                "q": query[:80], "n": n, "cached": True,
+                "pool": [{"t": (h.get("title") or "")[:70],
+                          "u": h.get("url"), "sel": i}
+                         for i, h in enumerate(cached[:28])]})
         return [dict(h) for h in cached]
 
     # v16 item 8: the vector leg is independent of the rewrite,
@@ -1208,8 +1255,14 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
     # sentence inside a long resources page). The lift is sized to
     # reorder chunks within the relevant pool, not to override topical
     # relevance, and it applies before the LLM rerank.
+    # v20.2: "how often" / "how frequently" join the trigger
+    # list — frequency questions are duration questions (the
+    # 2026-10-14 eyeglasses ask: "how often are eyeglasses
+    # covered" fired no duration lift, and the frequency chunk
+    # stating "every five years" lost the excerpt cut).
     duration_q = any(w in query.lower() for w in
-                     ("how long", "months", "years", "period", "deadline",
+                     ("how long", "how often", "how frequently",
+                      "months", "years", "period", "deadline",
                       "when does", "expire", "lookback", "look-back"))
     if boosts:  # /search passes boosts=False (v5 guard: plain search
         # ranking should not be skewed by excerpt-oriented boosts)
@@ -1256,7 +1309,15 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
                 lift += 0.02
             u13 = (h.get("url") or "").lower()
             t13 = (h.get("title") or "").lower()
-            if "/payee/" in u13 or "provider" in t13:
+            # v20.2: IHCP Provider Reference Modules are PRIMARY
+            # sources (the operative rule text itself), not
+            # provider-administration pages; the demotion below
+            # was aimed at the latter and cost the Vision
+            # Services module the excerpt cut on the 2026-10-14
+            # eyeglasses ask purely for its title. Exempt the
+            # modules; everything else keeps the demotion.
+            if ("/payee/" in u13 or "provider" in t13) \
+                    and "provider reference module" not in t13:
                 lift -= 0.03
             if lift:
                 h["_fused"] = h.get("_fused", 0) + lift
@@ -1313,6 +1374,21 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
         url_counts[h["url"]] = url_counts.get(h["url"], 0) + 1
         diverse.append(h)
     hits = diverse
+    # v20.2 (observability): snapshot the fused scores and
+    # the per-list ranks BEFORE the strip below erases
+    # _fused; the pool record is assembled once the final
+    # selection exists (after rerank + bridge pins) and
+    # stashed on the ask context for the ask record.
+    _pool_ranks = {}
+    for _lname, _lst in (("kw", kw_hits), ("vec", vec_hits),
+                         ("kw2", kw2_hits), ("br", bridge_hits)):
+        _rm = {}
+        for _r, _hh in enumerate(_lst):
+            _rm.setdefault((_hh["url"], _hh["excerpt"][:60]), _r)
+        _pool_ranks[_lname] = _rm
+    _pool_fused = {(h["url"], h["excerpt"][:60]):
+                   round(h.get("_fused", 0.0), 4) for h in hits}
+
     # strip internal keys
     for h in hits:
         h.pop("_fused", None)
@@ -1380,6 +1456,46 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
         prog, dtype = _classify_hit(h)
         h["program"] = prog
         h["dtype"] = dtype
+
+    # v20.2 (observability): the pool record — every chunk
+    # in the rerank window (the diversity-filtered fused
+    # top), plus any bridge pin selected from outside it,
+    # with its fused score, its rank in each source list
+    # (kw = keyword, vec = vector, kw2 = rewrite-keyword,
+    # br = bridge; null = absent from that list), whether
+    # it sat in the rerank window (w), and its final
+    # position in the served result (sel, null = not
+    # served). Stashed on the ask context for the record.
+    if boosts:
+        _corp = corpus if corpus is not None else CORPUS_IN
+        _win = {(h["url"], h["excerpt"][:60]) for h in candidates}
+        _sel = {(h["url"], h["excerpt"][:60]): i
+                for i, h in enumerate(result)}
+        _pool, _seen = [], set()
+        for h in list(candidates) + [h for h in result
+                                     if (h["url"],
+                                         h["excerpt"][:60])
+                                     not in _win]:
+            _k = (h["url"], h["excerpt"][:60])
+            if _k in _seen:
+                continue
+            _seen.add(_k)
+            _pool.append({
+                "t": (h.get("title") or "")[:70], "u": h["url"],
+                "s": _pool_fused.get(_k, 0.0),
+                "kw": _pool_ranks["kw"].get(_k),
+                "vec": _pool_ranks["vec"].get(_k),
+                "kw2": _pool_ranks["kw2"].get(_k),
+                "br": _pool_ranks["br"].get(_k),
+                "w": _k in _win, "sel": _sel.get(_k)})
+            if len(_pool) >= 28:
+                break
+        _retr_pool_note({
+            "q": query[:80], "n": n,
+            "corp": ("in" if _corp is CORPUS_IN else
+                     "federal" if _corp is CORPUS_FED else
+                     "both"),
+            "pool": _pool})
 
     _cache_put(_SEARCH_CACHE, cache_key, result)
     return [dict(h) for h in result]  # v18: copies, see above
@@ -1794,6 +1910,135 @@ def _doc_chunks(d):
     return chs
 
 
+# ---------------------------------------------------------------------------
+# v20.2: boot-time consistency check. The loaded embeddings
+# must correspond to the corpora. NOTE the two chunkers:
+# the retrieval-side chunker above (_chunks) is NOT what
+# built the embeddings — the generation pipeline
+# (gen_embeddings_stream.py) windows text at 600 chars
+# with 100 overlap, section-aware over the SAME
+# _split_sections, skipping docs under 200 chars and URLs
+# already embedded. The manifest therefore replicates the
+# GENERATION chunker exactly; measured against the v19
+# corpora it yields 73,454 chunks vs the live file's
+# 73,014 rows (the ~0.6% delta is generation-vintage
+# noise: per-chunk embed failures are skipped at build
+# time, and the append-only build file carries chunks
+# from earlier corpus vintages of the same URLs). The
+# incident this check exists to catch is thousand-scale:
+# the v19 finalize resurrecting the dedupe-skipped chunks
+# (+2,244 rows), caught by hand hours later in v19.
+# dedupe_skip.json, when present in the server dir, is
+# reported in the detail block (its raw/adjusted counts),
+# but the verdict compares against the raw manifest: on
+# the live build the skip list's indices address an older
+# build file, so adjusting by it would double-count the
+# removal. A mismatch prints loudly and lands in /health
+# as "consistency" — WARN ONLY: the server always boots
+# (a stale-but-serving index beats a dark one).
+# ---------------------------------------------------------------------------
+CONSISTENCY = {"ok": None, "detail": "check not run"}
+
+
+def _emb_window(text, size=600, overlap=100):
+    """The generation pipeline's plain window (replica of
+    gen_embeddings_stream._window; keep in sync)."""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + size
+        chunks.append(text[start:end])
+        start = end - overlap
+        if start >= len(text):
+            break
+    return chunks
+
+
+def _emb_chunk_count(text):
+    """How many embedding chunks the generation pipeline
+    produces for one document's text (replica of
+    gen_embeddings_stream.chunk_text)."""
+    secs = _split_sections(text)
+    if not secs:
+        return len(_emb_window(text))
+    n = 0
+    for _heading, body in secs:
+        n += sum(1 for p in _emb_window(body) if p.strip())
+    return n if n else len(_emb_window(text))
+
+
+def _run_consistency_check():
+    global CONSISTENCY
+    try:
+        manifest = {}
+        for d in CORPUS_IN + CORPUS_FED:
+            u = d.get("url")
+            text = d.get("text") or ""
+            if u and u not in manifest and len(text) >= 200:
+                manifest[u] = _emb_chunk_count(text)
+        skips = {}
+        n_skips = 0
+        try:
+            with open("dedupe_skip.json", encoding="utf-8") as f:
+                for e in json.load(f):
+                    if int(e.get("index", -1)) \
+                            < manifest.get(e.get("url"), 0):
+                        skips[e["url"]] = skips.get(e["url"], 0) + 1
+                        n_skips += 1
+        except FileNotFoundError:
+            pass
+        actual = {}
+        for c in EMBEDDINGS:
+            actual[c["url"]] = actual.get(c["url"], 0) + 1
+        orphans = sorted(u for u in actual if u not in manifest)
+        missing = sorted(u for u, c in manifest.items()
+                         if c > 0 and actual.get(u, 0) == 0)
+        mismatched = sorted(
+            u for u in manifest
+            if u in actual and actual[u] != manifest[u])
+        man_total = sum(manifest.values())
+        detail = {
+            "embeddings_rows": len(EMBEDDINGS),
+            "manifest_rows": man_total,
+            "delta_rows": len(EMBEDDINGS) - man_total,
+            "dedupe_skip_entries_applicable": n_skips,
+            "manifest_rows_after_dedupe_skips":
+                man_total - n_skips,
+            "docs_in": len(CORPUS_IN),
+            "docs_federal": len(CORPUS_FED),
+            "matrix_rows": (None if EMB_MAT is None
+                            else int(EMB_MAT.shape[0])),
+            "orphan_urls": len(orphans),
+            "missing_urls": len(missing),
+            "mismatched_urls": len(mismatched),
+            "examples": {
+                "orphan": orphans[:3], "missing": missing[:3],
+                "mismatched": [
+                    {"url": u, "expected": manifest[u],
+                     "actual": actual[u]}
+                    for u in mismatched[:3]]}}
+        ok = (len(EMBEDDINGS) == man_total and not orphans
+              and not missing and not mismatched
+              and (EMB_MAT is None
+                   or int(EMB_MAT.shape[0]) == len(EMBEDDINGS)))
+        CONSISTENCY = {"ok": bool(ok), "detail": detail}
+        if ok:
+            print(f"[consistency] ok: {len(EMBEDDINGS)} embedding "
+                  f"rows match the corpora chunk manifest "
+                  f"({man_total} expected)", flush=True)
+        else:
+            print(f"[consistency] WARNING: embeddings do NOT "
+                  f"match the corpora chunk manifest: "
+                  f"{json.dumps(detail)}", flush=True)
+    except Exception as e:
+        CONSISTENCY = {"ok": False,
+                       "detail": f"check failed: "
+                                 f"{type(e).__name__}: {e}"}
+        print(f"[consistency] WARNING: consistency check "
+              f"failed to run: {type(e).__name__}: {e}",
+              flush=True)
+
+
 def search(query, corpus=None, n=6, extra_terms=None):
     corpus = corpus if corpus is not None else CORPUS_IN
     raw_terms = keywords(query)
@@ -1916,7 +2161,7 @@ def _gemini_space():
         _GEMINI_LAST[0] = time.monotonic()
 
 
-# Gemini model chain (2026-10-12; v9 reorder at James's direction): the
+# Gemini model chain (2026-10-12; v9 reorder at operator direction): the
 # Lite goes first as the everyday engine (15 RPM / 500 requests per day)
 # and 3.8 Flash (5 RPM / only 20 per day) is the reserve, reached on a
 # Lite failure or when the user picks it by name (the normalize step
@@ -1953,7 +2198,7 @@ _AND_ASK_RX = re.compile(
 
 
 def _compound_split(q):
-    """v15 (regression fix c, James's manual test 2026-10-13): TWO
+    """v15 (regression fix c, the operator's manual test 2026-10-13): TWO
     asks joined by 'and' inside ONE sentence — 'does it affect my
     eligibility and what should we do before the money arrives?'
     — which the '?'/clause splitters never separated, so the
@@ -2322,7 +2567,7 @@ def _check_quantities(answer, question="", mechanisms=None):
 # When the registry pins a figure and a retrieved source prints
 # a NEAR-MISS variant of it (the $4,066.50 CMS vs $4,067 Indiana
 # case), the answer must SURFACE the disagreement with
-# provenance instead of silently picking one. Scope (James's
+# provenance instead of silently picking one. Scope (the operator's
 # decision): registry figure slots only. A conflict becomes a
 # judgeable claim; a draft that omits either value fails it in
 # code, whatever a judge says.
@@ -3453,7 +3698,7 @@ def _flash_spend():
 
 # --- v14.2: third judge seat -> v15: the NIM layer ---------------------------
 # v14.2 shipped this as a third judge seat (provider decision,
-# James, 2026-10-13: NVIDIA NIM default, Nemotron 3 Super 120B;
+# Operator note, 2026-10-13: NVIDIA NIM default, Nemotron 3 Super 120B;
 # Cerebras began demanding a card, Groq stays a configured
 # alternate). v15 (plan item 2, the demotion) promotes the seat
 # and grows it into the server's NIM layer:
@@ -3676,7 +3921,7 @@ def _slot_provider_name(slot):
 # --- v20: the xAI + Groq provider block ------------------------------
 # Seat chains are config-driven constants (here and in SEATS
 # below), so any seat can be reverted by editing one list.
-# James's free-first directive (2026-10-14): free + fast
+# the operator's free-first directive (2026-10-14): free + fast
 # providers are the primaries; ALL prepaid providers sit
 # behind them as fallovers. The one documented exception is
 # judge seat B (see SEATS).
@@ -3716,7 +3961,7 @@ _XAI_PRICE_DEFAULT = (2.00, 6.00)
 # (https://console.groq.com/docs/models — the two GPT-OSS
 # models are PRODUCTION; qwen/qwen3.8-27b is a PREVIEW
 # model) and against the LIVE account catalog pulled with
-# James's own key (exactly 11 models; the three chat ids
+# the operator's own key (exactly 11 models; the three chat ids
 # below match exactly; there is NO Llama chat model on his
 # catalog, only llama-prompt-guard classifiers, and no
 # qwen/qwen3-32b). Preview models can be discontinued at
@@ -3724,7 +3969,7 @@ _XAI_PRICE_DEFAULT = (2.00, 6.00)
 # Qwen3-235B on OpenRouter) is the protection, and the
 # Stage-2 deploy checklist in v20/STATUS.md re-checks the
 # catalog before go-live.
-# James is also vaulting his Groq key; when the parent's
+# The operator is also vaulting their Groq key; when the parent's
 # live-catalog pull lands, these constants are the exact
 # strings to swap.
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
@@ -3808,14 +4053,14 @@ SEATS = {
                        ("nvidia/nemotron-3.5-lightning-30b-a3b", 2)],
         "budget_median": 30.0, "budget_p95": 120.0},
     "judge_nim1": {
-        # v17.1 (James's ruling, 2026-10-14): the paid judges
+        # v17.1 (operator ruling, 2026-10-14): the paid judges
         # lead this seat — OpenRouter DeepSeek V3.1, then
         # OpenRouter Qwen3-32B, with NIM Nemotron Super kept
         # as the free failover (the seat's old runner-ups
         # served in judge_nim2's chain until v17.2 moved
         # that seat to OpenRouter too). Evidence is the
         # coordinator's 10-claim Miller-packet probe, accepted
-        # by James in place of a battery run: DeepSeek 10/10
+        # by the operator in place of a battery run: DeepSeek 10/10
         # verdicts at $0.000573/call (31s), Qwen 10/10 at
         # $0.000297 (23s), Super 8/10 (36s, one empty first
         # attempt). The median budget rises from 20s to 45s
@@ -3824,7 +4069,7 @@ SEATS = {
         # own measured latency and silently hand the seat
         # back to the failover.
         # v20 (seat B, DeepSeek family; final form under
-        # James's layer model, 2026-10-14): NIM DeepSeek
+        # the operator's layer model, 2026-10-14): NIM DeepSeek
         # V4.1-Flash is the FREE primary (id verified in the
         # live NIM catalog pull of 2026-10-14, where it is
         # deepseek-ai/deepseek-v4.1-flash; it already serves
@@ -3848,7 +4093,7 @@ SEATS = {
                        ("deepseek/deepseek-chat-v3.1", 0)],
         "budget_median": 45.0, "budget_p95": None},
     "judge_nim2": {
-        # v17.2 (James's ruling, 2026-10-14): this seat goes
+        # v17.2 (operator ruling, 2026-10-14): this seat goes
         # paid too, mirroring v17.1's judge_nim1 swap. The
         # v17.1 single test isolated this seat as the
         # remaining drag: Ultra benched on timeouts, its
@@ -3878,7 +4123,7 @@ SEATS = {
         # it stays a drafting/utility candidate only. Failover
         # is a fifth-family OpenRouter model, then NIM Ultra.
         # v20 (seat C, Alibaba family; final form under
-        # James's layer model, 2026-10-14): the Groq free
+        # the operator's layer model, 2026-10-14): the Groq free
         # tier leads with Qwen3.8-27B (GROQ_QWEN_MODEL; id
         # verified on Groq's official models page AND in the
         # live account catalog pull, both 2026-10-14 — a
@@ -3887,7 +4132,7 @@ SEATS = {
         # mid-ladder rung (slot 6, Layer 1 rules), then the
         # v19 primary — the proven Qwen3-235B instruct on
         # OpenRouter — as the prepaid fallover.
-        # v20.1 (fix 1, James's approval 2026-10-14): the
+        # v20.1 (fix 1, operator approval 2026-10-14): the
         # v19 tail is RESTORED behind the 235B, for depth
         # and for the Meta-family tail voice: NIM Nemotron
         # Ultra — the v19 seat's own Ultra entry,
@@ -3895,7 +4140,7 @@ SEATS = {
         # listed ahead of the paid legs per the layer model,
         # then SEAT2_FAILOVER_MODEL (Llama-4-Maverick,
         # OpenRouter). The first v20 pass dropped the tail
-        # because the concrete chain in James's layer
+        # because the concrete chain in the operator's layer
         # directive ended at the 235B; both models remained
         # in the file throughout (SEAT2_FAILOVER_MODEL
         # stayed defined and priced; Ultra still serves the
@@ -3952,7 +4197,7 @@ def _slot_has_key(slot):
 
 
 def _candidate_layer(model, slot):
-    """v20 (James's layer model, 2026-10-14): a seat
+    """v20 (the operator's layer model, 2026-10-14): a seat
     candidate's chain layer. Layer 0 = free + fast (Groq,
     slot 5); Layer 2 = free + slow (the NIM slots); Layer 3 =
     paid (OpenRouter slot 0, xAI slot 4). Gemini 3.8 Flash's
@@ -4090,7 +4335,7 @@ def _plan_panel():
     Ties keep the configured candidate order. Failover inside
     a call still walks the configured order (§C's rule that a
     planned seat is not replaced mid-round is unchanged).
-    v20: the plan key is (layer, latency, order) — James's
+    v20: the plan key is (layer, latency, order) — the operator's
     layer model wins over latency, and the §G2 latency
     ordering applies inside a layer only, so a measured-fast
     paid candidate can never lead a seat over a free one."""
@@ -4198,12 +4443,17 @@ def _seat_health_block():
 class _AskContext:
     __slots__ = ("cost", "events", "retr", "verdict_families",
                  "served_models", "panel_plan", "draft_family",
-                 "lock", "unit_deadline")
+                 "lock", "unit_deadline", "retr_pools")
 
     def __init__(self):
         self.cost = 0.0
         self.events = []
         self.retr = {}
+        # v20.2 (observability): one fused-pool snapshot per
+        # ask-mode hybrid_search call (see _retr_pool_note);
+        # persisted on the ask record so a rerank-window miss
+        # is diagnosable after the fact.
+        self.retr_pools = []
         self.verdict_families = {}   # judge job -> {families served}
         self.served_models = {}      # job -> model that served last
         self.panel_plan = {}         # judge job -> (model, slot)
@@ -4324,6 +4574,55 @@ def _retr_snapshot():
     return {k: int(v * 1000) for k, v in split.items()}
 
 
+def _retr_pool_note(entry):
+    """v20.2 (observability): stash one ask-mode
+    hybrid_search pool snapshot on the ask context. Capped
+    at 6 calls per ask (the main retrieval plus bundled
+    per-part calls fit; later hunt/repair retrievals are
+    dropped rather than bloating the record). Never raises:
+    a logging failure must never fail an ask."""
+    try:
+        ctx = _ask_ctx()
+        with ctx.lock:
+            if len(ctx.retr_pools) < 6:
+                ctx.retr_pools.append(entry)
+    except Exception:
+        pass
+
+
+def _retr_pools_since(idx):
+    return list(_ask_ctx().retr_pools[idx:])
+
+
+def _note_seat_fail(job, model, slot, latency_s, timed_out, error):
+    """v20.2 (observability): one FAILED judge-seat leg,
+    with the reason. Through v20.1 a failed candidate left
+    no trace in the ask record — _seat_report kept only
+    aggregate health counters and the exception string was
+    discarded — so a seat could die silently (the
+    2026-10-14 seat-B death: "unavailable", reason
+    unrecoverable). The error is stored as
+    "ExceptionClass: message", truncated to 200 chars."""
+    ctx = _ask_ctx()
+    with ctx.lock:
+        ctx.events.append({
+            "kind": "seat_fail", "job": job, "model": model,
+            "slot": slot, "latency_s": round(latency_s, 2),
+            "timed_out": bool(timed_out),
+            "error": str(error)[:200]})
+
+
+def _note_seat_down(job, reason):
+    """v20.2 (observability): the seat as a whole gave up
+    (every candidate failed, or the unit budget shed the
+    leg before it started). Pairs with the seat_fail
+    events that precede it in the same record."""
+    ctx = _ask_ctx()
+    with ctx.lock:
+        ctx.events.append({"kind": "seat_down", "job": job,
+                           "error": str(reason)[:200]})
+
+
 def _judge_seat_text(job, system, user):
     """One verdict call on a judge seat, with seat health
     and failover to the seat's next measured candidate.
@@ -4350,6 +4649,13 @@ def _judge_seat_text(job, system, user):
             job, skip=tried,
             exclude_families=_seat_exclusions(job))
         if model is None:
+            # v20.2: the seat-down reason lands in the ask
+            # record, not only in the raised string (callers
+            # that degrade per the panel rules may not keep
+            # the exception).
+            _note_seat_down(
+                job, f"all seat candidates unavailable "
+                f"(tried {tried})")
             raise RuntimeError(
                 f"{job}: all seat candidates unavailable "
                 f"(tried {tried})")
@@ -4358,6 +4664,8 @@ def _judge_seat_text(job, system, user):
         # of starting a call that cannot finish inside it.
         _jt = _leg_timeout(THIRD_JUDGE_TIMEOUT)
         if _jt <= 0:
+            _note_seat_down(
+                job, "unit budget spent; seat leg shed")
             raise RuntimeError(
                 f"{job}: unit budget spent; seat leg shed")
         t0 = time.monotonic()
@@ -4411,12 +4719,20 @@ def _judge_seat_text(job, system, user):
             return content
         except Exception as e:
             lat = time.monotonic() - t0
+            _timed_out = lat >= THIRD_JUDGE_TIMEOUT * 0.9 \
+                or "timed out" in str(e) \
+                or "timeout" in str(e).lower()
             _seat_report(job, model, lat, False,
-                         timed_out=lat >= THIRD_JUDGE_TIMEOUT * 0.9
-                         or "timed out" in str(e)
-                         or "timeout" in str(e).lower())
+                         timed_out=_timed_out)
+            # v20.2: persist the per-leg failure reason on
+            # the ask record (see _note_seat_fail).
+            _note_seat_fail(job, model, slot, lat, _timed_out,
+                            f"{type(e).__name__}: {e}")
             tried.append(model)
             if len(tried) >= len(SEATS[job]["candidates"]):
+                _note_seat_down(
+                    job, f"all {len(tried)} candidates failed; "
+                    f"last: {type(e).__name__}: {e}")
                 raise
 
 
@@ -4654,7 +4970,7 @@ def _branch_out_hits(question, claims):
 
 
 # --- v17: OpenRouter primary seats ----------------------------------
-# The paid swap (James's go, 2026-10-13): OpenRouter takes the
+# The paid swap (operator go, 2026-10-13): OpenRouter takes the
 # primary drafting seats and the retrieval utilities; the v16
 # NIM seats remain as the fallback chain (see _generate and
 # _utility_text), judges and the divergence oracle are
@@ -4714,7 +5030,7 @@ _OR_ROUTES = {
 }
 
 # --- v18: the reservation gate + spend ledger (the §B hard stop) -------
-# James's mechanism (v18 PLAN §B): the daily OpenRouter cap is a
+# the operator's mechanism (v18 PLAN §B): the daily OpenRouter cap is a
 # true hard ceiling of $2.00/day, enforced by RESERVATIONS at a
 # provable maximum at the single choke point (_nim_text with
 # or_route=True — every OpenRouter call in the server passes
@@ -5255,7 +5571,7 @@ def _groq_health_block():
 
 
 # --- v20: the Gemini 3.8 Flash mid-ladder ration ---------------------
-# Layer 1 of James's layer model: Gemini 3.8 Flash may step
+# Layer 1 of the operator's layer model: Gemini 3.8 Flash may step
 # in mid-ladder as a replacement judge (judge seats B and C,
 # slot 6) when a free primary fails — but it is free, strong,
 # and SCARCE (20 requests/day on the free key), and its
@@ -5931,7 +6247,7 @@ _JUDGE_SYSTEM = (
     "prose, no code fences.")
 
 
-# v15 (regression fix, James's manual test 2026-10-13): claims ABOUT
+# v15 (regression fix, the operator's manual test 2026-10-13): claims ABOUT
 # the documents themselves ("the documents provide explicit advice
 # on steps to take") are framing, not facts about the world. An
 # extractor marked one load-bearing and its not_addressed verdict
@@ -6422,11 +6738,11 @@ def _parse_citations(answer, hits):
             "uncited_lb": uncited_lb}
 
 
-# --- v17.3: strip, don't sink (James's ruling, 2026-10-14) --------------------
+# --- v17.3: strip, don't sink (operator ruling, 2026-10-14) --------------------
 # In the v17.2 acceptance re-run every extracted claim passed
 # every judge, yet the answer failed closed to IDK because ONE
 # factual sentence in the final draft carried no citation: a
-# parenthetical aside. James's ruling: after a draft's repair
+# parenthetical aside. The operator's ruling: after a draft's repair
 # rungs are exhausted, a factual sentence that still fails
 # citations at birth AND maps to NO extracted claim (an aside,
 # not a claim-bearing sentence) is REMOVED from the draft
@@ -6621,7 +6937,7 @@ def _hunt_evidence(corp, hits, claim, mechanisms):
     not_addressed gets ONE targeted evidence hunt before it is
     abandoned — the failure mode where the right DOCUMENT was
     retrieved but the chunk carrying the specific passage was
-    not (James's manual test, 2026-10-13: the Spousal
+    not (the operator's manual test, 2026-10-13: the Spousal
     Impoverishment document was in the sources without its
     name-on-the-check passage). Queries come from the claim
     itself plus the matched mechanisms' own retry searches.
@@ -6730,7 +7046,7 @@ def _verdict_cache_put(key, value):
 
 
 def _panel_state(judges, served):
-    """v18 (§C, James's ruling 2026-10-14): the round's panel
+    """v18 (§C, operator ruling 2026-10-14): the round's panel
     state. FULL only when all three seats served (Lite,
     judge_nim1, judge_nim2), each by its PRIMARY (non-failover)
     candidate, from three distinct families, with no local seat
@@ -6791,7 +7107,7 @@ def _judge_round(question, hits, answer, hard, mech_block="",
     (S2) resolve from the verdict cache unless the join's
     refutation invalidates them. Disputes go to Flash
     (load-bearing, or any claim on hard questions); v16 REMOVES
-    the 14B tiebreak (James's ruling): whatever Flash does not
+    the 14B tiebreak (operator ruling): whatever Flash does not
     rule on fails closed on the worst verdict. Returns
     {mode, claims, flash_used, pass, errors, panel, refute_ms}
     where each claim carries lite/nim/nim2/local/flash/final
@@ -6834,7 +7150,7 @@ def _judge_round(question, hits, answer, hard, mech_block="",
         primary_engine = "lite"
     if not primary["available"] and not local_only:
         errors.append("lite judge: " + str(primary["error"]))
-        # v20.1 (fix 2, James's approval 2026-10-14): seat A
+        # v20.1 (fix 2, operator approval 2026-10-14): seat A
         # gains the rationed Gemini 3.8 Flash mid-ladder
         # rung (slot 6, Layer 1 rules) between the free Lite
         # path and the paid Lite-via-OpenRouter attempt —
@@ -7093,7 +7409,7 @@ def _judge_round(question, hits, answer, hard, mech_block="",
                         claims[_ci]["notes"].append(
                             "completeness repair: " + _v["note"])
                 panel_ms["repaired_claims"] += len(_rv["verdicts"])
-    # --- v15.1 (James's ruling, 2026-10-13): NO local second
+    # --- v15.1 (operator ruling, 2026-10-13): NO local second
     # seat. Through v15.0 a failed remote second seat was filled
     # by the local 14B, which put the 14B on the panel of
     # ordinary remote asks. The 14B now judges ONLY in
@@ -7188,7 +7504,7 @@ def _judge_round(question, hits, answer, hard, mech_block="",
                 for idx, verdict in rulings.items():
                     claims[idx]["flash"] = verdict
                     claims[idx]["final"] = verdict
-        # v15.1 (James's ruling, 2026-10-13): NO local
+        # v15.1 (operator ruling, 2026-10-13): NO local
         # tiebreak. Through v15.0, disputes Flash could not
         # rule on went to the local 14B for a tiebreak verdict
         # (the Miller smoke's [lite, nim, local] panel). That
@@ -7331,7 +7647,7 @@ def _judge_round(question, hits, answer, hard, mech_block="",
         c["final"] == "supported" for c in substantive)
     return {"mode": mode, "claims": claims, "flash_used": flash_used,
             "pass": passed, "errors": errors, "refute_ms": refute_ms,
-            # §C (James's ruling 2026-10-14): the panel state
+            # §C (operator ruling 2026-10-14): the panel state
             # rides the round so _run_unit can rename a top-class
             # badge earned on a degraded panel.
             "panel_state": _panel_state(judges, _served),
@@ -7342,7 +7658,7 @@ def _judge_round(question, hits, answer, hard, mech_block="",
 # --- v14: the escalation ladder ----------------------------------------------
 # Per answering unit (the whole question, or one part of a bundled
 # question): draft, then up to TWO redrafts with the judges'
-# objections attached (James's decision, 2026-10-13), then a final
+# objections attached (operator decision, 2026-10-13), then a final
 # Flash ruling on the last draft's failed claims, then IDK. Code
 # gates (figures, mechanisms, arithmetic) run alongside the judges:
 # a draft ships only when every gate passes.
@@ -7368,7 +7684,7 @@ def _generate(engine, model, question, hits, instructions):
         # local fallback). Seat health records every call.
         job = "hard_draft" if engine == "nim" else "simple_draft"
         # v20: the drafting chain in strict layer order
-        # (James's layer model, 2026-10-14): Layer 0 Groq's
+        # (the operator's layer model, 2026-10-14): Layer 0 Groq's
         # free tier (hard: GPT-OSS-120B; simple: GPT-OSS-20B);
         # Layer 2 the v16 NIM bench loop (free, slow — the
         # hard bench leads with Kimi K3 and GLM-5.3 per the
@@ -7654,7 +7970,7 @@ def _assemble_capped_partial(draft, jr, question, hits,
 
 
 def _diverge_model():
-    """The divergence oracle's model (v16 item 4 + James's
+    """The divergence oracle's model (v16 item 4 + the operator's
     ruling): a NIM flagship from a DIFFERENT family than the
     hard-draft seat's active pick — normally the seat's
     runner-up candidate. Never a local model. v18 (§C):
@@ -7779,7 +8095,7 @@ def _run_unit(ctx):
     # budget the ladder stops and the unit composes from the
     # verdicts in hand (the capped-partial path) instead of
     # starting another round.
-    # v20 (James's acceptance criterion, 2026-10-14): the hard
+    # v20 (the operator's acceptance criterion, 2026-10-14): the hard
     # budget drops to 285s — an ask unit must return in under
     # 5 minutes and accurate; 285 leaves margin under the
     # 300s wall, and the ask-level 600s cap stays as the
@@ -7807,6 +8123,9 @@ def _run_unit(ctx):
     diverge = bool(ctx.get("diverge")) and ctx["engine"] == "local" \
         and not ctx.get("explicit_model") and hard
     ev0 = len(_events())
+    # v20.2: this unit's retrieval-pool snapshots (any
+    # ask-mode hybrid_search that runs inside the unit).
+    rp0 = len(_ask_ctx().retr_pools)
     lead_repairs = 0
     stripped_sentences = []
     conflicts = _conflict_scan(ctx["hits"])
@@ -7875,7 +8194,7 @@ def _run_unit(ctx):
                        "label": note.lstrip("- ")})
         return qs
 
-    for rung in range(3):  # draft + two redrafts (James's decision)
+    for rung in range(3):  # draft + two redrafts (operator decision)
         if deadline and time.monotonic() > deadline:
             cap_hit = True
             break
@@ -7901,7 +8220,7 @@ def _run_unit(ctx):
                 # Item 4 (v16): the independent second draft comes
                 # from a NIM flagship of a different family than
                 # draft A's seat (the bake-off runner-up seat),
-                # never a local model (James's ruling).
+                # never a local model (operator ruling).
                 with ThreadPoolExecutor(max_workers=2) as pool:
                     fa = _submit(pool, _try_generate, eng, mdl, instr)
                     fb = _submit(pool, _generate, "nimx",
@@ -8223,6 +8542,8 @@ def _run_unit(ctx):
                              "regenerated": rungs > 1},
             "divergence": divergence,
             "events": _events_since(ev0),
+            # v20.2: this unit's retrieval-pool snapshots.
+            "retr_pools": _retr_pools_since(rp0),
             "lead_repairs": lead_repairs,
             "stripped_sentences": stripped_sentences}
     if shipped:
@@ -8238,7 +8559,7 @@ def _run_unit(ctx):
         badge = "verified" if _subs and all(
             len(c.get("coverage") or []) >= 2 for c in _subs) \
             else "verified_single"
-        # v18 (§C, James's ruling 2026-10-14): a top-class badge
+        # v18 (§C, operator ruling 2026-10-14): a top-class badge
         # earned on a DEGRADED panel (see _panel_state) is
         # renamed so the degradation shows in the badge itself.
         # verified_single keeps its name: it is already visibly
@@ -8265,7 +8586,7 @@ def _run_unit(ctx):
             _atext, _min_cov = assembled
             badge = "partial" if _min_cov >= 2 \
                 else "partial_single"
-            # v18 (§C, James's ruling 2026-10-14): same rename
+            # v18 (§C, operator ruling 2026-10-14): same rename
             # as the verified top class; partial_single keeps
             # its name (already visibly different, more
             # specific).
@@ -8343,7 +8664,7 @@ def _run_unit(ctx):
                 claims=(jr or {}).get("claims", []),
                 missing=missing[:8], gate=gate)
 def _idk_answer(missing, hits, lead):
-    """The full IDK payload (James's decision): a plain refusal, what
+    """The full IDK payload (operator decision): a plain refusal, what
     is missing, and the closest excerpts, inline."""
     lines = [lead, "",
              "I don't know based on the available documents.", ""]
@@ -8753,6 +9074,9 @@ class Handler(BaseHTTPRequestHandler):
                         "docs": len(CORPUS_IN),
                         "embeddings_loaded": len(EMBEDDINGS),
                         "hybrid_active": len(EMBEDDINGS) > 0,
+                        # v20.2: the boot-time consistency
+                        # verdict (see _run_consistency_check).
+                        "consistency": CONSISTENCY,
                         # v16: seat health (item 1) and the
                         # branch-out budget state (item 7).
                         "seats": _seat_health_block(),
@@ -8793,7 +9117,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(out)
         elif u.path == "/models":
             # Q&A dropdown is deliberately limited to the 9b local model
-            # plus Gemini (James's call, 2026-10-12); Ollama may host many
+            # plus Gemini (operator call, 2026-10-12); Ollama may host many
             # more models for other uses.
             models = [m for m in ollama_models() if m == "qwen3.5:9b"]
             # Add Gemini options if API key is configured
@@ -8944,7 +9268,7 @@ class Handler(BaseHTTPRequestHandler):
                 its cited web hits are marked verified for the
                 source list. Partial keeps its badge; the web
                 sourcing is stated in the record. The web flag is
-                orthogonal to the panel state (§C, James's ruling
+                orthogonal to the panel state (§C, operator ruling
                 2026-10-14): a verified unit from a degraded panel
                 ships verified_web_reduced."""
                 web_idx = {i for i, h in enumerate(unit_hits)
@@ -9136,7 +9460,7 @@ class Handler(BaseHTTPRequestHandler):
                 # cached too, so a transient failure froze into
                 # the answer every later re-ask replayed. (The
                 # _reduced names are the same verified tier under
-                # James's 2026-10-14 badge ruling and cache the
+                # the operator's 2026-10-14 badge ruling and cache the
                 # same way.)
                 if badge in ("verified", "verified_web",
                              "verified_reduced",
@@ -9159,6 +9483,14 @@ class Handler(BaseHTTPRequestHandler):
                     "served": served,
                     "panel": (judging or {}).get("panel"),
                     "annotation": (judging or {}).get("annotation"),
+                    # v20.2 (observability): the ask's full
+                    # event stream (seat successes AND the new
+                    # seat_fail/seat_down failure reasons,
+                    # local loads, guard sheds) and every
+                    # retrieval-pool snapshot, at record level;
+                    # the per-unit slices ride below.
+                    "events": list(_ask_ctx().events),
+                    "retrieval": list(_ask_ctx().retr_pools),
                     "units": [{
                         "part": u.get("part"),
                         "unit_q": u.get("unit_q") or None,
@@ -9186,6 +9518,15 @@ class Handler(BaseHTTPRequestHandler):
                             "excerpt": (h.get("excerpt")
                                         or "")[:3000],
                         } for h in u.get("hits", ())],
+                        # v20.2 (observability): this unit's
+                        # event slice (seat_fail/seat_down
+                        # reasons included), its judge error
+                        # strings (previously response-only),
+                        # and any retrieval pools it ran.
+                        "events": u.get("events"),
+                        "judge_errors": (u.get("judging")
+                                          or {}).get("errors"),
+                        "retrieval": u.get("retr_pools"),
                     } for u in _units_now],
                 })
                 # v18 (F18): publish to any identical in-flight
@@ -9520,7 +9861,7 @@ class Handler(BaseHTTPRequestHandler):
                 # mix of verified + partial_single, for example,
                 # fell through to partial_single by accident of
                 # ordering rather than by rule.) The _reduced
-                # names (James's ruling 2026-10-14) rank just
+                # names (operator ruling 2026-10-14) rank just
                 # below their full counterparts and above the
                 # matching _single class, so a degraded panel
                 # stays visible in the assembled badge too.
@@ -9698,6 +10039,10 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"FSSA Q&A server: {len(CORPUS_IN)} IN docs + {len(CORPUS_FED)} federal docs on port {PORT}", flush=True)
+    # v20.2: the embeddings/corpora consistency check (WARN
+    # only; see _run_consistency_check). Runs before serving
+    # so the boot log and the first /health read agree.
+    _run_consistency_check()
     # v17: read the OpenRouter key's state once at startup (in
     # a daemon thread, so a slow provider never delays the
     # listener); /health serves the cached state from there.

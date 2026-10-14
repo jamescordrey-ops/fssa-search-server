@@ -15,8 +15,8 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 V18 = os.path.join(HERE, "..")
-SERVER = os.path.join(V18, "fssa_search_server.py")
-HARNESS = os.path.join(V18, "replay_harness.py")
+SERVER = os.path.join(V18, "server", "fssa_search_server.py")
+HARNESS = os.path.join(V18, "tools", "replay_harness.py")
 
 CLAIM = "The waiver covers pest control"
 

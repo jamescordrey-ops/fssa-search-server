@@ -19,7 +19,7 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SERVER = os.path.join(HERE, "..", "fssa_search_server.py")
+SERVER = os.path.join(HERE, "..", "server", "fssa_search_server.py")
 
 
 def _load_server(workdir):

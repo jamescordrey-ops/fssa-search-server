@@ -19,7 +19,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SERVER = os.path.join(HERE, "..", "fssa_search_server.py")
+SERVER = os.path.join(HERE, "..", "server", "fssa_search_server.py")
 MODEL = "openai/gpt-oss-120b"  # price row (0.10, 0.50) per 1M
 
 
