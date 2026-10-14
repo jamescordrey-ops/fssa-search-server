@@ -206,13 +206,67 @@ seat with its fastest measured candidate (rolling median
 latency) instead of fixed list order; (G3) the judge-seat
 timeout drops from 60s to 30s so a stalled provider fails
 over sooner; (G4) each unit judges against a per-class time
-budget (150s simple, 420s hard) inside the ask's 600s
+budget (150s simple, 420s hard; v20: 285s hard) inside the ask's 600s
 absolute cap, composing from verdicts in hand at the budget;
 (G5) simple questions take a fast lane (primary judge plus
 the second seat; the third seat sits out), while hard
 questions keep the full panel. The offline companion is
 v19/route_report.py, which reads ask_records.jsonl and
 reports per-route wall time, cost, and badges.
+
+v20 (2026-10-14): the free-first route rewire (James's
+directive; see v20/STATUS.md). FREE + FAST providers become
+the primaries; every PREPAID provider sits behind them as a
+fallover. The final form is James's LAYER MODEL (later on
+2026-10-14): strict free-before-paid layering in every
+chain, with the v19 latency ordering applying INSIDE a
+layer only (layer wins in _plan_panel and _seat_pick).
+Layer 0 free + fast: Groq seats and Gemini Lite's free
+path. Layer 1 free + strong + scarce: Gemini 3.8 Flash,
+rationed mid-ladder (sub-cap 10/day protecting its
+final-rung reserve) as a replacement judge in seats B and
+C, recorded as-served. Layer 2 free + slow: the NIM seats.
+Layer 3 paid: OpenRouter and xAI under the ledger caps.
+Layer 4: local models last (cold-load rule), then
+fail-closed IDK. Hard drafting: Groq GPT-OSS-120B, then
+the NIM bench (Kimi K3, GLM-5.3 lead), then Grok 4.7 on
+xAI, then GPT-OSS-120B on OpenRouter, then local. Simple
+drafting + utilities: Groq GPT-OSS-20B, then the NIM
+bench (gpt-oss-20b leads it), then OpenRouter, then
+local. Judges: seat A (Google) is UNCHANGED (Gemini Lite
+on the free Gemini path; v20 adds the same model via
+OpenRouter as a paid fallover ahead of the NIM-seat
+extractor); seat B (DeepSeek): NIM DeepSeek V4.1-Flash,
+then NIM Nemotron Super, then the rationed Flash rung,
+then the proven OpenRouter DeepSeek V3.1 — V4.1-Flash is
+ungraded as a primary judge and Stage 3 compares this
+panel against the v19 panel on the anchors before the
+free-first panel is trusted; seat C (Alibaba): Groq
+Qwen3.8-27B, then the rationed Flash rung, then the
+proven Qwen3-235B on OpenRouter. Acceptance (James,
+2026-10-14): a unit returns in under 5 minutes and
+accurate — per-class budgets are 150s simple / 285s hard
+inside the 600s ask cap, NIM legs carry tight per-call
+timeouts (judges 30s, drafting ~60s), chain legs clamp to
+the unit's remaining budget and shed at its edge, and NO
+gate, panel rule, or citation rule was weakened to buy
+the speed.
+xAI is an ORDINARY PAID provider: the $150/mo data-sharing
+free-credits program was sunset at the end of May 2025 and
+the $25 signup promo never materialized, so xAI spend
+counts against the real-money caps (the $2.00/day ledger
+and the $0.50 per-ask ceiling) exactly like OpenRouter,
+through the same reservation gate. The XAI_FREE_CREDITS
+flag (default False, now a permanent fact) exists only so
+a future grant program could switch xAI accounting to a
+visibility-only credit ledger without code surgery. Groq
+free-tier calls are guarded by a persistent daily request
+counter (soft cap 900/day, Indiana ledger day): past it,
+Groq entries shed to their fallovers until the next ledger
+day, and every shed is logged in the ask record. All v19
+verification machinery (gates, badges, the diversity
+guard, panel planning, completeness repair, per-class
+budgets) is unchanged.
 """
 import calendar
 import contextvars
@@ -598,6 +652,35 @@ def _utility_text(prompt, max_tokens=256, timeout=30):
     the v16 split showed these calls were 80-95% of retrieval
     time; any OpenRouter failure falls through to the NIM seat
     path below, unchanged."""
+    # v20 (layer model): Groq's free tier (GPT-OSS-20B)
+    # first, then the free NIM seat path, then the paid
+    # OpenRouter seat — free before paid, as everywhere.
+    if _groq_available():
+        try:
+            return _groq_text(
+                GROQ_UTILITY_MODEL,
+                "You are a precise retrieval utility. Reply with "
+                "only the requested output, no explanations.",
+                prompt, temperature=0, max_tokens=max_tokens,
+                timeout=timeout)
+        except Exception:
+            pass  # the NIM seat path below takes over
+    try:
+        model, slot, _fo = _seat_pick("simple_draft")
+        if model is None:
+            model, key_env, key_file = (DRAFTER_SIMPLE_MODEL,
+                                        DRAFTER_KEY_ENV,
+                                        DRAFTER_KEY_FILE)
+        else:
+            key_env, key_file = SEAT_SLOTS[slot]
+        return _nim_text(
+            DRAFTER_BASE_URL, key_env, key_file, model,
+            "You are a precise retrieval utility. Reply with only "
+            "the requested output, no explanations.",
+            prompt, temperature=0, max_tokens=max_tokens,
+            timeout=timeout, provider=DRAFTER_PROVIDER)
+    except Exception:
+        pass  # the OpenRouter attempt below takes over
     if _or_available():
         try:
             return _or_text(
@@ -607,20 +690,8 @@ def _utility_text(prompt, max_tokens=256, timeout=30):
                 prompt, temperature=0, max_tokens=max_tokens,
                 timeout=timeout)
         except Exception:
-            pass  # the NIM seat path below takes over
-    model, slot, _fo = _seat_pick("simple_draft")
-    if model is None:
-        model, key_env, key_file = (DRAFTER_SIMPLE_MODEL,
-                                    DRAFTER_KEY_ENV,
-                                    DRAFTER_KEY_FILE)
-    else:
-        key_env, key_file = SEAT_SLOTS[slot]
-    return _nim_text(
-        DRAFTER_BASE_URL, key_env, key_file, model,
-        "You are a precise retrieval utility. Reply with only "
-        "the requested output, no explanations.",
-        prompt, temperature=0, max_tokens=max_tokens,
-        timeout=timeout, provider=DRAFTER_PROVIDER)
+            pass
+    raise RuntimeError("utility providers all down")
 
 
 def rewrite_query(question):
@@ -3473,6 +3544,11 @@ DRAFTER_SIMPLE_MODEL = _DRAFT_CFG["simple_model"]
 DRAFTER_KEY_FILE = _DRAFT_CFG["key_file"]
 DRAFTER_KEY_ENV = _DRAFT_CFG["key_env"]
 DRAFTER_TIMEOUT = 240  # cold flagship drafts are slow (see header)
+# v20 (acceptance discipline): NIM drafting legs get a tight
+# per-call bound (~60s) so the free-first chain fits the
+# per-class unit budgets; DRAFTER_TIMEOUT remains the
+# unbounded-retry default for non-seat callers.
+NIM_DRAFTER_TIMEOUT = 60
 # v15.1 (see V151_AUDIT.md): two NIM seats that keep the local
 # models cold. The divergence oracle (item 4) and the emergency
 # draft seat both run on the NIM judge-seat model (Nemotron
@@ -3564,12 +3640,140 @@ SEAT_SLOTS = {
     1: ("NVIDIA_API_KEY", "nvidia_key.txt"),
     2: ("NVIDIA_API_KEY2", "nvidia_key2.txt"),
     3: ("NVIDIA_API_KEY3", "nvidia_key3.txt"),
+    # v20: two more pseudo-slots in the same pattern. Slot 4
+    # is xAI (an ordinary paid provider; see the v20 provider
+    # block below), slot 5 is Groq (free tier, daily-guarded).
+    # A missing key file leaves the slot dormant, exactly as
+    # the NIM slots have always behaved.
+    4: ("XAI_API_KEY", "xai_key.txt"),
+    5: ("GROQ_API_KEY", "groq_key.txt"),
 }
 SEAT_BASE_URL = "https://integrate.api.nvidia.com/v1"
+# v20: per-slot base URLs + provider names. Slots 1-3 are
+# the NIM slots (SEAT_BASE_URL); slot 0 never reaches the
+# generic transport (it is served by _or_text); slots 4/5
+# are served by _xai_text / _groq_text, which wrap the same
+# OpenAI-compatible client.
+SLOT_BASE_URLS = {1: SEAT_BASE_URL, 2: SEAT_BASE_URL,
+                  3: SEAT_BASE_URL,
+                  4: "https://api.x.ai/v1",
+                  5: "https://api.groq.com/openai/v1"}
+# Slot 6 is the rationed Gemini 3.8 Flash mid-ladder rung
+# (v20 layer model): no key file and no base URL — it is
+# served by _gemini_text under its own sub-cap counter.
+_SLOT_PROVIDERS = {0: "openrouter", 4: "xai", 5: "groq",
+                  6: "gemini"}
+
+
+def _slot_base_url(slot):
+    return SLOT_BASE_URLS.get(slot, SEAT_BASE_URL)
+
+
+def _slot_provider_name(slot):
+    return _SLOT_PROVIDERS.get(slot, "nim")
+
+
+# --- v20: the xAI + Groq provider block ------------------------------
+# Seat chains are config-driven constants (here and in SEATS
+# below), so any seat can be reverted by editing one list.
+# James's free-first directive (2026-10-14): free + fast
+# providers are the primaries; ALL prepaid providers sit
+# behind them as fallovers. The one documented exception is
+# judge seat B (see SEATS).
+#
+# xAI: an ORDINARY PAID provider. The data-sharing program
+# that once granted $150/mo in free credits was SUNSET at
+# the end of May 2025 (official xAI email to participants;
+# confirmed 2026-10-14) and the reported $25 signup promo
+# never materialized, so NO grant exists: by default xAI
+# spend reserves and settles through the OpenRouter
+# reservation gate and counts against the $2.00/day ledger
+# and the $0.50 per-ask ceiling exactly like OpenRouter
+# spend. XAI_FREE_CREDITS stays in the code only so a future
+# grant program could flip xAI accounting to the
+# visibility-only credit ledger (xai_spend.json,
+# xai_credit_today in /health) without code surgery; its
+# default False is a permanent fact, not a pending toggle.
+XAI_BASE_URL = "https://api.x.ai/v1"
+XAI_KEY_FILE = "xai_key.txt"
+XAI_KEY_ENV = "XAI_API_KEY"
+XAI_FREE_CREDITS = False
+# xAI model ids verified against the LIVE api.x.ai catalog
+# on 2026-10-14 (connector pull): grok-4.7 is the flagship;
+# the fast tier is grok-4.20-0309-non-reasoning (there is
+# NO grok-4.1-fast on the direct API).
+XAI_HARD_MODEL = "grok-4.7"
+XAI_FAST_MODEL = "grok-4.20-0309-non-reasoning"
+XAI_DRAFTER_TIMEOUT = 120  # hosted flagship; the OR drafter bound
+# USD per 1M tokens (input, output), list prices.
+_XAI_PRICES = {XAI_HARD_MODEL: (2.00, 6.00)}
+_XAI_PRICE_DEFAULT = (2.00, 6.00)
+#
+# Groq: the free tier is the primary rail for hard drafting
+# (GPT-OSS-120B), simple drafting + utilities (GPT-OSS-20B),
+# and judge seat C (Qwen3.8-27B). Model ids verified TWICE
+# on 2026-10-14: against Groq's official models page
+# (https://console.groq.com/docs/models — the two GPT-OSS
+# models are PRODUCTION; qwen/qwen3.8-27b is a PREVIEW
+# model) and against the LIVE account catalog pulled with
+# James's own key (exactly 11 models; the three chat ids
+# below match exactly; there is NO Llama chat model on his
+# catalog, only llama-prompt-guard classifiers, and no
+# qwen/qwen3-32b). Preview models can be discontinued at
+# short notice: seat C's fallover chain (the proven
+# Qwen3-235B on OpenRouter) is the protection, and the
+# Stage-2 deploy checklist in v20/STATUS.md re-checks the
+# catalog before go-live.
+# James is also vaulting his Groq key; when the parent's
+# live-catalog pull lands, these constants are the exact
+# strings to swap.
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_KEY_FILE = "groq_key.txt"
+GROQ_KEY_ENV = "GROQ_API_KEY"
+GROQ_HARD_MODEL = "openai/gpt-oss-120b"
+GROQ_SIMPLE_MODEL = "openai/gpt-oss-20b"
+GROQ_UTILITY_MODEL = "openai/gpt-oss-20b"
+GROQ_QWEN_MODEL = "qwen/qwen3.8-27b"
+GROQ_DRAFTER_TIMEOUT = 60  # Groq's whole pitch is speed
+# USD per 1M tokens (input, output), list prices from the
+# same official models page. Free-tier calls are recorded
+# at these prices for visibility (provider_tier=free) and
+# never touch the real-money ledger.
+_GROQ_PRICES = {GROQ_HARD_MODEL: (0.15, 0.60),
+                GROQ_SIMPLE_MODEL: (0.075, 0.30),
+                GROQ_QWEN_MODEL: (0.80, 4.00)}
+_GROQ_PRICE_DEFAULT = (0.15, 0.60)
+# The Groq daily guard (spec item 4): a persistent per-day
+# request counter on the Indiana ledger day (the spend
+# ledger's convention). At GROQ_DAILY_SOFT_CAP the Groq
+# entries shed (chains skip them and the fallover proceeds)
+# until the next ledger day; sheds are logged in the ask
+# record. The cap sits under Groq's free-plan 1,000
+# requests/day for the GPT-OSS models so the server sheds
+# on its own schedule instead of eating a 429 mid-ask.
+GROQ_DAILY_SOFT_CAP = int(
+    os.environ.get("FSSA_GROQ_DAILY_SOFT_CAP", "900"))
+_GROQ_USAGE_FILE = "groq_usage.json"
+_GROQ_LOCK = threading.Lock()
+_GROQ_STATE = {"date": "", "requests": 0, "list_usd": 0.0,
+               "broken": False, "loaded": False}
+# The xAI grant-mode credit ledger (visibility only; only
+# accrues when XAI_FREE_CREDITS is True — see above).
+_XAI_CREDIT_FILE = "xai_spend.json"
+_XAI_CREDIT_LOCK = threading.Lock()
+_XAI_CREDIT_STATE = {"date": "", "credit": 0.0,
+                     "broken": False, "loaded": False}
 # Candidate lists are in bake-off finishing order (winner first).
 # These assignments are written from the bake-off table in
 # v16/STATUS.md; if this block and the table ever disagree, the
 # table is the record and this block is the bug.
+# v20 note: the drafting seats below are now the NIM BENCH
+# layer of the drafting chains. The primaries live in
+# _generate's explicit chain (hard: Groq GPT-OSS-120B ->
+# xAI Grok 4.7 -> OpenRouter GPT-OSS-120B -> this bench ->
+# local; simple: Groq GPT-OSS-20B -> OpenRouter -> this
+# bench, whose gpt-oss-20b head is the NIM simple primary).
+# The judge seats carry their full chains here, as before.
 # v18 (§B, pass 2 item B): judge seat 2 is a Qwen-family
 # NON-THINKING instruct. The originally planned GPT-OSS-20B was
 # rejected in the pass-2 challenge round: on simple questions
@@ -3590,9 +3794,12 @@ SEAT2_FAILOVER_MODEL = "meta-llama/llama-4-maverick"
 
 SEATS = {
     "hard_draft": {
+        # v20: the bench order follows the Layer-2 chain spec
+        # (Kimi K3, then GLM-5.3, lead); Nemotron Ultra and
+        # DeepSeek V4.1-Flash remain as deeper free depth.
         "candidates": [("moonshotai/kimi-k3", 2),
-                       ("nvidia/nemotron-3-ultra-550b-a55b", 2),
                        ("z-ai/glm-5.3", 2),
+                       ("nvidia/nemotron-3-ultra-550b-a55b", 2),
                        ("deepseek-ai/deepseek-v4.1-flash", 2)],
         "budget_median": 30.0, "budget_p95": 120.0},
     "simple_draft": {
@@ -3616,8 +3823,29 @@ SEATS = {
         # bench rule would bench the new primaries on their
         # own measured latency and silently hand the seat
         # back to the failover.
-        "candidates": [("deepseek/deepseek-chat-v3.1", 0),
-                       ("nvidia/nemotron-3-super-120b-a12b", 1)],
+        # v20 (seat B, DeepSeek family; final form under
+        # James's layer model, 2026-10-14): NIM DeepSeek
+        # V4.1-Flash is the FREE primary (id verified in the
+        # live NIM catalog pull of 2026-10-14, where it is
+        # deepseek-ai/deepseek-v4.1-flash; it already serves
+        # on the hard_draft bench), then NIM Nemotron Super
+        # (the rest of the free layer), then the rationed
+        # Gemini 3.8 Flash mid-ladder rung (slot 6, Layer 1
+        # rules: sub-cap FLASH_MID_DAILY_CAP, never a badge
+        # stand-in for this seat's family — the panel records
+        # it as-served, a google voice), then the proven
+        # V3.1 on OpenRouter as the prepaid fallover. All
+        # three judge primaries are free (Lite via Google,
+        # V4.1-Flash via NIM, Qwen3.8-27B via Groq). NOTE:
+        # V4.1-Flash is UNGRADED as a primary judge — Stage 3
+        # grading compares this panel against the v19 panel
+        # (V3.1 primary) on the anchors before the free-first
+        # panel is trusted, and this candidate order stays
+        # config-reversible until then (v20/STATUS.md).
+        "candidates": [("deepseek-ai/deepseek-v4.1-flash", 2),
+                       ("nvidia/nemotron-3-super-120b-a12b", 1),
+                       (FLASH_MODEL, 6),
+                       ("deepseek/deepseek-chat-v3.1", 0)],
         "budget_median": 45.0, "budget_p95": None},
     "judge_nim2": {
         # v17.2 (James's ruling, 2026-10-14): this seat goes
@@ -3649,9 +3877,34 @@ SEATS = {
         # own output). Qwen3-32B is OUT of both judge chains:
         # it stays a drafting/utility candidate only. Failover
         # is a fifth-family OpenRouter model, then NIM Ultra.
-        "candidates": [(JUDGE_SEAT2_MODEL, 0),
-                       (SEAT2_FAILOVER_MODEL, 0),
-                       ("nvidia/nemotron-3-ultra-550b-a55b", 3)],
+        # v20 (seat C, Alibaba family; final form under
+        # James's layer model, 2026-10-14): the Groq free
+        # tier leads with Qwen3.8-27B (GROQ_QWEN_MODEL; id
+        # verified on Groq's official models page AND in the
+        # live account catalog pull, both 2026-10-14 — a
+        # preview model, so this chain's depth is the
+        # protection), then the rationed Gemini 3.8 Flash
+        # mid-ladder rung (slot 6, Layer 1 rules), then the
+        # v19 primary — the proven Qwen3-235B instruct on
+        # OpenRouter — as the prepaid fallover.
+        # v20.1 (fix 1, James's approval 2026-10-14): the
+        # v19 tail is RESTORED behind the 235B, for depth
+        # and for the Meta-family tail voice: NIM Nemotron
+        # Ultra — the v19 seat's own Ultra entry,
+        # nvidia/nemotron-3-ultra-550b-a55b on key slot 3 —
+        # listed ahead of the paid legs per the layer model,
+        # then SEAT2_FAILOVER_MODEL (Llama-4-Maverick,
+        # OpenRouter). The first v20 pass dropped the tail
+        # because the concrete chain in James's layer
+        # directive ended at the 235B; both models remained
+        # in the file throughout (SEAT2_FAILOVER_MODEL
+        # stayed defined and priced; Ultra still serves the
+        # hard_draft bench), so the restore is config-only.
+        "candidates": [(GROQ_QWEN_MODEL, 5),
+                       (FLASH_MODEL, 6),
+                       ("nvidia/nemotron-3-ultra-550b-a55b", 3),
+                       (JUDGE_SEAT2_MODEL, 0),
+                       (SEAT2_FAILOVER_MODEL, 0)],
         "budget_median": 45.0, "budget_p95": None},
 }
 SEAT_BENCH_COOLDOWN_S = 600
@@ -3677,8 +3930,64 @@ def _slot_has_key(slot):
     present and the daily spend cap untripped)."""
     if slot == 0:
         return _or_available()
+    if slot == 4:
+        # v20: the xAI pseudo-slot counts as keyed only while
+        # xAI may run (key present; in the default paid mode
+        # also the real-money ceiling untripped, exactly like
+        # the OpenRouter pseudo-slot it shares a ledger with).
+        return _xai_available()
+    if slot == 5:
+        # v20: the Groq pseudo-slot counts as keyed only
+        # while the key is present AND the daily guard has
+        # not shed Groq for the rest of the ledger day.
+        return _groq_available()
+    if slot == 6:
+        # v20: the Flash mid-ladder rung counts as keyed
+        # only while its daily ration lasts (the Gemini
+        # client itself enforces spacing, backoff, and the
+        # model's hard 20/day cap at call time).
+        return _flash_mid_available()
     key_env, key_file = SEAT_SLOTS[slot]
     return _nim_key_for(key_env, key_file) is not None
+
+
+def _candidate_layer(model, slot):
+    """v20 (James's layer model, 2026-10-14): a seat
+    candidate's chain layer. Layer 0 = free + fast (Groq,
+    slot 5); Layer 2 = free + slow (the NIM slots); Layer 3 =
+    paid (OpenRouter slot 0, xAI slot 4). Gemini 3.8 Flash's
+    rationed mid-ladder rung (slot 6) is classed Layer 1
+    (free + strong + scarce) as a PROVIDER, but its chain
+    position is the mid-ladder one the concrete seat chains
+    assign it — after the seat's free primaries, ahead of
+    every paid fallover — so its ordering value sits between
+    the NIM layer and the paid layer. Ordering rule: layer
+    wins over latency; the v19 latency ordering applies
+    INSIDE a layer only."""
+    if slot == 5:
+        return 0.0
+    if slot in (1, 2, 3):
+        return 2.0
+    if slot == 6:
+        return 2.5
+    return 3.0
+
+
+def _leg_timeout(base):
+    """v20 (acceptance discipline): clamp one chain leg's
+    timeout to the current unit's remaining budget, so a slow
+    leg sheds at the budget edge instead of blowing the
+    unit's wall (simple 150s / hard 285s). Returns 0.0 when
+    the budget is spent — the caller must not start the leg.
+    Outside a unit (no deadline published) the base timeout
+    stands, exactly as in v19."""
+    dl = _ask_ctx().unit_deadline
+    if dl is None:
+        return float(base)
+    remaining = dl - time.monotonic()
+    if remaining <= 0:
+        return 0.0
+    return min(float(base), remaining)
 
 
 def _seat_pick(job, skip=(), exclude_families=()):
@@ -3718,7 +4027,14 @@ def _seat_pick(job, skip=(), exclude_families=()):
                 return pmodel, pslot, idx > 0
         # planned seat unusable (key gone, benched, excluded):
         # fall through to the guarded scan below
-    for idx, (model, slot) in enumerate(cands):
+    # v20: the scan walks layer-major order (the configured
+    # list order inside a layer): a lower layer's candidate
+    # is always tried before any higher layer's, whatever
+    # the latency table says.
+    for idx in sorted(range(len(cands)),
+                      key=lambda i: (_candidate_layer(*cands[i]),
+                                     i)):
+        model, slot = cands[idx]
         if model in skip or not _slot_has_key(slot):
             continue
         if _model_family(model) in excl:
@@ -3773,7 +4089,11 @@ def _plan_panel():
     median budget, so it gets tried without leading blind.
     Ties keep the configured candidate order. Failover inside
     a call still walks the configured order (§C's rule that a
-    planned seat is not replaced mid-round is unchanged)."""
+    planned seat is not replaced mid-round is unchanged).
+    v20: the plan key is (layer, latency, order) — James's
+    layer model wins over latency, and the §G2 latency
+    ordering applies inside a layer only, so a measured-fast
+    paid candidate can never lead a seat over a free one."""
     ctx = _ask_ctx()
     taken = set()
     if ctx.draft_family:
@@ -3796,7 +4116,7 @@ def _plan_panel():
             med = _seat_median(job, model)
             score = med if med is not None \
                 else SEATS[job]["budget_median"] * 0.75
-            key = (score, order)
+            key = (_candidate_layer(model, slot), score, order)
             if best is None or key < best[0]:
                 best = (key, model, slot, fam)
         if best is not None:
@@ -3878,7 +4198,7 @@ def _seat_health_block():
 class _AskContext:
     __slots__ = ("cost", "events", "retr", "verdict_families",
                  "served_models", "panel_plan", "draft_family",
-                 "lock")
+                 "lock", "unit_deadline")
 
     def __init__(self):
         self.cost = 0.0
@@ -3889,6 +4209,11 @@ class _AskContext:
         self.panel_plan = {}         # judge job -> (model, slot)
         self.draft_family = None
         self.lock = threading.Lock()
+        # v20: the current unit's monotonic deadline, set by
+        # _run_unit per unit (units run sequentially inside an
+        # ask); chain legs clamp their timeouts to what is
+        # left of it via _leg_timeout. None outside a unit.
+        self.unit_deadline = None
 
 
 _ASK_CTX_VAR = contextvars.ContextVar("fssa_ask_ctx", default=None)
@@ -3917,6 +4242,10 @@ def _model_family(model):
     DeepSeek V3.1 and V4, or Nemotron Super and Ultra, are one
     voice and may never hold two seats on the same panel."""
     m = (model or "").lower()
+    if "grok" in m:
+        return "xai"  # v20: the Grok line is its own family;
+        # the drafting-family exclusion depends on it never
+        # colliding with a judge family.
     if "gpt-oss" in m or m.startswith("openai/"):
         return "openai"
     if "deepseek" in m:
@@ -4008,6 +4337,13 @@ def _judge_seat_text(job, system, user):
     non-thinking instruct gets JUDGE_SEAT2_MAX_TOKENS instead
     of the reasoning budget, since there is no reasoning to
     burn and the cap is what the reservation prices."""
+    # v20: if this seat's chain carries a Groq candidate and
+    # the daily guard has shed Groq, the shed is logged in
+    # the ask record (the pick below silently skips the slot,
+    # exactly like a keyless slot).
+    if _groq_guard_tripped() and any(
+            s == 5 for _m, s in SEATS[job]["candidates"]):
+        _note_groq_shed(job)
     tried = []
     while True:
         model, slot, failover = _seat_pick(
@@ -4017,6 +4353,13 @@ def _judge_seat_text(job, system, user):
             raise RuntimeError(
                 f"{job}: all seat candidates unavailable "
                 f"(tried {tried})")
+        # v20: the leg runs clamped to the unit's remaining
+        # budget; at the budget edge the seat sheds instead
+        # of starting a call that cannot finish inside it.
+        _jt = _leg_timeout(THIRD_JUDGE_TIMEOUT)
+        if _jt <= 0:
+            raise RuntimeError(
+                f"{job}: unit budget spent; seat leg shed")
         t0 = time.monotonic()
         try:
             if slot == 0:
@@ -4027,14 +4370,37 @@ def _judge_seat_text(job, system, user):
                 content = _or_text(
                     model, system, user, temperature=0,
                     max_tokens=max_tokens,
-                    timeout=THIRD_JUDGE_TIMEOUT)
+                    timeout=_jt)
+            elif slot == 4:
+                # v20: xAI candidate (no v20 judge chain seats
+                # one by default; the dispatch keeps the slot
+                # config-reversible like the others).
+                content = _xai_text(
+                    model, system, user, temperature=0,
+                    max_tokens=4000,
+                    timeout=_jt)
+            elif slot == 5:
+                # v20: Groq candidate (seat C's Qwen primary).
+                content = _groq_text(
+                    model, system, user, temperature=0,
+                    max_tokens=4000,
+                    timeout=_jt)
+            elif slot == 6:
+                # v20: the rationed Gemini 3.8 Flash
+                # mid-ladder rung (counted at attempt time;
+                # the Gemini client applies its own spacing
+                # and timeout discipline). The verdict records
+                # as-served: a google voice in this seat, never
+                # a stand-in for the seat's own family.
+                _flash_mid_note()
+                content = _gemini_text(FLASH_MODEL, system, user)
             else:
                 key_env, key_file = SEAT_SLOTS[slot]
                 content = _nim_text(
-                    SEAT_BASE_URL, key_env, key_file,
+                    _slot_base_url(slot), key_env, key_file,
                     model, system, user, temperature=0,
                     max_tokens=2048,
-                    timeout=THIRD_JUDGE_TIMEOUT,
+                    timeout=_jt,
                     provider="nim")
             lat = time.monotonic() - t0
             _seat_report(job, model, lat, True)
@@ -4308,6 +4674,12 @@ OPENROUTER_KEY_ENV = "OPENROUTER_API_KEY"
 OPENROUTER_HARD_MODEL = "openai/gpt-oss-120b"
 OPENROUTER_SIMPLE_MODEL = "openai/gpt-oss-20b"
 OPENROUTER_UTILITY_MODEL = "openai/gpt-oss-20b"
+# v20 (judge seat A's paid fallover): Gemini 3.5 Flash-Lite
+# via OpenRouter — the same model as GEMINI_CHAIN[0], so the
+# primary judge's fallover keeps its model and its family.
+# Slug and price read off the live OpenRouter catalog on
+# 2026-10-14 ($0.30 in / $2.50 out per 1M).
+OR_LITE_MODEL = "google/gemini-3.5-flash-lite"
 OPENROUTER_DRAFTER_TIMEOUT = 120  # Cerebras drafts land in
 # seconds; the bound only caps a degraded backend before the
 # NIM seat takes over (the NIM path keeps DRAFTER_TIMEOUT).
@@ -4391,6 +4763,8 @@ _OR_PRICES = {
 # verification, set conservatively at the class maximum).
 _OR_PRICES[JUDGE_SEAT2_MODEL] = (0.30, 1.20)
 _OR_PRICES[SEAT2_FAILOVER_MODEL] = (0.60, 2.40)
+# v20: seat A's Lite fallover row (catalog-verified above).
+_OR_PRICES[OR_LITE_MODEL] = (0.30, 2.50)
 _OR_PRICE_DEFAULT = (2.00, 6.00)
 
 
@@ -4530,16 +4904,41 @@ def _or_committed():
         return _or_committed_locked()
 
 
-def _or_max_cost(model, system, user, max_tokens):
-    """One OpenRouter call's provable maximum cost: input
-    tokens bounded by the prompts' byte length (a token is at
-    least one byte, so bytes are a true upper bound — pass 2
-    item F5), output bounded by max_tokens, both at the
-    model's price row."""
-    pin, pout = _OR_PRICES.get(model, _OR_PRICE_DEFAULT)
+def _max_cost_from(prices, default, model, system, user,
+                   max_tokens):
+    """A call's provable maximum cost at a price table:
+    input tokens bounded by the prompts' byte length (a
+    token is at least one byte, so bytes are a true upper
+    bound — pass 2 item F5), output bounded by max_tokens."""
+    pin, pout = prices.get(model, default)
     in_bound = len((system or "").encode("utf-8")) \
         + len((user or "").encode("utf-8"))
     return (in_bound * pin + int(max_tokens) * pout) / 1_000_000.0
+
+
+def _or_max_cost(model, system, user, max_tokens):
+    """One OpenRouter call's provable maximum cost (see
+    _max_cost_from)."""
+    return _max_cost_from(_OR_PRICES, _OR_PRICE_DEFAULT,
+                          model, system, user, max_tokens)
+
+
+def _usage_cost(prices, default, model, usage):
+    """A completed call's cost from its reported token
+    usage, or None when the response carried no usable
+    usage block (callers then settle at the reserved
+    maximum, the F11-1 rule)."""
+    if not isinstance(usage, dict):
+        return None
+    try:
+        pin, pout = prices.get(model, default)
+        pt = float(usage.get("prompt_tokens") or 0)
+        ct = float(usage.get("completion_tokens") or 0)
+    except (TypeError, ValueError):
+        return None
+    if pt <= 0 and ct <= 0:
+        return None
+    return (pt * pin + ct * pout) / 1_000_000.0
 
 
 def _or_reserve(max_cost):
@@ -4720,9 +5119,405 @@ def _or_text(model, system, user, temperature=0, max_tokens=2048,
                      extra=extra, or_route=True)
 
 
+# --- v20: the Groq daily guard ---------------------------------------
+# A persistent per-day counter of Groq requests (groq_usage.json,
+# Indiana ledger day, atomic writes — the spend ledger's pattern).
+# Past GROQ_DAILY_SOFT_CAP, Groq entries are skipped in every
+# chain (the fallover proceeds) until the next ledger day. The
+# counter also accumulates the day's list-price value of Groq
+# calls for visibility: free-tier calls are recorded at list
+# price, provider_tier=free, and never touch the real-money
+# ledger.
+
+def _groq_load_locked():
+    """(Caller holds _GROQ_LOCK.)"""
+    today = _ledger_today()
+    if _GROQ_STATE["loaded"] and _GROQ_STATE["date"] == today:
+        return
+    requests, list_usd, broken = 0, 0.0, False
+    try:
+        with open(_GROQ_USAGE_FILE, encoding="utf-8") as f:
+            st = json.load(f)
+        if st.get("date") == today:
+            requests = int(st.get("requests") or 0)
+            list_usd = float(st.get("list_usd") or 0.0)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        broken = True
+    _GROQ_STATE.update({"date": today, "requests": requests,
+                        "list_usd": list_usd, "broken": broken,
+                        "loaded": True})
+    if broken:
+        # A guard that cannot read its counter sheds Groq
+        # (fail-safe toward the fallovers), never waves it
+        # through past an unknown count.
+        print("[groq] usage counter unreadable; Groq sheds "
+              "to its fallovers until the counter is repaired",
+              flush=True)
+
+
+def _groq_persist_locked():
+    """(Caller holds _GROQ_LOCK.)"""
+    if _GROQ_STATE["broken"]:
+        return
+    try:
+        _atomic_write_json(_GROQ_USAGE_FILE, {
+            "date": _GROQ_STATE["date"],
+            "requests": _GROQ_STATE["requests"],
+            "list_usd": _GROQ_STATE["list_usd"]})
+    except Exception as e:
+        print(f"[groq] usage counter write failed: {e}",
+              flush=True)
+
+
+def _groq_requests_today():
+    with _GROQ_LOCK:
+        _groq_load_locked()
+        return _GROQ_STATE["requests"]
+
+
+def _groq_guard_tripped():
+    """The day's Groq request count is at the soft cap (or
+    the counter is unreadable): Groq sheds until tomorrow."""
+    with _GROQ_LOCK:
+        _groq_load_locked()
+        if _GROQ_STATE["broken"]:
+            return True
+        return _GROQ_STATE["requests"] >= GROQ_DAILY_SOFT_CAP
+
+
+def _groq_count_one():
+    """Count one Groq request (counted at attempt time: the
+    free plan's daily quota counts requests, not successes)."""
+    with _GROQ_LOCK:
+        _groq_load_locked()
+        _GROQ_STATE["requests"] += 1
+        _groq_persist_locked()
+        return _GROQ_STATE["requests"]
+
+
+def _groq_note_cost(cost):
+    """Add one completed Groq call's list-price value to the
+    day's visibility total (provider_tier=free)."""
+    if not cost or cost <= 0:
+        return
+    with _GROQ_LOCK:
+        _groq_load_locked()
+        _GROQ_STATE["list_usd"] += float(cost)
+        _groq_persist_locked()
+
+
+def _groq_list_usd_today():
+    with _GROQ_LOCK:
+        _groq_load_locked()
+        return _GROQ_STATE["list_usd"]
+
+
+def _groq_key():
+    return _nim_key_for(GROQ_KEY_ENV, GROQ_KEY_FILE)
+
+
+def _groq_available():
+    """Groq may run: a key is configured and the daily guard
+    has not shed it. Mirrors _or_available's shape so seat
+    gating treats the pseudo-slot identically."""
+    return _groq_key() is not None and not _groq_guard_tripped()
+
+
+def _note_groq_shed(where):
+    """Log a Groq shed in the ask record (once per ask): a
+    chain skipped its Groq entry because the daily guard is
+    past the soft cap."""
+    ctx = _ask_ctx()
+    with ctx.lock:
+        if any(e.get("kind") == "groq_shed" for e in ctx.events):
+            return
+        ctx.events.append({
+            "kind": "groq_shed", "where": where,
+            "requests_today": _groq_requests_today(),
+            "soft_cap": GROQ_DAILY_SOFT_CAP})
+
+
+def _groq_health_block():
+    """GET /health's groq block: key state, the day's request
+    count against the soft cap, and the list-price value of
+    the day's free-tier calls."""
+    return {"configured": _groq_key() is not None,
+            "hard_model": GROQ_HARD_MODEL,
+            "simple_model": GROQ_SIMPLE_MODEL,
+            "qwen_model": GROQ_QWEN_MODEL,
+            "requests_today": _groq_requests_today(),
+            "daily_soft_cap": GROQ_DAILY_SOFT_CAP,
+            "guard_tripped": _groq_guard_tripped(),
+            "list_usd_today": round(_groq_list_usd_today(), 6),
+            "provider_tier": "free"}
+
+
+# --- v20: the Gemini 3.8 Flash mid-ladder ration ---------------------
+# Layer 1 of James's layer model: Gemini 3.8 Flash may step
+# in mid-ladder as a replacement judge (judge seats B and C,
+# slot 6) when a free primary fails — but it is free, strong,
+# and SCARCE (20 requests/day on the free key), and its
+# final-rung/arbitration reserve must survive. A persistent
+# per-day counter (Indiana ledger day, the spend ledger's
+# pattern) sub-caps mid-ladder use at FLASH_MID_DAILY_CAP
+# (default 10): the other half of the day's quota is never
+# touched by mid-ladder duty. The rung records as-served
+# (a google voice); it never impersonates the seat's family
+# for badge purposes.
+FLASH_MID_DAILY_CAP = int(
+    os.environ.get("FSSA_FLASH_MID_DAILY_CAP", "10"))
+_FLASH_MID_FILE = "flash_mid_usage.json"
+_FLASH_MID_LOCK = threading.Lock()
+_FLASH_MID_STATE = {"date": "", "count": 0, "broken": False,
+                    "loaded": False}
+
+
+def _flash_mid_load_locked():
+    """(Caller holds _FLASH_MID_LOCK.)"""
+    today = _ledger_today()
+    if _FLASH_MID_STATE["loaded"] \
+            and _FLASH_MID_STATE["date"] == today:
+        return
+    count, broken = 0, False
+    try:
+        with open(_FLASH_MID_FILE, encoding="utf-8") as f:
+            st = json.load(f)
+        if st.get("date") == today:
+            count = int(st.get("count") or 0)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        broken = True
+    _FLASH_MID_STATE.update({"date": today, "count": count,
+                             "broken": broken, "loaded": True})
+    if broken:
+        print("[flash-mid] ration counter unreadable; the "
+              "mid-ladder rung sheds until it is repaired",
+              flush=True)
+
+
+def _flash_mid_persist_locked():
+    """(Caller holds _FLASH_MID_LOCK.)"""
+    if _FLASH_MID_STATE["broken"]:
+        return
+    try:
+        _atomic_write_json(_FLASH_MID_FILE, {
+            "date": _FLASH_MID_STATE["date"],
+            "count": _FLASH_MID_STATE["count"]})
+    except Exception as e:
+        print(f"[flash-mid] ration counter write failed: {e}",
+              flush=True)
+
+
+def _flash_mid_count_today():
+    with _FLASH_MID_LOCK:
+        _flash_mid_load_locked()
+        return _FLASH_MID_STATE["count"]
+
+
+def _flash_mid_available():
+    """The mid-ladder rung may run: today's ration is not
+    spent (an unreadable counter sheds the rung, fail-safe
+    toward the reserve)."""
+    with _FLASH_MID_LOCK:
+        _flash_mid_load_locked()
+        if _FLASH_MID_STATE["broken"]:
+            return False
+        return _FLASH_MID_STATE["count"] < FLASH_MID_DAILY_CAP
+
+
+def _flash_mid_note():
+    """Count one mid-ladder Flash call (at attempt time: the
+    ration protects a scarce quota, spent or failed)."""
+    with _FLASH_MID_LOCK:
+        _flash_mid_load_locked()
+        _FLASH_MID_STATE["count"] += 1
+        _flash_mid_persist_locked()
+
+
+def _flash_mid_health_block():
+    """GET /health's flash-mid block: today's ration use."""
+    return {"model": FLASH_MODEL,
+            "used_today": _flash_mid_count_today(),
+            "daily_sub_cap": FLASH_MID_DAILY_CAP,
+            "final_rung_daily_cap": FLASH_DAILY_CAP,
+            "available": _flash_mid_available()}
+
+
+# --- v20: the xAI credit ledger (grant mode only) --------------------
+# Accrues ONLY when XAI_FREE_CREDITS is True (a future grant
+# program). In the default paid mode xAI spend goes through
+# the reservation gate into the real-money ledger and this
+# file is never written; xai_credit_today reads 0.0.
+
+def _xai_credit_load_locked():
+    """(Caller holds _XAI_CREDIT_LOCK.)"""
+    today = _ledger_today()
+    if _XAI_CREDIT_STATE["loaded"] \
+            and _XAI_CREDIT_STATE["date"] == today:
+        return
+    credit, broken = 0.0, False
+    try:
+        with open(_XAI_CREDIT_FILE, encoding="utf-8") as f:
+            st = json.load(f)
+        if st.get("date") == today:
+            credit = float(st.get("credit") or 0.0)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        broken = True
+    _XAI_CREDIT_STATE.update({"date": today, "credit": credit,
+                              "broken": broken, "loaded": True})
+
+
+def _xai_credit_persist_locked():
+    """(Caller holds _XAI_CREDIT_LOCK.)"""
+    if _XAI_CREDIT_STATE["broken"]:
+        return
+    try:
+        _atomic_write_json(_XAI_CREDIT_FILE, {
+            "date": _XAI_CREDIT_STATE["date"],
+            "credit": _XAI_CREDIT_STATE["credit"]})
+    except Exception as e:
+        print(f"[xai] credit ledger write failed: {e}",
+              flush=True)
+
+
+def _xai_credit_note(cost):
+    if not cost or cost <= 0:
+        return
+    with _XAI_CREDIT_LOCK:
+        _xai_credit_load_locked()
+        _XAI_CREDIT_STATE["credit"] += float(cost)
+        _xai_credit_persist_locked()
+
+
+def _xai_credit_today():
+    with _XAI_CREDIT_LOCK:
+        _xai_credit_load_locked()
+        return _XAI_CREDIT_STATE["credit"]
+
+
+def _xai_key():
+    return _nim_key_for(XAI_KEY_ENV, XAI_KEY_FILE)
+
+
+def _xai_available():
+    """xAI may run: a key is configured and — in the default
+    paid mode — the shared real-money ceiling is untripped,
+    exactly the OpenRouter seats' rule (xAI spend reserves
+    against the same ledger). In grant mode the key alone
+    gates the seat."""
+    if _xai_key() is None:
+        return False
+    if XAI_FREE_CREDITS:
+        return True
+    return not _or_cap_tripped()
+
+
+def _xai_health_block():
+    """GET /health's xai block: key state and the accounting
+    mode. In the default paid mode, today's xAI spend is
+    inside the openrouter block's ledger figure (one shared
+    real-money ledger); credit_today_usd accrues only in
+    grant mode."""
+    return {"configured": _xai_key() is not None,
+            "hard_model": XAI_HARD_MODEL,
+            "fast_model": XAI_FAST_MODEL,
+            "free_credits_mode": bool(XAI_FREE_CREDITS),
+            "accounting": ("grant-credit (visibility only)"
+                           if XAI_FREE_CREDITS else
+                           "real-money (shared ledger caps)"),
+            "credit_today_usd": round(_xai_credit_today(), 6)}
+
+
+# --- v20: the xAI + Groq transports -----------------------------------
+
+def _xai_text(model, system, user, temperature=0, max_tokens=2048,
+              timeout=60):
+    """One xAI chat call. Default (paid) mode: the call
+    reserves its provable maximum against the shared
+    real-money ledger BEFORE it starts — a refusal means the
+    $2.00 ceiling would be crossed and the seat behaves as
+    unavailable, exactly like an OpenRouter call — and
+    settles to the billed cost computed from the response's
+    token usage, or at the full reserved maximum when the
+    call fails or reports no usage (F11-1). Grant mode
+    (XAI_FREE_CREDITS): no reservation; the call's list-price
+    value lands in the credit ledger for visibility and
+    never touches the real-money caps."""
+    if not _xai_available():
+        raise RuntimeError(
+            "xai unavailable (no key or daily ceiling reached)")
+    reservation = None
+    if not XAI_FREE_CREDITS:
+        reservation = _or_reserve(_max_cost_from(
+            _XAI_PRICES, _XAI_PRICE_DEFAULT, model, system,
+            user, max_tokens))
+        if reservation is None:
+            raise RuntimeError(
+                "xai daily ceiling reached (reservation refused)")
+    usage = {}
+    try:
+        content = _nim_text(
+            XAI_BASE_URL, XAI_KEY_ENV, XAI_KEY_FILE, model,
+            system, user, temperature=temperature,
+            max_tokens=max_tokens, timeout=timeout,
+            provider="xai", usage_out=usage)
+    except Exception:
+        # Settle at the full reserved maximum (F11-1); a
+        # grant-mode call records nothing on failure.
+        _or_settle(reservation, None)
+        raise
+    actual = _usage_cost(_XAI_PRICES, _XAI_PRICE_DEFAULT,
+                         model, usage)
+    if XAI_FREE_CREDITS:
+        _xai_credit_note(actual if actual is not None
+                         else _max_cost_from(
+                             _XAI_PRICES, _XAI_PRICE_DEFAULT,
+                             model, system, user, max_tokens))
+    else:
+        _or_settle(reservation, actual)
+    return content
+
+
+def _groq_text(model, system, user, temperature=0, max_tokens=2048,
+               timeout=60):
+    """One Groq chat call on the free tier, under the daily
+    guard: past the soft cap the call never starts and the
+    caller falls over. The request is counted at attempt
+    time; a completed call's list-price value is recorded
+    for visibility (provider_tier=free) and never touches
+    the real-money ledger."""
+    if _groq_key() is None:
+        raise RuntimeError("groq API key not configured "
+                           "(groq_key.txt missing)")
+    if _groq_guard_tripped():
+        _note_groq_shed("transport")
+        raise RuntimeError(
+            "groq daily soft cap reached (guard shed)")
+    _groq_count_one()
+    usage = {}
+    content = _nim_text(
+        GROQ_BASE_URL, GROQ_KEY_ENV, GROQ_KEY_FILE, model,
+        system, user, temperature=temperature,
+        max_tokens=max_tokens, timeout=timeout,
+        provider="groq", usage_out=usage)
+    cost = _usage_cost(_GROQ_PRICES, _GROQ_PRICE_DEFAULT,
+                       model, usage)
+    if cost is None:
+        cost = _max_cost_from(_GROQ_PRICES, _GROQ_PRICE_DEFAULT,
+                              model, system, user, max_tokens)
+    _groq_note_cost(cost)
+    return content
+
+
 def _nim_text(base_url, key_env, key_file, model, system, user,
               temperature=0, max_tokens=2048, timeout=60,
-              provider="nim", extra=None, or_route=False):
+              provider="nim", extra=None, or_route=False,
+              usage_out=None):
     """One chat call to a hosted OpenAI-compatible provider (the
     NIM layer's seats), over the keep-alive pool (v15 S3).
     Returns the reply text; raises RuntimeError when the seat
@@ -4817,6 +5612,11 @@ def _nim_text(base_url, key_env, key_file, model, system, user,
                 _actual = None
             _or_settle(reservation, _actual)
             reservation = None
+        if usage_out is not None \
+                and isinstance(data.get("usage"), dict):
+            # v20: token-usage capture for the xAI/Groq cost
+            # accounting (their APIs report tokens, not USD).
+            usage_out.update(data["usage"])
         try:
             content = data["choices"][0]["message"]["content"].strip()
         except (KeyError, IndexError, TypeError, AttributeError,
@@ -4922,7 +5722,7 @@ def nim_ask(model, question, hits, instructions="", key_env=None,
     return content, sys_prompt + "\n\n" + user_msg
 
 
-def or_ask(model, question, hits, instructions=""):
+def or_ask(model, question, hits, instructions="", timeout=None):
     """One OpenRouter draft generation (v17): nim_ask's exact
     prompt shape and debris strip on the paid primary seat.
     Returns (answer, prompt). Raises when the seat cannot run;
@@ -4934,7 +5734,7 @@ def or_ask(model, question, hits, instructions=""):
                                   else "")
     content = _or_text(model, sys_prompt, user_msg,
                        temperature=0.3, max_tokens=2048,
-                       timeout=OPENROUTER_DRAFTER_TIMEOUT)
+                       timeout=timeout or OPENROUTER_DRAFTER_TIMEOUT)
     content = re.split(r"<\|[^>]{0,40}>", content)[0].strip()
     # v17.1: normalize the GPT-OSS citation dialect (the v17
     # pest-control failure) before the pipeline reads the draft.
@@ -4942,6 +5742,48 @@ def or_ask(model, question, hits, instructions=""):
     if not content:
         raise RuntimeError("openrouter drafter returned an "
                            "empty response")
+    return content, sys_prompt + "\n\n" + user_msg
+
+
+def xai_ask(model, question, hits, instructions="", timeout=None):
+    """One xAI draft generation (v20): or_ask's exact prompt
+    shape and post-processing on the prepaid xAI seat (the
+    hard chain's paid layer, behind Groq and the NIM bench).
+    Returns (answer, prompt). Raises when the seat cannot
+    run; _generate then fails over to the OpenRouter seat."""
+    context = _numbered_context(hits)
+    user_msg = f"Question: {question}\n\nDocument excerpts:\n{context}"
+    sys_prompt = _system_prompt_for(question) + (("\n\n" + instructions) if instructions
+                                  else "")
+    content = _xai_text(model, sys_prompt, user_msg,
+                        temperature=0.3, max_tokens=2048,
+                        timeout=timeout or XAI_DRAFTER_TIMEOUT)
+    content = re.split(r"<\|[^>]{0,40}>", content)[0].strip()
+    content = _normalize_citations(content)
+    if not content:
+        raise RuntimeError("xai drafter returned an empty response")
+    return content, sys_prompt + "\n\n" + user_msg
+
+
+def groq_ask(model, question, hits, instructions="", timeout=None):
+    """One Groq draft generation (v20): or_ask's exact prompt
+    shape and post-processing on the free-tier primary seat
+    (hard: GPT-OSS-120B; simple: GPT-OSS-20B). Returns
+    (answer, prompt). Raises when the seat cannot run (no
+    key, guard shed, provider failure); _generate then fails
+    over down the chain. GPT-OSS drafts get the same
+    citation-dialect normalization as the OpenRouter path."""
+    context = _numbered_context(hits)
+    user_msg = f"Question: {question}\n\nDocument excerpts:\n{context}"
+    sys_prompt = _system_prompt_for(question) + (("\n\n" + instructions) if instructions
+                                  else "")
+    content = _groq_text(model, sys_prompt, user_msg,
+                         temperature=0.3, max_tokens=2048,
+                         timeout=timeout or GROQ_DRAFTER_TIMEOUT)
+    content = re.split(r"<\|[^>]{0,40}>", content)[0].strip()
+    content = _normalize_citations(content)
+    if not content:
+        raise RuntimeError("groq drafter returned an empty response")
     return content, sys_prompt + "\n\n" + user_msg
 
 
@@ -4974,14 +5816,12 @@ def _panel_info(judges, ms, third_status, third_error=None,
             "second_ms": ms.get("second"),
             "third_ms": ms.get("third"),
             "nim2_ms": ms.get("nim2"),
-            "third": {"provider": ("openrouter" if _s1 == 0
-                                   else "nim"),
+            "third": {"provider": _slot_provider_name(_s1),
                       "model": nim1_model or THIRD_JUDGE_MODEL,
                       "key_slot": _s1,
                       "status": third_status,
                       "error": third_error},
-            "nim2": {"provider": ("openrouter" if _s2 == 0
-                                   else "nim"),
+            "nim2": {"provider": _slot_provider_name(_s2),
                      "model": nim2_model,
                      "key_slot": _s2,
                      "status": nim2_status,
@@ -5150,6 +5990,32 @@ def _primary_judgment(engine, question, hits, answer, mech_block):
     try:
         if engine == "lite":
             text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM, user)
+        elif engine == "flashmid":
+            # v20.1 (fix 2): seat A's rationed Gemini 3.8
+            # Flash mid-ladder rung (slot 6, Layer 1 rules),
+            # tried between the free Lite path and the paid
+            # Lite-via-OpenRouter attempt. Counted at attempt
+            # time against the shared mid-ladder ration,
+            # exactly as the judge seats' slot-6 dispatch
+            # counts it; the caller gates on
+            # _flash_mid_available(), and the rung refuses
+            # here too rather than overspend the ration.
+            # Served by _gemini_text like every Flash call;
+            # the caller records the serving model, so the
+            # rung never impersonates the Lite primary.
+            if not _flash_mid_available():
+                raise RuntimeError(
+                    "flash mid-ladder ration spent")
+            _flash_mid_note()
+            text = _gemini_text(FLASH_MODEL, _JUDGE_SYSTEM, user)
+        elif engine == "orlite":
+            # v20: seat A's paid fallover — the same Lite
+            # model via OpenRouter, tried ahead of the
+            # NIM-seat extractor so a Gemini outage degrades
+            # the transport before it changes the judge.
+            text = _or_text(OR_LITE_MODEL, _JUDGE_SYSTEM, user,
+                            temperature=0, max_tokens=4000,
+                            timeout=60)
         elif engine == "nim":
             # v15: the NIM seat extracts when Lite is down (the
             # local 14B is the extractor of last resort).
@@ -5876,14 +6742,21 @@ def _panel_state(judges, served):
     (verified_reduced / partial_reduced) where badges are
     assigned in _run_unit, so the degradation is visible in the
     badge itself and not only in the panel annotation. The
-    lite seat's primary is GEMINI_CHAIN[0] by construction:
-    judging always calls it directly and the chain never
-    advances inside a judging call."""
+    lite seat counts as primary-served only when
+    GEMINI_CHAIN[0] itself served: its same-model OpenRouter
+    transport (the "orlite" fallover) leaves no served record
+    and keeps the seat's primary standing, but when the
+    rationed Flash mid-ladder rung serves the extraction
+    (v20.1 fix 2) the serving model is recorded in
+    served["lite"], and the comparison below then degrades
+    the panel — the rung is a google voice, never a stand-in
+    for the Lite primary."""
     if "local" in (judges or ()):
         return "degraded"
     models = {}
     if "lite" in judges:
-        models["lite"] = GEMINI_CHAIN[0]
+        models["lite"] = (served or {}).get("lite") \
+            or GEMINI_CHAIN[0]
     if "nim" in judges:
         models["nim"] = (served or {}).get("judge_nim1")
     if "nim2" in judges:
@@ -5961,9 +6834,46 @@ def _judge_round(question, hits, answer, hard, mech_block="",
         primary_engine = "lite"
     if not primary["available"] and not local_only:
         errors.append("lite judge: " + str(primary["error"]))
-        primary = _primary_judgment("nim", question, hits, answer,
-                                    mech_block)
-        primary_engine = "nim"
+        # v20.1 (fix 2, James's approval 2026-10-14): seat A
+        # gains the rationed Gemini 3.8 Flash mid-ladder
+        # rung (slot 6, Layer 1 rules) between the free Lite
+        # path and the paid Lite-via-OpenRouter attempt —
+        # the same shared ration as seats B and C
+        # (flash_mid_usage.json, FLASH_MID_DAILY_CAP/day,
+        # counted at attempt time). A spent ration skips
+        # the rung silently, exactly as _slot_has_key(6)
+        # skips a rationed seat candidate. As-served: the
+        # extraction verdicts keep the round's "lite" voice
+        # slot, but the serving model is recorded in
+        # served_models["lite"], and _panel_state counts a
+        # Flash-served seat A as DEGRADED — the rung never
+        # impersonates the Lite primary for badges.
+        if _flash_mid_available():
+            _flash_primary = _primary_judgment(
+                "flashmid", question, hits, answer, mech_block)
+            if _flash_primary["available"]:
+                primary = _flash_primary
+                primary_engine = "lite"
+                _ask_ctx().served_models["lite"] = FLASH_MODEL
+            else:
+                errors.append("lite (flash rung) judge: "
+                              + str(_flash_primary["error"]))
+        if not primary["available"]:
+            # v20: seat A's paid fallover — Lite via
+            # OpenRouter (the same model, the same "lite"
+            # voice) is tried before the extractor changes
+            # family to the NIM seat.
+            _or_primary = _primary_judgment(
+                "orlite", question, hits, answer, mech_block)
+            if _or_primary["available"]:
+                primary = _or_primary
+                primary_engine = "lite"
+            else:
+                errors.append("lite (openrouter) judge: "
+                              + str(_or_primary["error"]))
+                primary = _primary_judgment(
+                    "nim", question, hits, answer, mech_block)
+                primary_engine = "nim"
         if not primary["available"]:
             errors.append("nim judge: " + str(primary["error"]))
             nim_status = "unavailable"
@@ -6367,7 +7277,12 @@ def _judge_round(question, hits, answer, hard, mech_block="",
     # §E persists both maps per claim. Cached claims carry the
     # coverage recorded when their verdict was stored.
     _served = dict(_ask_ctx().served_models)
-    _engine_model = {"lite": GEMINI_CHAIN[0],
+    # v20.1 (fix 2): seat A's model attribution is as-served
+    # too — FLASH_MODEL when the mid-ladder rung extracted,
+    # else the Lite primary (the rung is google-family either
+    # way, so coverage families are unchanged).
+    _engine_model = {"lite": _served.get("lite")
+                     or GEMINI_CHAIN[0],
                      "local": ROUTED_MODEL, "flash": FLASH_MODEL,
                      "nim": _served.get("judge_nim1"),
                      "nim2": _served.get("judge_nim2")}
@@ -6452,40 +7367,60 @@ def _generate(engine, model, question, hits, instructions):
         # (the caller then applies the genuine-unavailability
         # local fallback). Seat health records every call.
         job = "hard_draft" if engine == "nim" else "simple_draft"
-        # v17: the OpenRouter primary seat gets the first
-        # attempt (hard: GPT-OSS-120B; simple: GPT-OSS-20B).
-        # Any failure (provider error, timeout, spend-cap trip)
-        # falls through to the v16 NIM seat loop below,
-        # unchanged; a fully-down NIM seat still raises into the
-        # caller's genuine-unavailability local fallback.
-        if _or_available():
-            or_model = (OPENROUTER_HARD_MODEL if engine == "nim"
-                        else OPENROUTER_SIMPLE_MODEL)
+        # v20: the drafting chain in strict layer order
+        # (James's layer model, 2026-10-14): Layer 0 Groq's
+        # free tier (hard: GPT-OSS-120B; simple: GPT-OSS-20B);
+        # Layer 2 the v16 NIM bench loop (free, slow — the
+        # hard bench leads with Kimi K3 and GLM-5.3 per the
+        # chain spec); Layer 3 the paid seats (hard: Grok 4.7
+        # on xAI, then GPT-OSS on OpenRouter; simple:
+        # GPT-OSS-20B on OpenRouter). A fully-down chain
+        # raises into the caller's genuine-unavailability
+        # local fallback (Layer 4), unchanged from v16.
+        _gt = _leg_timeout(GROQ_DRAFTER_TIMEOUT)
+        if _groq_available() and _gt > 0:
             try:
-                answer, prompt = or_ask(
-                    or_model, question, hits,
-                    instructions=instructions)
-                _note_seat(job, or_model, False)
+                answer, prompt = groq_ask(
+                    GROQ_HARD_MODEL if engine == "nim"
+                    else GROQ_SIMPLE_MODEL,
+                    question, hits, instructions=instructions,
+                    timeout=_gt)
+                _note_seat(job, GROQ_HARD_MODEL
+                           if engine == "nim"
+                           else GROQ_SIMPLE_MODEL, False)
                 return (answer, prompt,
-                        or_model + " (OpenRouter API)", False, False)
+                        (GROQ_HARD_MODEL if engine == "nim"
+                         else GROQ_SIMPLE_MODEL) + " (Groq API)",
+                        False, False)
             except Exception as e:
-                print(f"[openrouter] {job} primary failed: "
-                      f"{str(e)[:150]}; the NIM seat takes over",
+                print(f"[groq] {job} primary failed: "
+                      f"{str(e)[:150]}; the chain falls over",
                       flush=True)
+        elif _groq_key() is not None and _groq_guard_tripped():
+            _note_groq_shed(job)
+        # Layer 2: the NIM bench. The loop walks the seat's
+        # candidates as in v16 (seat health records every
+        # call); exhausting the bench no longer raises — the
+        # paid layer below gets its turn first.
         tried, last_err = [], None
         while True:
+            # v20: a leg starts only while the unit's budget
+            # has room for it, and runs clamped to what is
+            # left (NIM legs are the slow ones: ~60s bound).
+            _lt = _leg_timeout(NIM_DRAFTER_TIMEOUT)
+            if _lt <= 0:
+                break
             smodel, slot, failover = _seat_pick(job, skip=tried)
             if smodel is None:
-                raise RuntimeError(
-                    f"{job} seat unavailable (tried {tried}): "
-                    f"{last_err}")
+                break
             key_env, key_file = SEAT_SLOTS[slot]
             t0 = time.monotonic()
             try:
                 answer, prompt = nim_ask(
                     smodel, question, hits,
                     instructions=instructions,
-                    key_env=key_env, key_file=key_file)
+                    key_env=key_env, key_file=key_file,
+                    timeout=_lt)
                 lat = time.monotonic() - t0
                 _seat_report(job, smodel, lat, True)
                 _note_seat(job, smodel, failover)
@@ -6496,13 +7431,49 @@ def _generate(engine, model, question, hits, instructions):
             except Exception as e:
                 lat = time.monotonic() - t0
                 _seat_report(job, smodel, lat, False,
-                             timed_out=lat >= DRAFTER_TIMEOUT * 0.9
+                             timed_out=lat >= NIM_DRAFTER_TIMEOUT * 0.9
                              or "timed out" in str(e)
                              or "timeout" in str(e).lower())
                 tried.append(smodel)
                 last_err = e
                 if len(tried) >= len(SEATS[job]["candidates"]):
-                    raise
+                    break
+        # Layer 3 (paid): xAI Grok 4.7 first on hard
+        # questions (reservation-gated like OpenRouter), then
+        # the v17 OpenRouter seat (hard: GPT-OSS-120B;
+        # simple: GPT-OSS-20B).
+        _xt = _leg_timeout(XAI_DRAFTER_TIMEOUT)
+        if engine == "nim" and _xai_available() and _xt > 0:
+            try:
+                answer, prompt = xai_ask(
+                    XAI_HARD_MODEL, question, hits,
+                    instructions=instructions, timeout=_xt)
+                _note_seat(job, XAI_HARD_MODEL, False)
+                return (answer, prompt,
+                        XAI_HARD_MODEL + " (xAI API)",
+                        False, False)
+            except Exception as e:
+                print(f"[xai] {job} seat failed: "
+                      f"{str(e)[:150]}; the chain falls over",
+                      flush=True)
+        _ot = _leg_timeout(OPENROUTER_DRAFTER_TIMEOUT)
+        if _or_available() and _ot > 0:
+            or_model = (OPENROUTER_HARD_MODEL if engine == "nim"
+                        else OPENROUTER_SIMPLE_MODEL)
+            try:
+                answer, prompt = or_ask(
+                    or_model, question, hits,
+                    instructions=instructions, timeout=_ot)
+                _note_seat(job, or_model, False)
+                return (answer, prompt,
+                        or_model + " (OpenRouter API)", False, False)
+            except Exception as e:
+                print(f"[openrouter] {job} seat failed: "
+                      f"{str(e)[:150]}; the chain falls over",
+                      flush=True)
+        raise RuntimeError(
+            f"{job}: every drafting layer down (tried NIM "
+            f"bench {tried}): {last_err}")
     if engine == "nimx":
         # v16: an explicit NIM model on the drafting key slot
         # (the divergence oracle's B draft). No seat machinery:
@@ -6510,7 +7481,8 @@ def _generate(engine, model, question, hits, instructions):
         key_env, key_file = SEAT_SLOTS[2]
         answer, prompt = nim_ask(model, question, hits,
                                  instructions=instructions,
-                                 key_env=key_env, key_file=key_file)
+                                 key_env=key_env, key_file=key_file,
+                                 timeout=NIM_DRAFTER_TIMEOUT)
         return answer, prompt, model + " (NIM API)", False, False
     try:
         answer, prompt = ollama_ask(model, question, hits,
@@ -6802,15 +7774,22 @@ def _run_unit(ctx):
     deadline = ctx.get("deadline")
     # v19 (§G4): a per-class judging budget inside the ask's
     # absolute cap. A simple unit gets 150s of ladder time and
-    # a hard unit 420s; the min() keeps the ask-level 600s cap
+    # a hard unit 420s (v20: 285s); the min() keeps the ask-level 600s cap
     # bounding the whole ask (bundled parts share it). At the
     # budget the ladder stops and the unit composes from the
     # verdicts in hand (the capped-partial path) instead of
     # starting another round.
+    # v20 (James's acceptance criterion, 2026-10-14): the hard
+    # budget drops to 285s — an ask unit must return in under
+    # 5 minutes and accurate; 285 leaves margin under the
+    # 300s wall, and the ask-level 600s cap stays as the
+    # outer safety net. The deadline is published on the ask
+    # context so chain legs clamp to it (_leg_timeout).
     budget_s = ASK_TIME_CAP_S
     if deadline is not None:
-        budget_s = 420 if hard else 150
+        budget_s = 285 if hard else 150
         deadline = min(deadline, time.monotonic() + budget_s)
+        _ask_ctx().unit_deadline = deadline
     # v18 (F13): judging (and its verdict-cache keys, the
     # arbitration, and the divergence check) sees the FULL
     # question for a bundled part, with the part scope stated;
@@ -7787,7 +8766,13 @@ class Handler(BaseHTTPRequestHandler):
                         # v17: the paid seats' guardrail state
                         # (today's spend vs the code-side cap,
                         # the key's own dashboard-side limit).
-                        "openrouter": _or_health_block()})
+                        "openrouter": _or_health_block(),
+                        # v20: the new providers' state — xAI's
+                        # accounting mode + credit-ledger
+                        # figure, and Groq's daily guard.
+                        "xai": _xai_health_block(),
+                        "groq": _groq_health_block(),
+                        "gemini_flash_mid": _flash_mid_health_block()})
         elif u.path == "/gaps":
             # v14: the gap log (IDKs, abstained parts, failed gates)
             # for the monthly rescrape watchlist and registry growth.
@@ -8626,11 +9611,11 @@ class Handler(BaseHTTPRequestHandler):
                                # v17.1: judge_nim1's primary
                                # rides OpenRouter; name the
                                # provider of its active candidate.
-                               "provider": ("openrouter"
-                                            if _seat_pick(
-                                                "judge_nim1")[1] == 0
-                                            else
-                                            THIRD_JUDGE_PROVIDER),
+                               # v20: the name comes off the
+                               # slot map (xAI/Groq slots label
+                               # themselves).
+                               "provider": _slot_provider_name(
+                                   _seat_pick("judge_nim1")[1]),
                                "model": _seat_pick("judge_nim1")[0]
                                or THIRD_JUDGE_MODEL,
                                "status": third_status},
@@ -8639,10 +9624,8 @@ class Handler(BaseHTTPRequestHandler):
                                # rides OpenRouter too; name
                                # the provider and key slot of
                                # its active candidate.
-                               "provider": ("openrouter"
-                                            if _seat_pick(
-                                                "judge_nim2")[1] == 0
-                                            else "nim"),
+                               "provider": _slot_provider_name(
+                                   _seat_pick("judge_nim2")[1]),
                                "model": _seat_pick("judge_nim2")[0],
                                "key_slot": _seat_pick(
                                    "judge_nim2")[1],
