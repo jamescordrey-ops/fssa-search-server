@@ -180,6 +180,39 @@ verdicts with the model that served each, the judged draft,
 job-layer timestamps) to ask_records.jsonl for post-mortems
 and the judge-only replay harness. §D corpus work is deferred
 to v19/v20 (James's direction, 2026-10-14).
+
+v19 (2026-10-14): the §D corpus incorporation build plus the
+registry corrections the chat battery and the 2027 COLA forced.
+Corpus: +10 Indiana docs (IHCP bulletins BT2026168-BT2026171;
+the IHCPPM body texts the battery found missing: 2615.75.15
+trusts, 3006.00.00 penalty divisor, 3010.20.10/3455.15.10.10
+spousal standards and shelter formula, 3005.10.05 home equity;
+the IHCP Vision and Dental provider modules) and +3 federal
+docs (SSA 2027 COLA release and fact sheet; the USDA FNS SNAP
+FY2027 COLA memo), minus the 676-char hospice epub stub.
+Registry: the ABLE annual contribution cap corrected to
+$20,000 for 2026 (the battery proved $19,000 was the 2025
+figure); the home-equity entry now states Indiana's own
+$752,000 limit (IHCPPM 3005.10.05, the federal floor); the
+MMMNA entry notes Indiana's manual prints the shelter
+standard as $812; the waiver-cap entry notes Indiana had not
+posted a 2027 cap; new ssa_2027_figures entry carries the
+2027 SSI/SGA/TWP amounts. §G speed build (James's direction,
+2026-10-14, after a simple SFC ask took 535s): (G1) a
+completeness repair re-asks a verdict seat ONLY for the
+claims its batched reply silently omitted, instead of
+leaving them single-family; (G2) panel planning leads each
+seat with its fastest measured candidate (rolling median
+latency) instead of fixed list order; (G3) the judge-seat
+timeout drops from 60s to 30s so a stalled provider fails
+over sooner; (G4) each unit judges against a per-class time
+budget (150s simple, 420s hard) inside the ask's 600s
+absolute cap, composing from verdicts in hand at the budget;
+(G5) simple questions take a fast lane (primary judge plus
+the second seat; the third seat sits out), while hard
+questions keep the full panel. The offline companion is
+v19/route_report.py, which reads ask_records.jsonl and
+reports per-route wall time, cost, and badges.
 """
 import calendar
 import contextvars
@@ -2390,7 +2423,8 @@ VERIFIED_FIGURES = [
             "effective January 1, 2026). The older 'before 26' "
             "figure in older Indiana manual material is stale and "
             "must not be presented as current. The 2026 annual "
-            "contribution cap is $19,000; the first $100,000 in an "
+            "contribution cap is $20,000 (the $19,000 figure was "
+            "the 2025 limit); the first $100,000 in an "
             "ABLE account is disregarded for SSI; transportation is "
             "a qualified disability expense; Indiana's INvestABLE "
             "plan is exempt for Indiana Medicaid (DFR Policy Manual "
@@ -2398,7 +2432,7 @@ VERIFIED_FIGURES = [
             "tax credit up to $500."),
         "source": ("IRS ABLE guidance (age 46, 2026) and DFR Policy "
                    "Manual section 2615.10.35 (INvestABLE)"),
-        "figures": (19000.0, 100000.0, 500.0),
+        "figures": (20000.0, 100000.0, 500.0),
         # v18 (F16): the discrete stale-value watch list for
         # the generalized conflict scan below.
         "conflict_numbers": (
@@ -2465,10 +2499,12 @@ VERIFIED_FIGURES = [
             "where the amount lands in that range depends on the "
             "couple's housing costs. Indiana's ILTCP page prints the "
             "maximum rounded as $4,067; the CMS figure is $4,066.50. "
-            "The housing (shelter) allowance component is $811.50."),
+            "The housing (shelter) allowance component is $811.50 "
+            "(Indiana's own policy manual, IHCPPM 3010.20.10, "
+            "prints the shelter standard as $812)."),
         "source": ("CMS 2026 spousal impoverishment standards; "
                    "Indiana ILTCP (prints the max as $4,067)"),
-        "figures": (2705.0, 4066.50, 4067.0, 811.50),
+        "figures": (2705.0, 4066.50, 4067.0, 811.50, 812.0),
         # v15 (item 6): the seeded conflict slot. The registry
         # carries BOTH published maxima, so the near-miss scan
         # arms whenever a corpus excerpt states either one in
@@ -2483,13 +2519,17 @@ VERIFIED_FIGURES = [
             {"tokens": set(), "phrases": ("home equity",)},
         ],
         "statement": (
-            "For 2026 the Medicaid home equity limit falls between "
-            "$752,000 and $1,130,000 depending on the state's "
-            "election; home equity above the applicable limit makes "
-            "the home a countable resource unless an exception (a "
-            "spouse, minor or disabled child, or a sibling with an "
-            "equity interest lawfully living in the home) applies."),
-        "source": "CMS 2026 home equity limits",
+            "Indiana's Medicaid home equity limit is $752,000 "
+            "(effective January 1, 2026): an applicant whose equity "
+            "interest in the home exceeds $752,000 is ineligible "
+            "for long-term care services. Indiana sits at the "
+            "federal floor of the range states may elect within "
+            "($752,000 to $1,130,000); it has not chosen a higher "
+            "figure. Exceptions apply (a spouse, minor or disabled "
+            "child, or a sibling with an equity interest lawfully "
+            "living in the home)."),
+        "source": ("IHCPPM 3005.10.05 (Indiana's $752,000 limit, "
+                   "eff. 1/1/2026); CMS 2026 home equity range"),
         "figures": (752000.0, 1130000.0),
     },
     {
@@ -2522,9 +2562,40 @@ VERIFIED_FIGURES = [
             "(2026: 300% of the SSI federal benefit rate). Only the "
             "applicant's own income counts toward it; a spouse's "
             "income, including a spouse's caregiver pay, is not the "
-            "applicant's income."),
+            "applicant's income. Indiana had not posted a 2027 cap "
+            "as of October 2026, so do not present the 2026 figure "
+            "as the 2027 cap."),
         "source": "Indiana HCBS waiver standards (2026)",
         "figures": (2982.0,),
+    },
+    {
+        "id": "ssa_2027_figures",
+        "title": "SSA 2027 amounts (COLA 3.6%)",
+        "groups": [
+            {"tokens": {"ssi", "sga", "ssdi", "twp"},
+             "phrases": ("social security", "cola",
+                         "cost-of-living", "cost of living",
+                         "substantial gainful activity",
+                         "trial work")},
+            {"tokens": set(),
+             "phrases": ("2027", "next year", "january")},
+        ],
+        "statement": (
+            "For 2027, Social Security benefits rise 3.6% under "
+            "the cost-of-living adjustment (effective with the "
+            "December 2026 benefits paid in January 2027). The "
+            "2027 SSI federal benefit rate is $1,029 per month "
+            "for an individual and $1,544 for a couple. The 2027 "
+            "substantial gainful activity (SGA) limit is $1,770 "
+            "per month for non-blind individuals and $2,950 for "
+            "blind individuals. The 2027 trial work period "
+            "threshold is $1,270 per month. SSI resource limits "
+            "are unchanged at $2,000 for an individual and "
+            "$3,000 for a couple."),
+        "source": ("SSA press release and 2027 COLA fact sheet "
+                   "(October 14, 2026)"),
+        "figures": (1029.0, 1544.0, 1770.0, 2950.0, 1270.0,
+                    2000.0, 3000.0),
     },
     {
         "id": "difficulty_of_care",
@@ -3358,7 +3429,8 @@ THIRD_JUDGE_BASE_URL = _THIRD_CFG["base_url"]
 THIRD_JUDGE_MODEL = _THIRD_CFG["model"]
 THIRD_JUDGE_KEY_FILE = _THIRD_CFG["key_file"]
 THIRD_JUDGE_KEY_ENV = _THIRD_CFG["key_env"]
-THIRD_JUDGE_TIMEOUT = 60
+THIRD_JUDGE_TIMEOUT = 30  # v19 (§G3): was 60; a stalled judge
+# provider now costs at most ~30s before the seat fails over.
 _THIRD_STATE = {"date": "", "count": 0}
 _THIRD_LOCK = threading.Lock()
 
@@ -3673,6 +3745,17 @@ def _seat_exclusions(job):
     return out
 
 
+def _seat_median(job, model):
+    """v19 (§G2): the rolling median latency (seconds) of a
+    seat candidate from its recent calls, or None when the
+    candidate has never served on this server run."""
+    with _SEAT_LOCK:
+        lat = list(_seat_state(job, model)["lat"])
+    if not lat:
+        return None
+    return sorted(lat)[len(lat) // 2]
+
+
 def _plan_panel():
     """§C (pass 1 D4 + pass 2 item B5): plan the round's two
     stage-2 verdict seats ATOMICALLY on the ask context, before
@@ -3683,7 +3766,14 @@ def _plan_panel():
     seat as empty and land on the same family. A seat that
     cannot be filled with a distinct family stays unfilled:
     the badge degrades via per-claim coverage instead of a
-    same-family substitute voting twice."""
+    same-family substitute voting twice.
+    v19 (§G2): among the eligible candidates the seat leads
+    with the FASTEST MEASURED one (rolling median latency);
+    an unmeasured candidate is scored at 75% of the seat's
+    median budget, so it gets tried without leading blind.
+    Ties keep the configured candidate order. Failover inside
+    a call still walks the configured order (§C's rule that a
+    planned seat is not replaced mid-round is unchanged)."""
     ctx = _ask_ctx()
     taken = set()
     if ctx.draft_family:
@@ -3694,7 +3784,8 @@ def _plan_panel():
         if job in ctx.panel_plan:
             taken.add(_model_family(ctx.panel_plan[job][0]))
             continue
-        for model, slot in SEATS[job]["candidates"]:
+        best = None
+        for order, (model, slot) in enumerate(SEATS[job]["candidates"]):
             fam = _model_family(model)
             if fam in taken or not _slot_has_key(slot):
                 continue
@@ -3702,9 +3793,16 @@ def _plan_panel():
                 if _seat_state(job, model)["benched_until"] \
                         > time.monotonic():
                     continue
+            med = _seat_median(job, model)
+            score = med if med is not None \
+                else SEATS[job]["budget_median"] * 0.75
+            key = (score, order)
+            if best is None or key < best[0]:
+                best = (key, model, slot, fam)
+        if best is not None:
+            _key, model, slot, fam = best
             ctx.panel_plan[job] = (model, slot)
             taken.add(fam)
-            break
 
 
 def _seat_report(job, model, latency_s, ok, timed_out=False):
@@ -5830,7 +5928,8 @@ def _judge_round(question, hits, answer, hard, mech_block="",
     errors = []
     panel_ms = {"primary": None, "second": None, "third": None,
                 "nim2": None,
-                "cached_claims": 0, "refuted_claims": 0}
+                "cached_claims": 0, "refuted_claims": 0,
+                "repaired_claims": 0}
     nim_status = "ok" if _third_judge_key() else "no-key"
     nim_error = None
     # v17.2: judge_nim2's primary rides the OpenRouter
@@ -5973,7 +6072,12 @@ def _judge_round(question, hits, answer, hard, mech_block="",
     # v16: the judge_nim2 seat verdicts alongside the second
     # seat whenever the primary is remote. A local-primary round
     # (both remotes down) stays local-only, as in v15.
-    run_nim2 = primary_engine != "local"
+    # v19 (§G5): the fast lane. A SIMPLE question's round runs
+    # the primary plus the second seat only; the third seat
+    # sits out (two distinct families can still earn a full
+    # verified badge under §C coverage). Hard questions keep
+    # the full three-seat panel, unchanged.
+    run_nim2 = primary_engine != "local" and hard
     # v18 (§C): plan the two stage-2 verdict seats ATOMICALLY
     # before dispatch (distinct families; the drafting family
     # excluded). A local-only round plans nothing: no remote
@@ -6046,6 +6150,39 @@ def _judge_round(question, hits, answer, hard, mech_block="",
         panel_ms["third"] = panel_ms["primary"]
     elif second_engine == "nim" and second["available"]:
         panel_ms["third"] = panel_ms["second"]
+    # --- v19 (§G1): completeness repair. A verdict seat's
+    # batched reply can parse cleanly yet silently OMIT claims
+    # (the seat counts as available; the omitted claims end up
+    # covered by one family only). On the 2026-10-14 SFC ask
+    # both stage-2 seats omitted the same 3 load-bearing
+    # claims, and no path ever re-asked them. Each seat that
+    # ran now gets ONE follow-up call naming only the claims
+    # it skipped; a claim the seat already verdicted is never
+    # re-asked, and the repair is skipped when the round's
+    # deadline is nearly spent.
+    if not local_only:
+        for _eng in dict.fromkeys(
+                ([second_engine] if second["available"] else [])
+                + (["nim2"] if nim2["available"] else [])):
+            _missing = [i for i in live_idx
+                        if claims[i].get(_eng) is None
+                        and not claims[i].get("meta")]
+            if not _missing:
+                continue
+            if deadline is not None \
+                    and deadline - time.monotonic() < 45:
+                break
+            _rv = _second_verdicts(
+                _eng, question, hits,
+                [claims[i] for i in _missing], mech_block)
+            if _rv["available"]:
+                for _sub, _v in _rv["verdicts"].items():
+                    _ci = _missing[_sub]
+                    claims[_ci][_eng] = _v["verdict"]
+                    if _v["note"]:
+                        claims[_ci]["notes"].append(
+                            "completeness repair: " + _v["note"])
+                panel_ms["repaired_claims"] += len(_rv["verdicts"])
     # --- v15.1 (James's ruling, 2026-10-13): NO local second
     # seat. Through v15.0 a failed remote second seat was filled
     # by the local 14B, which put the 14B on the panel of
@@ -6663,6 +6800,17 @@ def _run_unit(ctx):
                                   if x)
     hard = bool(ctx.get("hard"))
     deadline = ctx.get("deadline")
+    # v19 (§G4): a per-class judging budget inside the ask's
+    # absolute cap. A simple unit gets 150s of ladder time and
+    # a hard unit 420s; the min() keeps the ask-level 600s cap
+    # bounding the whole ask (bundled parts share it). At the
+    # budget the ladder stops and the unit composes from the
+    # verdicts in hand (the capped-partial path) instead of
+    # starting another round.
+    budget_s = ASK_TIME_CAP_S
+    if deadline is not None:
+        budget_s = 420 if hard else 150
+        deadline = min(deadline, time.monotonic() + budget_s)
     # v18 (F13): judging (and its verdict-cache keys, the
     # arbitration, and the divergence check) sees the FULL
     # question for a bundled part, with the part scope stated;
@@ -7150,7 +7298,7 @@ def _run_unit(ctx):
                     "panel-verified claims are shown") \
                 if cost_capped and not cap_hit else \
                 ("the ask reached its time budget "
-                 f"({ASK_TIME_CAP_S} seconds); only "
+                 f"({budget_s} seconds); only "
                  "panel-verified claims are shown")
             cut = [c["text"] for c in jr["claims"]
                    if c["final"] != "supported" and not c.get("meta")]
@@ -7171,7 +7319,7 @@ def _run_unit(ctx):
     if cap_hit:
         gate = "time"
         missing.append("the ask reached its time budget "
-                       f"({ASK_TIME_CAP_S} seconds) before a "
+                       f"({budget_s} seconds) before a "
                        "verified answer could be assembled")
     if gen_error:
         missing.append("the answering model could not run "
