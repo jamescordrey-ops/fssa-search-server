@@ -3179,7 +3179,8 @@ SEATS = {
         # lead this seat — OpenRouter DeepSeek V3.1, then
         # OpenRouter Qwen3-32B, with NIM Nemotron Super kept
         # as the free failover (the seat's old runner-ups
-        # still serve in judge_nim2's chain). Evidence is the
+        # served in judge_nim2's chain until v17.2 moved
+        # that seat to OpenRouter too). Evidence is the
         # coordinator's 10-claim Miller-packet probe, accepted
         # by James in place of a battery run: DeepSeek 10/10
         # verdicts at $0.000573/call (31s), Qwen 10/10 at
@@ -3194,10 +3195,32 @@ SEATS = {
                        ("nvidia/nemotron-3-super-120b-a12b", 1)],
         "budget_median": 45.0, "budget_p95": None},
     "judge_nim2": {
-        "candidates": [("nvidia/nemotron-3-ultra-550b-a55b", 3),
-                       ("deepseek-ai/deepseek-v4.1-flash", 3),
-                       ("z-ai/glm-5.3", 3)],
-        "budget_median": 20.0, "budget_p95": None},
+        # v17.2 (James's ruling, 2026-10-14): this seat goes
+        # paid too, mirroring v17.1's judge_nim1 swap. The
+        # v17.1 single test isolated this seat as the
+        # remaining drag: Ultra benched on timeouts, its
+        # DeepSeek-flash call ~90s and GLM calls ~120s on the
+        # free tier (judge_ms 363s of that ask's total), while
+        # the new OpenRouter seat ran a 12.4s median.
+        # OpenRouter Qwen3-32B leads: judge_nim1's primary is
+        # DeepSeek, so the two paid seats lead on different
+        # model families and the standing panel is Gemini
+        # Lite + DeepSeek + Qwen when all primaries serve.
+        # OpenRouter DeepSeek V3.1 is second; NIM Nemotron
+        # Ultra stays as free failover depth on slot 3. The
+        # slot-0 candidates ride the same OpenRouter
+        # pseudo-slot as judge_nim1's: a daily-cap trip
+        # benches both at once and the seat falls to Ultra.
+        # The median budget rises from 20s to 45s, mirroring
+        # judge_nim1's v17.1 adjustment: the accepted probe
+        # measured 23s (Qwen) and 31s (DeepSeek) per verdict
+        # call, so at 20s the bench rule would bench the new
+        # primaries on their own measured latency and
+        # silently hand the seat back to the failover.
+        "candidates": [("qwen/qwen3-32b", 0),
+                       ("deepseek/deepseek-chat-v3.1", 0),
+                       ("nvidia/nemotron-3-ultra-550b-a55b", 3)],
+        "budget_median": 45.0, "budget_p95": None},
 }
 SEAT_BENCH_COOLDOWN_S = 600
 _SEAT_STATE = {}
@@ -3618,7 +3641,9 @@ _OR_ROUTES = {
     OPENROUTER_SIMPLE_MODEL: {
         "order": ["Groq"], "allow_fallbacks": True,
         "data_collection": "deny"},
-    # v17.1: the judge_nim1 seat's OpenRouter candidates. No
+    # v17.1: the judge seats' OpenRouter candidates (judge_nim1
+    # in v17.1; judge_nim2 joined in v17.2 with the same two
+    # models in the opposite order). No
     # backend order is pinned (no per-backend latency
     # measurement exists for judging; the probe ran unpinned),
     # but the deny restriction matches the drafting seats, so
@@ -3882,8 +3907,10 @@ def _third_judge_text(system, user):
 
 def _nim2_judge_text(system, user):
     """One verdict call to the judge_nim2 seat (v16 item 3: the
-    second standing NIM judge, on key slot 3, a different model
-    family from seat 1 where the bake-off allowed)."""
+    second standing judge seat, a different model family from
+    seat 1 where the bake-off allowed; v17.2: the seat's lead
+    candidates ride OpenRouter, NIM Nemotron Ultra is its free
+    failover on key slot 3)."""
     return _judge_seat_text("judge_nim2", system, user)
 
 
@@ -3989,12 +4016,15 @@ def _panel_info(judges, ms, third_status, third_error=None,
     verdicts, per-seat wall-clock ms, and the NIM seats' status
     ('ok', 'no-key', 'unavailable', or 'not-run'). v16: the
     "third" record describes the judge_nim1 seat and a "nim2"
-    record the judge_nim2 seat (key slot 3); the model named
+    record the judge_nim2 seat; the model named
     is the seat's assigned candidate — the ask's seat events
     record the model that actually served. v17.1: judge_nim1's
     primary candidate rides the OpenRouter pseudo-slot, so
     the third record's provider and key_slot are read off the
-    seat's active candidate instead of hardcoded to NIM."""
+    seat's active candidate instead of hardcoded to NIM.
+    v17.2: judge_nim2's primary rides the pseudo-slot too, so
+    the nim2 record is read off its seat's active candidate
+    the same way."""
     nim1_model, _s1, _f1 = _seat_pick("judge_nim1")
     nim2_model, _s2, _f2 = _seat_pick("judge_nim2")
     return {"judges": list(judges),
@@ -4008,9 +4038,10 @@ def _panel_info(judges, ms, third_status, third_error=None,
                       "key_slot": _s1,
                       "status": third_status,
                       "error": third_error},
-            "nim2": {"provider": "nim",
+            "nim2": {"provider": ("openrouter" if _s2 == 0
+                                   else "nim"),
                      "model": nim2_model,
-                     "key_slot": 3,
+                     "key_slot": _s2,
                      "status": nim2_status,
                      "error": nim2_error},
             "third_calls_today": _third_calls_today(),
@@ -4725,7 +4756,11 @@ def _judge_round(question, hits, answer, hard, mech_block="",
                 "cached_claims": 0, "refuted_claims": 0}
     nim_status = "ok" if _third_judge_key() else "no-key"
     nim_error = None
-    nim2_status = "ok" if _nim_key_for(*SEAT_SLOTS[3]) else "no-key"
+    # v17.2: judge_nim2's primary rides the OpenRouter
+    # pseudo-slot; the seat counts as keyed while any of its
+    # candidates is pickable, not only while slot 3 has a key.
+    nim2_status = "ok" if _seat_pick("judge_nim2")[0] \
+        is not None else "no-key"
     nim2_error = None
 
     # --- Stage 1: primary extraction + verdicts. Lite first,
@@ -6711,9 +6746,17 @@ class Handler(BaseHTTPRequestHandler):
                                or THIRD_JUDGE_MODEL,
                                "status": third_status},
                            "nim2": {
-                               "provider": "nim",
+                               # v17.2: judge_nim2's primary
+                               # rides OpenRouter too; name
+                               # the provider and key slot of
+                               # its active candidate.
+                               "provider": ("openrouter"
+                                            if _seat_pick(
+                                                "judge_nim2")[1] == 0
+                                            else "nim"),
                                "model": _seat_pick("judge_nim2")[0],
-                               "key_slot": 3,
+                               "key_slot": _seat_pick(
+                                   "judge_nim2")[1],
                                "status": "ok" if "nim2"
                                in panel_judges else "not-run"},
                            "third_calls_today": _third_calls_today(),
