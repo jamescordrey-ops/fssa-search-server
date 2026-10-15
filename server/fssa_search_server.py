@@ -378,6 +378,27 @@ before the phase opens), BUG-5(a) (the checks-stack stub
 replay replaced the refutation replay), BUG-6 (stale
 comments scrubbed), BUG-7 (phase_ms values are SECONDS;
 comments now say so). BUG-2/3/4/9 died with the panel.
+
+v25 (2026-10-15): Quick / Deep modes (see v25/PLAN.md).
+Every ask carries a mode: "quick" (the DEFAULT — an absent
+mode is a Quick ask) or "deep" (the v24 judged pipeline,
+unchanged); anything else is a 400. Quick is a different
+mechanism, not a weakened Deep: shared retrieval, ONE draft
+call through the Drafting seat (_run_unit_quick), then the
+deterministic final checks only — figures, quantities,
+arithmetic, mechanism coverage, conflicts, and the citation
+parse, with the v17.3 strip applied in code form
+(_quick_strip_asides) and every other uncited factual
+sentence failing closed. No extraction, no judge, no
+redrafts, no rescue, no web branch (the branch-out helper
+refuses Quick asks, including the zero-hit and sufficiency
+IDK paths). A checked Quick answer ships under the new
+badge "quick" ("Quick answer" on the page — never a
+Checked-family string); a material check failure ships
+the IDK result instead. Quick answers do not enter the
+replay cache (the v23.1 checked_det precedent), and the
+mode rides the answer-cache key so the lanes never replay
+or dedupe into each other. Ask records carry the mode.
 """
 
 import datetime
@@ -5461,6 +5482,12 @@ def _trk_phase(name, rnd):
     unit = _TRK_VAR.get()
     if unit is None:
         return
+    if unit.get("quick"):
+        # v25: a Quick unit stamps its own sections (its
+        # Deep-only rows flip to not-needed at unit start in
+        # _run_unit_quick). The phase hook must not stamp
+        # sections as if the judged pipeline ran.
+        return
     if name == "drafting":
         if rnd and rnd >= 3:
             _trk_set(unit, "redraft2", "done")
@@ -9506,6 +9533,299 @@ def _run_unit(ctx):
                          "checks": (jr or {}).get("checks")},
                 claims=(jr or {}).get("claims", []),
                 missing=missing[:8], gate=gate)
+
+
+def _quick_strip_asides(draft, parsed, lead_sentence=None):
+    """v25: the v17.3 strip in code-only form, for the Quick
+    lane. Quick runs no claim extraction, so there are no
+    extracted claims to map sentences against; eligibility
+    rests on the strip's own code guards alone. A candidate
+    (an uncited factual sentence) is strippable only when it
+    is not the mechanism lead sentence and carries no
+    limiting language, no figure, and no duration — the same
+    guards _strip_uncited_asides applies before its claim
+    test. Anything else uncited is claim-bearing in code
+    terms and stays in the text, where the caller fails
+    closed on it. The removal verifies exactly as the v17.3
+    strip does (the result's sentence list is the original
+    minus the removed, byte-identical and in order), and the
+    strip never fires when no cited factual content exists to
+    leave behind. Returns (new_draft, [removed]) or
+    (None, [])."""
+    uncited = list(parsed.get("uncited_lb") or ())
+    if not uncited or not parsed.get("cited_claims"):
+        return None, []
+    eligible, seen = [], set()
+    for s in uncited:
+        if s in seen:
+            continue
+        seen.add(s)
+        if lead_sentence is not None and s == lead_sentence:
+            continue
+        if _LIMITING_RX.search(s) or _has_figure(s) \
+                or _has_duration(s):
+            continue
+        eligible.append(s)
+    if not eligible:
+        return None, []
+    new_draft = draft
+    for s in eligible:
+        new_draft = _remove_sentence(new_draft, s)
+        if new_draft is None:
+            return None, []
+    expect = _split_sentences(draft)
+    for s in eligible:
+        if s not in expect:
+            return None, []
+        expect.remove(s)
+    if _split_sentences(new_draft) != expect:
+        return None, []
+    return new_draft, eligible
+
+
+def _run_unit_quick(ctx):
+    """v25 (Quick lane): ONE draft call through the Drafting
+    seat, then the deterministic final checks ONLY — no claim
+    extraction, no judge pass, no redrafts, no lead repair,
+    no rescue, no web branch. The ship test is _run_unit's
+    own deterministic test with the judge term removed: no
+    ungrounded figures, no mechanism failures, no quantity
+    failures, no uncited factual sentences, no conflict
+    failure. The draft call is _generate itself (the seat's
+    own chain, counted once against the ask's shared
+    draft-call cap exactly as a Deep rung is); there is no
+    _try_generate local rescue — if the seat raises, the
+    unit IDKs. Any material failure IDKs the unit, so a
+    Quick answer the code checks cannot clear is never
+    shipped unchecked. Same clock discipline as _run_unit:
+    the ask's ONE anchored deadline governs.
+    Returns the same unit-record shape as _run_unit."""
+    reg_block = _registry_block(ctx.get("registry_entries") or ())
+    mech_only = _mechanism_block(ctx["mechanisms"])
+    draft_extra = mech_only
+    if not ctx.get("reg_in_instructions") and reg_block:
+        draft_extra = "\n\n".join(x for x in (reg_block, mech_only)
+                                  if x)
+    hard = bool(ctx.get("hard"))
+    deadline = ctx.get("deadline")
+    budget_s = ASK_BUDGET_HARD_S if hard else ASK_BUDGET_SIMPLE_S
+    _actx0 = _ask_ctx()
+    if _actx0.ask_t0 is not None:
+        _ask_clock_class(hard)
+        _cands = [d for d in (_actx0.class_deadline,
+                              _actx0.ask_deadline, deadline,
+                              ctx.get("class_deadline"))
+                  if d is not None]
+        deadline = min(_cands) if _cands else None
+    elif deadline is not None:
+        deadline = min(deadline, time.monotonic() + budget_s)
+    if deadline is not None:
+        _actx0.unit_deadline = deadline
+    ev0 = len(_events())
+    rp0 = len(_ask_ctx().retr_pools)
+    _trk = ctx.get("trk")
+    _TRK_VAR.set(_trk)
+    if _trk is not None:
+        _trk["status"] = "active"
+        if _trk["t0"] is None:
+            _trk["t0"] = time.monotonic()
+        _trk_set(_trk, "retrieving", "done")
+        # v25: the Deep-only sections flip to not-needed at
+        # unit start — they never run in this lane, and the
+        # guarded phase hook (_trk_phase) never stamps them.
+        for _sec in ("extracting", "checking", "redraft2",
+                     "redraft3", "lead_repair", "rescue",
+                     "web_branch"):
+            _trk_set(_trk, _sec, "not-needed")
+    conflicts = _conflict_scan(ctx["hits"])
+    cap_hit = False
+    cut_phase = None
+    draft_capped = False
+    gen_error = None
+    draft = None
+    served = None
+    prompt = ""
+    attempted = False
+
+    def _mark_cap():
+        nonlocal cap_hit, cut_phase
+        cap_hit = True
+        _open = _ask_ctx().phase_open
+        cut_phase = _open[0] if _open else None
+        _note_budget_cut(cut_phase)
+
+    _check_cancel()  # v24 (§5.2): the Stop seam
+    if deadline and time.monotonic() > deadline:
+        _mark_cap()
+    elif deadline and not _call_may_start(deadline):
+        _mark_cap()
+    elif not _claim_draft_call():
+        draft_capped = True
+    if draft is None and not (cap_hit or draft_capped):
+        instr = ctx["instructions"]
+        if draft_extra:
+            instr = (instr + "\n\n" + draft_extra).strip()
+        instr = (instr + "\n\n" + CITATION_CONTRACT).strip()
+        _set_stage("drafting")
+        _set_phase("drafting", round=1)
+        if _trk is not None:
+            _trk_set(_trk, "drafting", "active")
+        # The Drafting seat for the one call — _run_unit's
+        # rung-0 choice, seat pick first.
+        if ctx.get("draft_seat_model"):
+            _eng, _mdl = "local", ctx["draft_seat_model"]
+        elif ctx["engine"] == "gemini" \
+                or ctx.get("explicit_model"):
+            _eng, _mdl = ctx["engine"], ctx["draft_model"]
+        elif not hard:
+            _eng, _mdl = "nimfast", XAI_HARD_MODEL
+        else:
+            _eng, _mdl = "nim", XAI_HARD_MODEL
+        attempted = True
+        try:
+            draft, prompt, served, _dg, _fb = _generate(
+                _eng, _mdl, ctx["unit_q"], ctx["hits"], instr)
+            ctx["_dg"], ctx["_fb"] = _dg, _fb
+        except Exception as e:
+            gen_error = str(e)[:200]
+            draft = None
+        if draft is not None and _is_memo_shaped_draft(draft):
+            gen_error = ("drafter returned a memo-shaped "
+                         "non-answer (meta text about corrections "
+                         "and citations); rejected by the draft "
+                         "shape guard")
+            draft = None
+        if served:
+            _srv = served.split(" (")[0].strip()
+            _actx0.draft_family = _model_family(_srv)
+            _actx0.served_models["draft"] = _srv
+        if _trk is not None:
+            _trk_set(_trk, "drafting", "done")
+    # --- deterministic final checks (the Quick ship test) ---
+    _set_phase("final checks")
+    if _trk is not None:
+        _trk_set(_trk, "final_checks", "active")
+    ungrounded, mech_failures, quantities = [], [], []
+    uncited_lb, stripped = [], []
+    conflict_fail = False
+
+    def _det_gates(text):
+        _p = _parse_citations(text, ctx["hits"])
+        _a, _ung = _check_figures(
+            text, ctx["question"], ctx["hits"],
+            extra_allowed=ctx["allowed_extra"])
+        _mf = _mech_required_failures(
+            text, ctx["mechanisms"], ctx.get("csra_comp"))
+        _qs = _check_quantities(
+            text, ctx["question"], mechanisms=ctx["mechanisms"])
+        for _note in _arithmetic_errors(text):
+            _qs.append({"mechanism": "arithmetic",
+                        "label": _note.lstrip("- ")})
+        _cc, _cf = _conflict_claims(conflicts, text)
+        return _p, _ung, _mf, _qs, bool(_cf)
+
+    if draft is not None:
+        parsed, ungrounded, mech_failures, quantities, \
+            conflict_fail = _det_gates(draft)
+        uncited_lb = parsed["uncited_lb"]
+        if uncited_lb:
+            lead_sentence = None
+            if ctx["mechanisms"]:
+                for s in parsed["sentences"]:
+                    if s["factual"]:
+                        lead_sentence = s["text"]
+                        break
+            stripped_draft, stripped = _quick_strip_asides(
+                draft, parsed, lead_sentence)
+            if stripped_draft is not None:
+                draft = stripped_draft
+                parsed, ungrounded, mech_failures, quantities, \
+                    conflict_fail = _det_gates(draft)
+                uncited_lb = parsed["uncited_lb"]
+    if _trk is not None:
+        _trk_set(_trk, "final_checks", "done")
+    _fig_checked = 0
+    if draft is not None:
+        try:
+            _fig_checked = len(_claim_money(draft))
+        except Exception:
+            _fig_checked = 0
+    checks = _empty_checks_block()
+    checks["figures"]["checked"] = _fig_checked
+    checks["figures"]["failed"] = [_fmt_money(v)
+                                   for v in ungrounded]
+    checks["citations"]["failed"] = list(uncited_lb)
+    checks["registry"] = [e["id"] for e in
+                          (ctx.get("registry_entries") or ())]
+    judging = {"mode": "quick", "errors": [],
+               "annotation": "Quick mode: deterministic checks "
+                             "only (figures, citations, "
+                             "quantities, arithmetic, mechanism "
+                             "coverage, conflicts). No judge "
+                             "pass ran.",
+               "checks": checks}
+    base = {"served": served, "fallback": ctx.get("_fb", False),
+            "downgraded": ctx.get("_dg", False),
+            "prompt": prompt, "rungs": 1 if attempted else 0,
+            "judge_ms": 0, "refute_ms": 0,
+            "cap_hit": cap_hit, "budget_cut": cap_hit,
+            "cut_phase": cut_phase, "cost_capped": False,
+            "draft_calls": _ask_ctx().draft_calls,
+            "draft_capped": draft_capped,
+            "assembly_guard": None,
+            "draft_text": draft,
+            "figure_check": {"ungrounded": list(ungrounded),
+                             "regenerated": False},
+            "divergence": None,
+            "events": _events_since(ev0),
+            "retr_pools": _retr_pools_since(rp0),
+            "lead_repairs": 0,
+            "stripped_sentences": stripped}
+    _check_cancel()  # the Stop seam, again before shipping
+    if draft is not None and not ungrounded \
+            and not mech_failures and not quantities \
+            and not uncited_lb and not conflict_fail:
+        answer, _fixes = _check_arithmetic(draft)
+        return dict(base, answer=answer, badge="quick",
+                    judging=judging, claims=[], missing=[],
+                    gate=None)
+    # IDK: assemble what is missing from the failed gates,
+    # in _run_unit's own phrasing.
+    missing, gate = [], "checking"
+    if cap_hit:
+        gate = "time"
+        missing.append("the ask reached its time budget "
+                       f"({budget_s} seconds) before a "
+                       "checked answer could be assembled")
+    if gen_error:
+        missing.append("the answering model could not run "
+                       f"({gen_error})")
+    if draft_capped:
+        missing.append("the ask reached its draft-call cap "
+                       f"({DRAFT_CALL_CAP} drafting calls) "
+                       "before a checked answer could be "
+                       "assembled")
+    for f in mech_failures:
+        missing.append("the answer did not establish: "
+                       + f["label"])
+    for f in quantities:
+        missing.append("quantity check failed: " + f["label"])
+    if uncited_lb:
+        missing.append("factual sentences carried no citation: "
+                       + "; ".join(f"\"{s[:120]}\""
+                                   for s in uncited_lb[:3]))
+    if ungrounded:
+        missing.append("the draft used figures found in none of "
+                       "the excerpts: " + ", ".join(
+                           _fmt_money(v) for v in ungrounded[:4]))
+    if conflict_fail:
+        missing.append("the draft did not surface both values "
+                       "of a source conflict")
+    return dict(base, answer=None, badge="idk",
+                judging=judging, claims=[],
+                missing=missing[:8], gate=gate)
+
+
 def _idk_answer(missing, hits, lead):
     """The full IDK payload (operator decision): a plain refusal, what
     is missing, and the closest excerpts, inline."""
@@ -9578,6 +9898,11 @@ button:disabled{background:var(--ink-disabled); cursor:default;}
 button.secondary{background:var(--surface-2); color:var(--ink); border:1px solid var(--hairline-strong); white-space:nowrap;}
 button.secondary:hover{background:var(--surface-3);}
 #askBtn{width:100%; height:52px; font-size:17px; margin-top:12px;}
+.moderow{display:flex; align-items:center; gap:8px; margin-top:12px;}
+.modebtn{flex:0 0 auto; min-height:44px; padding:6px 22px; font-size:15px;
+  background:var(--surface-3); color:var(--ink-secondary);}
+.modebtn.on{background:var(--accent); color:#fff; font-weight:600;}
+.modehint{font-size:13px; color:var(--ink-tertiary);}
 .freshrow{margin-top:10px; font-size:14px; color:var(--ink-secondary);}
 .freshrow label{display:inline-flex; align-items:center; gap:8px; cursor:pointer; min-height:32px;}
 .freshrow input{width:18px; height:18px;}
@@ -9677,6 +10002,11 @@ footer{margin-top:24px; font-size:12px; color:var(--ink-tertiary); max-width:65c
       <div class="seatrow"><label for="webBranch">Web branch</label>
         <select id="webBranch"><option value="allow" selected>Allow</option><option value="never">Never</option></select></div>
       <div id="seatWarn"></div>
+    </div>
+    <div class="moderow" role="group" aria-label="Answer mode">
+      <button id="modeQuick" class="modebtn" onclick="setMode('quick')" aria-pressed="true">Quick</button>
+      <button id="modeDeep" class="modebtn" onclick="setMode('deep')" aria-pressed="false">Deep</button>
+      <span class="modehint" id="modeHint"></span>
     </div>
     <button id="askBtn" onclick="ask()">Ask</button>
     <div class="freshrow"><label><input type="checkbox" id="fresh"> Fresh answer</label></div>
@@ -9939,8 +10269,33 @@ async function stopRun(){
   try{ await fetch('/ask/cancel/' + currentJob, {method:'POST'}); }
   catch(e){ /* the poll will surface the outcome either way */ }
 }
+// ---------- Quick / Deep mode (§v25) ----------
+// Quick is the default. The pick persists in localStorage
+// on this browser/profile; a fresh profile starts Quick.
+let askMode = 'quick';
+function setMode(m){
+  askMode = (m === 'deep') ? 'deep' : 'quick';
+  try{ localStorage.setItem('sara_mode', askMode); }catch(e){}
+  paintMode();
+}
+function paintMode(){
+  const q = askMode === 'quick';
+  $('modeQuick').classList.toggle('on', q);
+  $('modeQuick').setAttribute('aria-pressed', q ? 'true' : 'false');
+  $('modeDeep').classList.toggle('on', !q);
+  $('modeDeep').setAttribute('aria-pressed', !q ? 'true' : 'false');
+  $('modeHint').textContent = q
+    ? 'One draft, code checks only. Fastest.'
+    : 'Full judging pipeline. Slowest, most verified.';
+}
+function initMode(){
+  let stored = null;
+  try{ stored = localStorage.getItem('sara_mode'); }catch(e){}
+  askMode = (stored === 'deep') ? 'deep' : 'quick';
+  paintMode();
+}
 function buildPayload(q){
-  const payload = {question:q, model:'qwen3.5:9b',
+  const payload = {question:q, model:'qwen3.5:9b', mode: askMode,
                    fresh: $('fresh').checked};
   const picks = seatPicks();
   if(picks.draft !== 'hosted' || picks.extract !== 'hosted' || picks.judge !== 'hosted'){
@@ -10039,8 +10394,9 @@ function finishRun(d, jp){
     : (startStamp ? (Date.now() - startStamp) / 1000 : null);
   $('answeredIn').textContent = wall !== null ? ('· Answered in ' + fmtT(wall)) : '';
   $('answerText').textContent = d.answer || ('Error: ' + (d.error || 'unknown'));
-  // §7.5: the six badge strings.
+  // §7.5 + v25: the badge strings (six Deep + Quick).
   const badgeMap = {
+    quick: ['no', 'Quick answer'],
     checked: ['ok', 'Checked'],
     verified_web: ['ok', 'Checked · web sources'],
     checked_det: ['no', 'Checked · figures and citations'],
@@ -10150,6 +10506,7 @@ function showGone(){
 }
 // §5.3: reload / resume — a stored job id re-polls on load.
 window.addEventListener('DOMContentLoaded', async function(){
+  initMode();
   loadModels();
   const jid = sessionStorage.getItem('sara_job');
   if(!jid) return;
@@ -10564,6 +10921,18 @@ class Handler(BaseHTTPRequestHandler):
             # experience, now the only one). The request field
             # stays accepted (and ignored) for one version.
             corpus_name = "both"
+            # v25 (Quick/Deep): the ask's mode. Quick is the
+            # DEFAULT — an absent mode is a Quick ask. Deep
+            # is the v24 judged pipeline, unchanged. Anything
+            # else is a client error: an unknown mode must
+            # never silently become either lane.
+            ask_mode = req.get("mode")
+            if ask_mode is None:
+                ask_mode = "quick"
+            if ask_mode not in ("quick", "deep"):
+                self._json({"error": "unknown mode: "
+                            + str(ask_mode)[:40]}, 400)
+                return
             # Feature toggles
             use_rewrite = req.get("rewrite", REWRITE_ENABLED)
             use_rerank = req.get("rerank", RERANK_ENABLED)
@@ -10679,6 +11048,8 @@ class Handler(BaseHTTPRequestHandler):
                 The ask's 600s cap is shared: under ~60s left,
                 the branch does not start."""
                 nonlocal n_gaps
+                if ask_mode == "quick":
+                    return []  # v25: Quick never branches out
                 if discovery or use_gemini:
                     return []
                 if not branch_allowed:
@@ -10755,11 +11126,15 @@ class Handler(BaseHTTPRequestHandler):
             if not use_gemini:
                 routed_model, route_reason = route_local_model(
                     question, model)
+            # v25: the mode rides the key (last position) —
+            # a Quick answer is never served for a Deep ask
+            # or vice versa, and in-flight dedupe (same key)
+            # keeps the lanes apart too.
             ask_key = (question, routed_model, corpus_name,
                        use_rewrite, use_rerank, local_mode,
                        seat_models["draft"], seat_models["extract"],
                        seat_models["judge"], search_help or "",
-                       web_branch_pick or "")
+                       web_branch_pick or "", ask_mode)
             if not fresh:
                 cached_answer = _cache_get(_ASK_CACHE, ask_key)
                 if cached_answer:
@@ -10941,6 +11316,10 @@ class Handler(BaseHTTPRequestHandler):
                 # checked_det does NOT cache — an answer the
                 # judge never saw must not freeze into the
                 # replay every later re-ask returns.
+                # v25: badge "quick" does not cache either,
+                # for the same reason (deterministic checks
+                # only; the mode is in the key, so the lanes
+                # stay separated regardless).
                 if badge in ("checked", "verified_web"):
                     _cache_put(_ASK_CACHE, ask_key, result)
                 # v18 (§E): persist the ask record (see
@@ -10962,6 +11341,7 @@ class Handler(BaseHTTPRequestHandler):
                     # measurement.
                     "phase_ms": _phase_ms_snapshot(),
                     "question": question, "corpus": corpus_name,
+                    "mode": ask_mode,  # v25: the lane that ran
                     "local": bool(local_mode or any_seat_local),
                     # v24 (§8): the seat picks + the two panel
                     # lines, as served for this ask.
@@ -11265,6 +11645,11 @@ class Handler(BaseHTTPRequestHandler):
             _trk_units = []
             for _i, (_spec, _ctx) in enumerate(prepared):
                 _tu = _trk_new_unit(_i, _spec["part"])
+                if ask_mode == "quick":
+                    # v25: Quick units stamp their own
+                    # sections; the phase hook leaves them
+                    # alone (see _trk_phase).
+                    _tu["quick"] = True
                 _ctx["trk"] = _tu
                 _trk_units.append(_tu)
             _actx.tracker = {"units": _trk_units,
@@ -11307,6 +11692,50 @@ class Handler(BaseHTTPRequestHandler):
                         "gate": "time", "divergence": None}
                 return _run_unit(_ctx)
 
+            def _run_prepared_quick(pc):
+                """v25: one Quick unit, under the same
+                between-parts class-deadline gate as Deep
+                (a part that would start past its class
+                budget is a time-gated IDK, never a rushed
+                answer)."""
+                _check_cancel()  # v24 (§5.2): the Stop seam
+                _spec, _ctx = pc
+                if time.monotonic() > min(
+                        deadline, _ctx.get("class_deadline")
+                        or deadline):
+                    return {
+                        "answer": None, "badge": "idk",
+                        "served": None,
+                        "fallback": False, "downgraded": False,
+                        "prompt": "", "rungs": 0, "judge_ms": 0,
+                        "refute_ms": 0, "cap_hit": True,
+                        "cost_capped": False, "draft_text": None,
+                        "conflict_fail": False,
+                        "figure_check": {"ungrounded": [],
+                                         "regenerated": False},
+                        "judging": {"mode": "quick",
+                                    "annotation": "",
+                                    "errors": ["ask time cap "
+                                               "reached before "
+                                               "this part ran"],
+                                    "checks":
+                                        _empty_checks_block()},
+                        "budget_cut": True,
+                        "cut_phase": "between parts",
+                        "claims": [],
+                        "missing": ["the ask reached its time "
+                                    f"budget ({ASK_TIME_CAP_S} "
+                                    "seconds) before this part "
+                                    "could be checked"],
+                        "gate": "time", "divergence": None,
+                        "events": [], "retr_pools": [],
+                        "lead_repairs": 0,
+                        "stripped_sentences": [],
+                        "draft_calls": _ask_ctx().draft_calls,
+                        "draft_capped": False,
+                        "assembly_guard": None}
+                return _run_unit_quick(_ctx)
+
             # v18 (R8): bundled units run in PARALLEL (max 3
             # workers). Each unit's per-ask state rides its own
             # _AskContext (F10), so parallel units cannot corrupt
@@ -11315,7 +11744,18 @@ class Handler(BaseHTTPRequestHandler):
             # and per-unit events in parallel mode are the units'
             # full ask events. The branch-out re-run below stays
             # serial: it is rare and spends Tavily credits.
-            if len(prepared) > 1:
+            if ask_mode == "quick":
+                # v25: Quick units run the same way (parallel
+                # when bundled) through the Quick runner.
+                if len(prepared) > 1:
+                    with ThreadPoolExecutor(max_workers=3) as pool:
+                        _futs = [_submit(pool, _run_prepared_quick,
+                                         pc) for pc in prepared]
+                        raw_units = [f.result() for f in _futs]
+                else:
+                    raw_units = [_run_prepared_quick(pc)
+                                 for pc in prepared]
+            elif len(prepared) > 1:
                 with ThreadPoolExecutor(max_workers=3) as pool:
                     _futs = [_submit(pool, _run_prepared, pc)
                              for pc in prepared]
@@ -11325,6 +11765,32 @@ class Handler(BaseHTTPRequestHandler):
             units = []
             for (spec, ctx), unit in zip(prepared, raw_units):
                 unit_hits = spec["hits"]
+                if ask_mode == "quick":
+                    # v25: a Quick unit is final when its
+                    # runner returns — no rescue, no web
+                    # branch, no badge translation. Only the
+                    # tracker close + the gap log remain.
+                    _tu = ctx.get("trk")
+                    if _tu is not None:
+                        _tu["status"] = "done"
+                        if _tu["t0"] is not None:
+                            _tu["elapsed"] = round(
+                                time.monotonic() - _tu["t0"], 1)
+                        if unit.get("gate") == "time" \
+                                and _tu["t0"] is None:
+                            _tu["caption"] = (
+                                "Skipped \u00b7 time budget spent")
+                    unit["part"] = spec["part"]
+                    unit["unit_q"] = spec["unit_q"]
+                    unit["hits"] = unit_hits
+                    units.append(unit)
+                    if unit["badge"] == "idk":
+                        log_gap(question, "idk",
+                                unit["gate"] or "checking",
+                                unit["missing"],
+                                part=spec["part"])
+                        n_gaps += 1
+                    continue
                 if (unit["badge"] == "idk"
                         or unit["badge"].startswith("partial")) \
                         and unit["gate"] != "time" \
@@ -11585,6 +12051,12 @@ class Handler(BaseHTTPRequestHandler):
                 # partial_single / partial_reduced split is
                 # gone, so a capped assembly is just "partial").
                 _BADGE_RANK = {"idk": 0, "partial": 1,
+                               # v25: a Quick part sits above
+                               # partial and below every judged
+                               # tier (Deep units never carry
+                               # it; the lanes never mix in one
+                               # ask).
+                               "quick": 2,
                                "checked_det": 4,
                                "verified_web_reduced": 4,
                                "checked": 6, "verified_web": 6}
@@ -11730,6 +12202,7 @@ class Handler(BaseHTTPRequestHandler):
                     "kind": "ask", "ask_id": _ask_ctx().ask_id,
                     "ts": time.time(), "wall_s": _wall,
                     "question": question, "corpus": corpus_name,
+                    "mode": ask_mode,  # v25: the lane that ran
                     "local": bool(local_mode or any_seat_local),
                     "seat_models": dict(seat_models),
                     "badge": "cancelled", "status": "cancelled",
