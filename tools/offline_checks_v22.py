@@ -18,10 +18,10 @@
     for 'devisor' is reported as measured; pins serve the Vision
     module for the eyeglasses question; the three anchor
     questions put the expected doc in the top 3.
- 8. Legacy path intact with RETRIEVAL=legacy set explicitly
-    (separate process, run by this script's legacy phase; the
-    v22.1 server default is v2 when the variable is absent, so
-    this phase pins the variable rather than relying on unset).
+ 8. v23: RETRIEVAL=legacy in the environment changes nothing
+    (the flag and the legacy engine are deleted; the separate
+    'legacy' phase now asserts the v2 engine serves anyway).
+    This replaces the v22 'legacy path intact' check.
 """
 import json
 import logging
@@ -128,7 +128,7 @@ def v2_checks():
     mod = rr.load_server(str(ROOT))
     mod.REWRITE_ENABLED = False
     mod.RERANK_ENABLED = False
-    assert mod._v2_effective(), "v2 did not open"
+    assert mod._v2_open(), "v2 did not open"
     health = mod._v2_health()
     check("v2-health", health["effective"] == "v2"
           and health["fts5"] is True
@@ -180,6 +180,11 @@ def v2_checks():
 
 
 def legacy_phase():
+    """v23 REPLACEMENT for the v22 'legacy-intact' check: the
+    legacy engine and the RETRIEVAL flag are DELETED, so this
+    phase (still launched with RETRIEVAL=legacy in the env)
+    asserts the flag is dead: the engine opens v2 anyway and
+    hybrid_search serves v2 hits. Listed in v23/STATUS.md."""
     sys.path.insert(0, str(HERE))
     import retrieval_regression as rr
     mod = rr.load_server(str(ROOT))
@@ -188,8 +193,8 @@ def legacy_phase():
     hits = mod.hybrid_search(
         "What is Indiana's Medicaid transfer penalty divisor?",
         corpus=mod.CORPUS_IN, n=8, use_rewrite=False, use_rerank=False)
-    ok = mod._v2_health()["effective"] == "legacy" and len(hits) > 0
-    check("legacy-intact", ok,
+    ok = mod._v2_health()["effective"] == "v2" and len(hits) > 0
+    check("v23-flag-dead-engine-v2", ok,
           f"effective={mod._v2_health()['effective']}, hits={len(hits)}")
     return 0 if not FAILURES else 1
 

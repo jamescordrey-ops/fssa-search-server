@@ -313,8 +313,11 @@ def main():
               for r in rows))
 
     # ---------------- WS4b: seat_skip ----------------------
+    # v23: retargeted from the deleted judge_nim1 seat to
+    # judge_seat2 (the same skip-reason machinery serves the
+    # two-seat panel's one seat-machinery job).
     mod._events_reset()
-    mod._note_seat_skips("judge_nim1", None, [])
+    mod._note_seat_skips("judge_seat2", None, [])
     skips = [e for e in mod._ask_ctx().events
              if e.get("kind") == "seat_skip"]
     check("WS4b seat_skip events emitted for an unserved pick",
@@ -325,7 +328,7 @@ def main():
           "machine)", bool(skips) and "no key" in
           skips[0]["reason"])
     n0 = len(mod._ask_ctx().events)
-    mod._note_seat_skips("judge_nim1", None, [])
+    mod._note_seat_skips("judge_seat2", None, [])
     check("WS4b seat_skip dedupes per ask",
           len(mod._ask_ctx().events) == n0)
 
@@ -401,48 +404,16 @@ def main():
           len(calls) == 2 and all(c == 0.2 for c in calls),
           f"calls={calls}")
 
-    # ---------------- v22.1 secondary (a): nimx deadline -------
-    # The divergence oracle's B draft (engine "nimx") called
-    # nim_ask with NO deadline through v22, so _nim_text's
-    # retry ran at the full NIM_DRAFTER_TIMEOUT again after a
-    # first timeout (the WS4a bug class on a path WS4a did not
-    # thread). Prove the threading with a capturing stub: the
-    # leg's timeout clamps to the unit budget and a deadline
-    # is passed; a spent budget sheds the leg with no call.
-    captured = {}
-    _real_nim_ask = mod.nim_ask
-
-    def fake_nim_ask(model, question, hits, instructions="",
-                     key_env=None, key_file=None, timeout=None,
-                     deadline=None):
-        captured.update(timeout=timeout, deadline=deadline)
-        return "draft text", "prompt"
-
-    mod.nim_ask = fake_nim_ask
-    try:
-        mod._ask_ctx().unit_deadline = time.monotonic() + 5
-        mod._generate("nimx", "some-model", "q?", [],
-                      instructions="")
-        check("v22.1 nimx draft leg is deadline-threaded",
-              captured.get("deadline") is not None
-              and captured.get("timeout") is not None
-              and captured["timeout"] <= 5.01
-              and captured["deadline"] <= time.monotonic() + 5.01,
-              f"captured={captured}")
-        mod._ask_ctx().unit_deadline = time.monotonic() - 1
-        captured.clear()
-        shed = False
-        try:
-            mod._generate("nimx", "some-model", "q?", [],
-                          instructions="")
-        except RuntimeError:
-            shed = True
-        check("v22.1 nimx leg sheds on a spent budget "
-              "(no call started)", shed and not captured,
-              f"captured={captured}")
-    finally:
-        mod.nim_ask = _real_nim_ask
-        mod._ask_ctx().unit_deadline = None
+    # ---------------- v23: nimx checks REMOVED ---------------
+    # The two v22.1 nimx checks (deadline threading + budget
+    # shed on the divergence oracle's B-draft leg) are gone
+    # with the oracle itself (v23 WS3.1). The deadline
+    # discipline they proved now rides every remaining leg
+    # via _leg_timeout + deadline threading in _judge_seat_text
+    # and _generate; the v23 panel-shape checks in
+    # offline_checks_v23.py assert the replacement behavior
+    # (seat legs shed at the budget edge; relief legs are
+    # deadline-bounded). Listed in v23/STATUS.md.
 
     # ---------------- v22.1 secondary (b): shape guard ---------
     memo = ("Corrections and citations: the previous draft "

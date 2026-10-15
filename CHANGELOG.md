@@ -5,6 +5,29 @@ each version are in `docs/`. Corpus updates are manual: new documents
 are collected, verified against their sources, and merged alongside a
 version bump rather than synced automatically.
 
+## v23 — 2026-10-15
+
+GUI progress + judge switch + consolidation. The ask page
+now shows a live stepper (retrieving / drafting /
+extracting / judging / final checks, with round numbers,
+per-seat judge states, and elapsed seconds — never an
+ETA). Judging is a two-seat panel: Gemini 3.5 Flash Lite
+(seat 1) and Qwen3.8-27B on Groq (seat 2), with a paid
+relief bench (xAI Grok 4.7, OpenRouter DeepSeek V4 Pro)
+called only when a free seat is down; NIM seats are out
+of every timed path and the two-family rule for the full
+verified badge is unchanged. The divergence oracle and
+the legacy retrieval engine are deleted (v2 only). The
+v22.3 fixes (claim dedupe, registry claims judged first,
+judge bench after a full leg timeout) are carried in.
+Registry wake-up vocabulary is now generated from
+enrichment at generation build (audit 10/14 + 3/5 against
+the plain-language questions; hand groups remain the
+precision overlay). Generation g0003: fleet enrichment
+for the 48 repaired sections (713 questions), canary
+cosine 1.000000. Budgets held at 150/285s; per-phase
+timing now lands in the ask record for the budget test.
+
 ## v22.3 — 2026-10-15
 
 The judge-panel reliability release: three fixes from the

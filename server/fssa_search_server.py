@@ -604,6 +604,70 @@ def _set_stage(text):
         rec["stage"] = text
 
 
+# --- v23 (WS1): structured phase progress ----------------------------
+# The job record carries a PHASE alongside the free-text stage:
+# one of retrieving / drafting / extracting / judging /
+# final checks / done, a round number for the looping phases
+# (drafting and judging run once per ladder rung), and, during
+# judging, a per-seat state map the page renders under the
+# stepper. The page renders a stepper from this field ONLY:
+# no percentage and no ETA anywhere (an ask's length is not
+# predictable; elapsed seconds are shown, never a guess at
+# what remains). The same transitions accumulate per-phase
+# wall time on the ask context (phase_ms in the ask record):
+# the measurement the held 150/285s budget test reads.
+_PHASE_ORDER = ("retrieving", "drafting", "extracting", "judging",
+                "final checks", "done")
+
+
+def _set_phase(name, round=None):
+    rec = getattr(_STAGE_TLS, "job", None)
+    if rec is not None:
+        ph = rec.setdefault("phase", {"name": "retrieving",
+                                      "round": None, "seats": {}})
+        ph["name"] = name
+        if round is not None:
+            ph["round"] = round
+    try:
+        ctx = _ask_ctx()
+    except Exception:
+        return
+    now = time.monotonic()
+    cur = getattr(ctx, "phase_open", None)
+    if cur is not None and cur[0] != name:
+        ctx.phase_ms[cur[0]] = ctx.phase_ms.get(cur[0], 0.0) \
+            + (now - cur[1])
+        ctx.phase_open = (name, now)
+    elif cur is None:
+        ctx.phase_open = (name, now)
+
+
+def _set_seat_phase(seat, state):
+    """One judge seat's live state for the stepper (seat1 /
+    seat2 / arbitrator: waiting / checking / done / down /
+    ruling)."""
+    rec = getattr(_STAGE_TLS, "job", None)
+    if rec is not None:
+        ph = rec.setdefault("phase", {"name": "retrieving",
+                                      "round": None, "seats": {}})
+        ph.setdefault("seats", {})[seat] = state
+
+
+def _phase_ms_snapshot():
+    """The ask context's per-phase seconds, with the still-open
+    phase's elapsed included (non-mutating)."""
+    try:
+        ctx = _ask_ctx()
+    except Exception:
+        return {}
+    out = dict(getattr(ctx, "phase_ms", {}) or {})
+    cur = getattr(ctx, "phase_open", None)
+    if cur is not None:
+        out[cur[0]] = out.get(cur[0], 0.0) \
+            + (time.monotonic() - cur[1])
+    return {k: round(v, 3) for k, v in out.items()}
+
+
 _JOBS = {}
 _JOBS_LOCK = threading.Lock()
 _JOBS_MAX = 50
@@ -612,6 +676,8 @@ _JOBS_MAX = 50
 def _job_create():
     job_id = uuid.uuid4().hex[:16]
     rec = {"id": job_id, "status": "running", "stage": "retrieving",
+           "phase": {"name": "retrieving", "round": None,
+                     "seats": {}},
            "result": None, "error": None, "ts": time.time()}
     with _JOBS_LOCK:
         _JOBS[job_id] = rec
@@ -707,24 +773,14 @@ def _clean_llm_list_output(text):
     return lines[0] if lines else ""
 
 def _utility_text(prompt, max_tokens=256, timeout=30):
-    """v15.1: one bare chat call for the retrieval utilities
-    (query rewrite, policy-phrase rewrite, rerank). Through v15.0
-    these ran on the local 9B, which loaded it into VRAM on every
-    ask; they now run on the NIM fast tier, so the local models
-    stay cold. Raises on any failure: the utilities degrade to
-    their empty result, exactly as they did when the local call
-    failed. v16: the call rides the simple_draft SEAT's active
-    candidate and key slot (seat machinery defined later in this
-    file; resolves at call time). Utility calls deliberately do
-    not report to seat health: their short outputs would
-    pollute the drafting seat's latency median. v17: the
-    OpenRouter utility seat (GPT-OSS-20B) gets the call first —
-    the v16 split showed these calls were 80-95% of retrieval
-    time; any OpenRouter failure falls through to the NIM seat
-    path below, unchanged."""
-    # v20 (layer model): Groq's free tier (GPT-OSS-20B)
-    # first, then the free NIM seat path, then the paid
-    # OpenRouter seat — free before paid, as everywhere.
+    """One bare chat call for the retrieval utilities (query
+    rewrite, policy-phrase rewrite, rerank). Raises on any
+    failure: the utilities degrade to their empty result,
+    exactly as they did when the local call failed.
+    v23 (WS2/WS3.1): the chain is Groq's free tier
+    (GPT-OSS-20B) first, then the paid OpenRouter utility
+    model — the NIM seat leg is DELETED with the rest of
+    the NIM timed paths."""
     if _groq_available():
         try:
             return _groq_text(
@@ -734,23 +790,7 @@ def _utility_text(prompt, max_tokens=256, timeout=30):
                 prompt, temperature=0, max_tokens=max_tokens,
                 timeout=timeout)
         except Exception:
-            pass  # the NIM seat path below takes over
-    try:
-        model, slot, _fo = _seat_pick("simple_draft")
-        if model is None:
-            model, key_env, key_file = (DRAFTER_SIMPLE_MODEL,
-                                        DRAFTER_KEY_ENV,
-                                        DRAFTER_KEY_FILE)
-        else:
-            key_env, key_file = SEAT_SLOTS[slot]
-        return _nim_text(
-            DRAFTER_BASE_URL, key_env, key_file, model,
-            "You are a precise retrieval utility. Reply with only "
-            "the requested output, no explanations.",
-            prompt, temperature=0, max_tokens=max_tokens,
-            timeout=timeout, provider=DRAFTER_PROVIDER)
-    except Exception:
-        pass  # the OpenRouter attempt below takes over
+            pass  # the OpenRouter attempt below takes over
     if _or_available():
         try:
             return _or_text(
@@ -800,90 +840,11 @@ def rewrite_policy_phrase(question):
         return ""
 
 
-# Deterministic topic bridges (2026-10-12 v5, extended v6): fixed
-# lay-term -> manual phrasing searches for the chronic retrieval gaps.
-# The LLM policy rewrite aims at these same phrases but lands
-# inconsistently; these always fire.
-# (token triggers, substring triggers, phrases to search as
-# (phrase, pin_term) pairs - the guaranteed pin must be a chunk whose
-# text contains pin_term when one is set (v11 fix round: a pin is only
-# worth guaranteeing if it literally states the operative rule),
-# program scope for the pin (None = any), extra requirement: at least
-# one of these tokens/substrings must ALSO be present)
-_TOPIC_BRIDGES = (
-    ({"fema", "disaster", "disasters", "burned", "flood", "flooding",
-      "tornado", "hurricane", "earthquake"}, (),
-     (("disaster assistance payments excluded", None),), None, ()),
-    ({"backpay"}, ("back pay", "lump sum"),
-     (("non-recurring lump sum payments excluded resources", None),
-      ("retroactive SSI Social Security benefits nine months",
-       "retroactive SSI or Social Security benefits"),
-      ("nonrecurring lump-sum payment excluded income",
-       "nonrecurring lump-sum payment")),
-     None, ()),
-    ({"vehicle", "van", "car", "automobile", "truck"}, (),
-     (("exempt vehicles countable resources", None),), None, ()),
-    # v18 (F15): "caregiver"/"caregiving" no longer trigger the
-    # spouse bridge on their own (any caregiving question pulled
-    # spouse material in); the structured-family-caregiving
-    # phrase trigger below still fires it for SFC questions.
-    ({"wife", "husband", "spouse", "spouses"},
-     ("structured family caregiving",),
-     (("spousal impoverishment income in the name of the spouse", None),
-      ("community spouse income not counted eligibility", None)),
-     None, ()),
-    ({"reapplied"}, ("retroactive",),
-     (("retroactive coverage eligible third month before application",
-       None),),
-     "Medicaid", ()),
-    # v11: caregiver pay in a MAGI/HIP context is governed by the IRS
-    # difficulty-of-care exclusion, whose vocabulary ("difficulty of
-    # care", "excludable") shares almost no words with the question.
-    ({"caregiver", "caregiving"}, ("caregiver pay",),
-     (("difficulty of care payments excluded income",
-       "difficulty of care"),
-      ("medicaid waiver payments excludable caregiver",
-       "faq")),
-     None, ({"hip"}, ("household income", "magi"))),
-    # v11: "who pays my Part B premium" -> Medicare Savings Programs.
-    (set(), ("part b premium", "medicare premium"),
-     (("medicare savings programs pay part b premiums",
-       "medicare savings"),
-      ("qualified medicare beneficiary income limits",
-       "qualified medicare beneficiary")),
-     "Medicare", ()),
-    # v11: ABLE accounts, the legal way to save past the resource limit.
-    ({"able"}, ("able account", "stable account"),
-     (("able account resources excluded medicaid ssi", "able"),),
-     None, ()),
-    # v14: over-the-income-cap questions are governed by the Qualified
-    # Income Trust (Miller trust). The vocabulary ("qualified income
-    # trust") shares almost no words with how the question is asked, so
-    # without this pin the QIT material never surfaces and the model
-    # improvises around the hole (manual test #1, 2026-10-13).
-    (set(), ("over the income limit", "over the limit", "income cap",
-             "over the medicaid income limit", "over the medicaid limit",
-             "is over the income limit", "miller trust",
-             "qualified income trust"),
-     (("qualified income trust medicaid eligibility",
-       "qualified income trust"),
-      ("miller trust income limit medicaid", "miller trust")),
-     None, ({"medicaid", "waiver"}, ("nursing home", "long-term care",
-                                     "long term care"))),
-    # v20.2: vision/eyeglasses questions are governed by the IHCP
-    # Vision Services provider reference module (PROMOD00051),
-    # whose operative text ("frequency limits", "every five
-    # years") shares almost no words with lay phrasing — and the
-    # module's chunks additionally ate ranking demotions — so on
-    # the natural question ("how often are eyeglasses covered
-    # for adults", 2026-10-14) the module never reached the
-    # excerpt set despite stating the exact answer.
-    ({"eyeglasses", "eyeglass", "glasses", "spectacles"},
-     ("vision services", "eye exam", "eye exams"),
-     (("eyeglasses one pair frequency", "one pair of eyeglasses"),
-      ("vision services eyeglasses coverage", "eyeglasses")),
-     None, ()),
-)
+# v23 (WS3.2): the deterministic topic bridges are DELETED
+# with the legacy retrieval path that applied them. Their
+# job (lay term -> the manual section that states the rule)
+# is carried in v2 by the registry channel, the exact-phrase
+# channel, and pins.json.
 
 US_STATES = (
     "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
@@ -1332,17 +1293,12 @@ def _registry_pin_hits(question, corpus, on_date=None):
 
 # ---------------------------------------------------------------------------
 # v22 retrieval: generation-backed, in-process (SQLite FTS5 weighted
-# BM25F + the existing nomic vectors + synthetic-question vectors),
-# behind the RETRIEVAL env flag (v2|legacy; v22.1: the default
-# is v2 when the variable is ABSENT — the v22 deploy found the
-# logon task does not inherit the user environment, so the code
-# default is what makes v2 restart-proof; RETRIEVAL=legacy in
-# the environment still selects the v21 path below, intact).
-# Design: ~/workspace/fssa-qa/v22/PLAN.md
-# and CONSULT_RAW.md. Fail-soft throughout: if the flag is off, the
-# generation store is missing, or FTS5 is unavailable in this
-# Python's sqlite3, the effective engine is legacy and /health
-# says why. Channels: T (FTS5 BM25F over sections and chunks,
+# BM25F + the existing nomic vectors + synthetic-question vectors).
+# v23 (WS3.2): this is now the ONLY retrieval engine. The
+# RETRIEVAL env flag and the legacy keyword/vector fusion path
+# are DELETED; there is nothing behind this to fall back to,
+# so a store that cannot open leaves the engine DOWN and
+# retrieval calls fail closed (/health says why). Channels: T (FTS5 BM25F over sections and chunks,
 # query rewrites included), V1 (chunk vectors), V2 (synthetic-
 # question vectors), R (registry entries resolved to their source
 # section BY DOC ID from the generation's registry_sources table),
@@ -1358,7 +1314,7 @@ import sqlite3 as _sqlite3
 _V2_LOCK = threading.Lock()
 _V2_QLOCK = threading.Lock()
 _V2_CACHE = {}
-_V2 = {"requested": None, "effective": "legacy", "fts5": None,
+_V2 = {"requested": None, "effective": "down", "fts5": None,
        "generation": None, "vectors": "unknown", "canary": "n/a",
        "drift": False, "fail_reason": None, "profile": None,
        "conn": None, "sections": {}, "docs": {}, "enrich": {},
@@ -1380,7 +1336,7 @@ def _v2_fts5_ok():
 def _v2_health():
     """The /health retrieval block. Never raises."""
     try:
-        return {"requested": _V2["requested"],
+        return {"engine": "v2",
                 "effective": _V2["effective"],
                 "fts5": _V2["fts5"],
                 "generation": _V2["generation"],
@@ -1390,7 +1346,8 @@ def _v2_health():
                 "fail_reason": _V2["fail_reason"],
                 "profile": (_V2["profile"] or {}).get("version")}
     except Exception:
-        return {"effective": "legacy", "error": "state unavailable"}
+        return {"engine": "v2", "effective": "down",
+                "error": "state unavailable"}
 
 
 def _v2_canary_thread():
@@ -1449,20 +1406,21 @@ def _v2_canary_thread():
 
 
 def _v2_open():
-    """Open the generation store once. Returns True when the v2
-    path may serve. Any failure leaves effective=legacy."""
+    """Open the generation store once. Returns True when the
+    v2 path may serve. v23 (WS3.2): there is no RETRIEVAL
+    flag and no legacy engine behind it; any failure leaves
+    the engine DOWN (effective='down', fail_reason set) and
+    retrieval calls fail closed."""
     with _V2_LOCK:
         if _V2["requested"] is not None:
             return _V2["effective"] == "v2"
-        _V2["requested"] = os.environ.get(
-            "RETRIEVAL", "v2").strip().lower()
+        _V2["requested"] = "v2"
         _V2["fts5"] = _v2_fts5_ok()
-        if _V2["requested"] != "v2":
-            return False
         if not _V2["fts5"]:
             _V2["fail_reason"] = "FTS5 unavailable in this sqlite3"
-            print("[v22] RETRIEVAL=v2 requested but FTS5 is "
-                  "unavailable; serving legacy", flush=True)
+            _V2["effective"] = "down"
+            print("[v23] FTS5 unavailable in this sqlite3; "
+                  "the retrieval engine is DOWN", flush=True)
             return False
         try:
             base = os.environ.get("FSSA_GENERATIONS_DIR") or os.path.join(
@@ -1537,15 +1495,11 @@ def _v2_open():
             return True
         except Exception as e:
             _V2["fail_reason"] = f"{type(e).__name__}: {e}"
-            _V2["effective"] = "legacy"
-            print(f"[v22] generation store failed to open "
-                  f"({_V2['fail_reason']}); serving legacy",
-                  flush=True)
+            _V2["effective"] = "down"
+            print(f"[v23] generation store failed to open "
+                  f"({_V2['fail_reason']}); the retrieval "
+                  f"engine is DOWN", flush=True)
             return False
-
-
-def _v2_effective():
-    return _v2_open()
 
 
 def _v2_scope(corpus):
@@ -2133,566 +2087,27 @@ def _hybrid_search_v2(query, corpus, n, use_rewrite, use_rerank):
 
 
 
-def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
-                  boosts=True):
-    """Combine keyword and vector search with proper reciprocal rank fusion."""
-    # v22: ask-mode calls dispatch to the generation-backed v2
-    # path when RETRIEVAL=v2 and the store opens. The dispatch
-    # decision itself is fail-soft: any error serves legacy.
-    if boosts:
-        try:
-            if _v2_effective():
-                return _hybrid_search_v2(query, corpus, n,
-                                         use_rewrite, use_rerank)
-        except Exception:
-            pass
-    # Check cache
-    cache_key = (query, id(corpus) if corpus else "in", n, use_rewrite,
-                 use_rerank, boosts)
-    # v18: callers receive COPIES (list and hit dicts). The
-    # cached objects are shared process-wide; through v17.3 a
-    # caller extending the returned list (the bundled-parts
-    # path) or writing onto a hit dict (the web badge) polluted
-    # the cache entry for every later ask.
-    cached = _cache_get(_SEARCH_CACHE, cache_key)
-    if cached:
-        # v20.2 (observability): a cache hit still records
-        # WHAT it served, marked cached, so the ask record
-        # shows the excerpt set even when no fresh pool ran.
-        if boosts:
-            _retr_pool_note({
-                "q": query[:80], "n": n, "cached": True,
-                "pool": [{"t": (h.get("title") or "")[:70],
-                          "u": h.get("url"), "sel": i}
-                         for i, h in enumerate(cached[:28])]})
-        return [dict(h) for h in cached]
+def hybrid_search(query, corpus=None, n=6, use_rewrite=True,
+                  use_rerank=True, boosts=True):
+    """v23 (WS3.2): retrieval is the generation-backed v2
+    path ONLY. The legacy keyword/vector fusion path and
+    the RETRIEVAL env flag are DELETED: there is no second
+    engine to fall back to, so a generation store that
+    cannot open fails this call closed (RuntimeError) and
+    /health reports the engine as down with the reason.
+    Same return contract as always: the top-n served hits.
+    The `boosts` argument is retained for caller
+    compatibility; the v2 channels carry what the legacy
+    boosts used to approximate (registry channel R, exact
+    channel X, pins), for ask and plain search alike."""
+    if not _v2_open():
+        raise RuntimeError(
+            "generation store unavailable: "
+            + str(_V2["fail_reason"] or "not opened"))
+    return _hybrid_search_v2(query, corpus, n, use_rewrite,
+                             use_rerank)
 
-    # v16 item 8: the vector leg is independent of the rewrite,
-    # so it runs CONCURRENTLY with the rewrite + keyword legs
-    # (they were serial in v15; the sub-timings indicted the
-    # serialization, not any single leg).
-    _vpool = ThreadPoolExecutor(max_workers=1)
-    _vec_fut = _submit(_vpool, vector_search, query, n=n * 3,
-                       corpus=corpus)
-    # rewrite query for better keyword matching (optional)
-    _t_seg = time.monotonic()
-    rewritten = rewrite_query(query) if (use_rewrite and REWRITE_ENABLED) else []
-    _retr_note("rewrite", time.monotonic() - _t_seg)
-    # NOTE: rewritten terms are searched separately, NOT concatenated into n-grams
-    # to avoid synthetic cross-boundary phrase corruption.
 
-    _t_seg = time.monotonic()
-    kw_hits = search(query, corpus, n=n*3, extra_terms=rewritten)
-    _retr_note("lexical", time.monotonic() - _t_seg)
-    # policy-phrasing pass: search the question rewritten in the manuals'
-    # own vocabulary, fused as its own list (situational retrieval fix)
-    _t_seg = time.monotonic()
-    policy_q = rewrite_policy_phrase(query) if (use_rewrite and REWRITE_ENABLED) else ""
-    _retr_note("rewrite", time.monotonic() - _t_seg)
-    _t_seg = time.monotonic()
-    kw2_hits = search(policy_q, corpus, n=n*2) if policy_q else []
-    _retr_note("lexical", time.monotonic() - _t_seg)
-    vec_hits = _vec_fut.result()
-    _vpool.shutdown(wait=False)
-    _t_fusion = time.monotonic()
-
-    # deterministic topic bridges: fixed phrases for the chronic gaps.
-    # /ask-mode only (v7 gate): plain /search keeps the unenhanced
-    # hybrid ranking, same as the figure/duration boosts.
-    q_low = query.lower()
-    q_tokens = set(re.findall(r"[a-z]+", q_low))
-    bridge_hits = []
-    bridge_tops = []  # (bridge index, hit): pins are allocated per
-    # bridge below, so one bridge's phrases cannot eat every slot
-    if boosts:
-        for bidx, (token_triggers, text_triggers, phrases, prog_scope,
-                   req) in enumerate(_TOPIC_BRIDGES):
-            if not ((q_tokens & token_triggers) or
-                    any(t in q_low for t in text_triggers)):
-                continue
-            if req:
-                req_tokens, req_texts = req
-                if not ((q_tokens & req_tokens) or
-                        any(t in q_low for t in req_texts)):
-                    continue
-            for phrase, pin_term in phrases:
-                found = search(phrase, corpus, n=n * 4)
-                if not found:
-                    continue
-                bridge_hits += found[:n * 2]
-                # Pin choice, most specific first: a chunk that
-                # literally contains the pin term (the operative rule
-                # text); then a chunk from the bridge's program scope;
-                # then the top hit. If no keyword candidate carries
-                # the pin term, try the vector index for one (the IRS
-                # difficulty-of-care passage ranks poorly by keywords
-                # but well by meaning).
-                top = None
-                if pin_term:
-                    pt = pin_term.lower()
-                    top = next(
-                        (f for f in found
-                         if pt in (f["title"] + " " + f["excerpt"]).lower()),
-                        None)
-                    if top is None:
-                        for f in vector_search(phrase, n=6, corpus=corpus):
-                            if pt in (f["title"] + " "
-                                      + f["excerpt"]).lower():
-                                top = f
-                                bridge_hits.append(f)
-                                break
-                if top is None and prog_scope:
-                    top = next(
-                        (f for f in found
-                         if _classify_hit(f)[0] == prog_scope), None)
-                if top is None:
-                    top = found[0]
-                bridge_tops.append((bidx, top))
-
-    # v21 (WS1b): registry-driven retrieval — a question that
-    # matches a registry entry pins the chunk carrying its
-    # figure, fused below as its own list (rg in the pool
-    # snapshot) and pinned with the bridges after rerank.
-    registry_hits = []
-    registry_tops = []  # (entry id, hit)
-    if boosts:
-        for _rentry, _rhit in _registry_pin_hits(query, corpus):
-            registry_hits.append(_rhit)
-            registry_tops.append((_rentry["id"], _rhit))
-
-    # proper reciprocal rank fusion (no artificial bonuses)
-    RRF_K = 60
-    scores = {}
-    kw_keys, vec_keys = set(), set()
-    for rank, h in enumerate(kw_hits):
-        key = (h["url"], h["excerpt"][:60])
-        kw_keys.add(key)
-        scores[key] = scores.get(key, 0) + 1.0 / (rank + RRF_K)
-    for rank, h in enumerate(vec_hits):
-        key = (h["url"], h["excerpt"][:60])
-        vec_keys.add(key)
-        scores[key] = scores.get(key, 0) + 1.0 / (rank + RRF_K)
-    solo_candidates = set()
-    for rank, h in enumerate(kw2_hits):
-        key = (h["url"], h["excerpt"][:60])
-        if rank < 4:
-            solo_candidates.add(key)
-        scores[key] = scores.get(key, 0) + 1.0 / (rank + RRF_K)
-    for rank, h in enumerate(bridge_hits):
-        key = (h["url"], h["excerpt"][:60])
-        if rank < 4:
-            solo_candidates.add(key)
-        scores[key] = scores.get(key, 0) + 1.0 / (rank + RRF_K)
-    for rank, h in enumerate(registry_hits):
-        key = (h["url"], h["excerpt"][:60])
-        if rank < 4:
-            solo_candidates.add(key)
-        scores[key] = scores.get(key, 0) + 1.0 / (rank + RRF_K)
-    # solo-source bonus (v6): a top chunk found ONLY by the policy or
-    # bridge searches (the lists built to find exactly it) is otherwise
-    # buried by single-list RRF below the rerank window (the FEMA miss:
-    # /search ranks the section #1, /ask never saw it). The bonus lifts
-    # it to parity with two-list chunks; the rerank still judges it.
-    if boosts:
-        for key in solo_candidates:
-            if key not in kw_keys and key not in vec_keys:
-                scores[key] = scores.get(key, 0) + 0.03
-
-    # merge hits
-    merged = {}
-    for h in kw_hits + vec_hits + kw2_hits + bridge_hits \
-            + registry_hits:
-        key = (h["url"], h["excerpt"][:60])
-        if key not in merged:
-            merged[key] = h
-        merged[key]["_fused"] = scores[key]
-
-    hits = list(merged.values())
-
-    # table boost for money questions
-    money_q = any(w in query.lower() for w in
-                  ("limit", "cost", "amount", "much", "income", "pay", "rate",
-                   "dollar", "price", "fee", "premium", "allowance", "keep"))
-    for h in hits:
-        if money_q and _is_table_chunk(h["excerpt"]):
-            h["_fused"] = h.get("_fused", 0) + 1.0
-
-    # figure/duration boosts (2026-10-12 excerpt precision): on money
-    # questions, ANY chunk quoting a dollar figure gets a moderate lift,
-    # not just table-shaped ones (the 2026 spousal standards live in
-    # prose). On how-long questions, chunks stating a duration in months
-    # or years get the same lift (the SSI nine-month exclusion is one
-    # sentence inside a long resources page). The lift is sized to
-    # reorder chunks within the relevant pool, not to override topical
-    # relevance, and it applies before the LLM rerank.
-    # v20.2: "how often" / "how frequently" join the trigger
-    # list — frequency questions are duration questions (the
-    # 2026-10-14 eyeglasses ask: "how often are eyeglasses
-    # covered" fired no duration lift, and the frequency chunk
-    # stating "every five years" lost the excerpt cut).
-    duration_q = any(w in query.lower() for w in
-                     ("how long", "how often", "how frequently",
-                      "months", "years", "period", "deadline",
-                      "when does", "expire", "lookback", "look-back"))
-    if boosts:  # /search passes boosts=False (v5 guard: plain search
-        # ranking should not be skewed by excerpt-oriented boosts)
-        # v11 program scoping: when the question is about Medicaid,
-        # SNAP, or MAGI coverage and never mentions SSI/SSDI, SSI-law
-        # chunks (POMS above all) are demoted: the two programs share
-        # vocabulary but not figures or timeframes, and in v10 POMS
-        # chunks crowded out the Medicaid sources on three questions.
-        q_progs = _question_programs(query)
-        scope_away_from_ssi = bool(q_progs & {"Medicaid", "SNAP", "MAGI"}) \
-            and "SSI/SSDI" not in q_progs
-        # v13 source ranking v2 inputs: is the question Indiana-scoped?
-        indiana_scoped = "indiana" in q_low or "hoosier" in q_low
-        for h in hits:
-            lift = 0.0
-            if money_q and _has_figure(h["excerpt"]):
-                lift += 0.05
-            if duration_q and _has_duration(h["excerpt"]):
-                lift += 0.05
-            if scope_away_from_ssi and \
-                    _classify_hit(h)[0] == "SSI/SSDI":
-                lift -= 0.05
-            # v11 recency: dated material (bulletins, current-year
-            # standards) gets a small lift scaled by its year; undated
-            # chunks are neutral. Sized under the figure boosts so it
-            # breaks ties rather than overriding relevance.
-            yr = _hit_year(h)
-            if yr and yr >= 2024:
-                lift += min(0.012, 0.003 * (yr - 2023))
-            # v13 source ranking v2: prefer the source class that owns
-            # the rule. On Indiana-scoped questions, Indiana-state
-            # sources beat federal generic pages (P1 failed on the
-            # federal $3,000 figure while Indiana $5,000 chunks sat in
-            # the pool). Manuals, POMS, regulations and waiver
-            # applications beat program-administration pages, and
-            # payee/provider-admin pages are demoted (their narrower
-            # figures captured Q5 across four graded runs). Modest,
-            # same scale as the v11 lifts.
-            _p13, dtype13, _y13 = _hit_tags(h)
-            if indiana_scoped and _is_indiana_source(h):
-                lift += 0.03
-            if dtype13 in ("POMS operations manual", "policy manual",
-                           "regulation", "waiver application"):
-                lift += 0.02
-            # v22: the -0.03 title/URL demotion for payee/provider
-            # pages that stood here is DELETED, with the v20.2
-            # module exemption it needed: no title-word demotions
-            # remain anywhere in the ranking (consult design).
-            if lift:
-                h["_fused"] = h.get("_fused", 0) + lift
-                # Debug: the total v11/v13 boost-loop lift rides out on
-                # the hit as rank_lift (set in the strip step below).
-                h["_rank_lift"] = h.get("_rank_lift", 0.0) + lift
-
-    # explainer weight (v5): on SSI/SSDI rule questions, SSA's own
-    # explainer pages (the Understanding SSI series, SSI spotlights)
-    # state the general rule; program-administration pages (payee,
-    # provider operations) state narrower variants that mislead when
-    # blended (the backpay six-vs-nine-months blend in retest v4).
-    ssi_rule_q = bool(q_tokens & {"ssi", "ssdi", "backpay", "retroactive",
-                                  "supplemental", "lump"}) \
-        or "lump sum" in q_low or "back pay" in q_low
-    if ssi_rule_q:
-        for h in hits:
-            u = h["url"].lower()
-            t = h["title"].lower()
-            if ("ssa.gov/ssi/" in u or "understanding supplemental" in t
-                    or "ssi spotlight" in t or t.startswith("ssi ")):
-                h["_fused"] = h.get("_fused", 0) + 0.04
-
-    # --- ranking tuning (2026-10-12) -------------------------------------
-    # Title match: documents titled with the query's own terms are usually
-    # the canonical source (e.g. "DFR Policy Manual Ch 2600: Resources" for
-    # a resources question). Small bonus on the RRF scale (~0.017-0.033).
-    q_terms = keywords(query)
-    q_phrases = [" ".join(q_terms[i:i + 2]) for i in range(len(q_terms) - 1)]
-    query_has_state = any(s in query.lower() for s in US_STATES)
-    for h in hits:
-        t = h["title"].lower()
-        bonus = 0.004 * sum(1 for term in set(q_terms) if term in t)
-        if any(p in t for p in q_phrases):
-            bonus += 0.010
-        # Generic question (no state named): demote state-specific titles
-        # so national/general explainers are not buried under dozens of
-        # near-identical state documents (the Section 1135 problem).
-        if not query_has_state and any(s in t for s in US_STATES):
-            bonus -= 0.006
-        h["_fused"] = h.get("_fused", 0) + bonus
-
-    hits.sort(key=lambda h: -h.get("_fused", 0))
-    # Diversity: at most 2 hits per title family AND at most 2 chunks
-    # from the same document URL, so one document family (1135 state
-    # variants, disaster-relief duplicates) or one document's chunks
-    # cannot crowd out every other source in the pool or the final list.
-    diverse, fam_counts, url_counts = [], {}, {}
-    for h in hits:
-        fam = _title_family(h["title"])
-        if fam_counts.get(fam, 0) >= 2 or url_counts.get(h["url"], 0) >= 2:
-            continue
-        fam_counts[fam] = fam_counts.get(fam, 0) + 1
-        url_counts[h["url"]] = url_counts.get(h["url"], 0) + 1
-        diverse.append(h)
-    hits = diverse
-    # v21 (WS1a, trigger i): the exact-term rescue pass. The
-    # pool is WEAK when at least one of the question's rare
-    # terms has ZERO coverage in the rerank window's chunks
-    # (calibrated on the two failures: the divisor pool held
-    # the key noun in 0 of 16 candidates; the Vision module
-    # never entered the eyeglasses pool at all). Injected
-    # chunks ride at the head of the pool with fused scores
-    # just above the window top, so the rerank judges them
-    # instead of never seeing them; the best one is also
-    # pinned after rerank (below).
-    rescue_hits = []
-    if boosts:
-        _rterms = _rare_terms(query)
-        if _rterms:
-            _win_text = " ".join(
-                ((h.get("title") or "") + " "
-                 + (h.get("excerpt") or "")).lower()
-                for h in hits[:max(12, n * 2)])
-            _uncovered = [t for t in _rterms
-                          if t not in _win_text]
-            _strong = [t for t in _uncovered
-                       if t.count(" ") <= 1]
-            _tri = [t for t in _uncovered if t.count(" ") == 2]
-            # v21 calibration (the operator, 2026-10-14):
-            # the trigger fires on SUSPICION of a weak pool,
-            # not only on proof — accuracy over shaving
-            # seconds, with the per-class unit budgets and
-            # the leg-shedding discipline as the outer
-            # fence. A flat low fused band is the divisor
-            # pool's shape (16 candidates, fused
-            # 0.0602-0.0700, nothing standing out): when the
-            # window's top scores sit within 0.02 of each
-            # other and none clears 0.09, the pool counts
-            # as weak even if every term is nominally
-            # "covered" somewhere in it.
-            _top_scores = sorted(
-                (h.get("_fused", 0) for h in hits[:8]),
-                reverse=True)
-            _flat = (len(_top_scores) >= 4
-                     and _top_scores[0] <= 0.09
-                     and (_top_scores[0] - _top_scores[-1])
-                     <= 0.02)
-            if _strong or len(_tri) >= 2 or _flat:
-                if not _uncovered:
-                    _uncovered = ["(flat fused band)"]
-                # No exclusion set here: the rescue's best
-                # chunks are PROMOTED to the head (below),
-                # whether they are new to the pool or already
-                # sat in it below the selection cut. Excluding
-                # pooled chunks misfires: a chunk can be in
-                # the fused selection when the rescue runs and
-                # still be pushed out of the final list by the
-                # pin blocks that run after it (observed on
-                # the QIT anchor: IHCPPM 2615.75.15, keyword
-                # rank 0, in the window, never served).
-                _sel_keys = {(h["url"], h["excerpt"][:60])
-                             for h in hits[:n]}
-                rescue_hits, _ = _rescue_search(
-                    query, corpus, exclude_keys=(), limit=4)
-                if rescue_hits:
-                    _top_fused = max(
-                        (h.get("_fused", 0) for h in hits),
-                        default=0.0)
-                    _by_key = {(h["url"], h["excerpt"][:60]): h
-                               for h in hits}
-                    _inj, _inj_keys = [], set()
-                    for _rh in rescue_hits:
-                        _k = (_rh["url"], _rh["excerpt"][:60])
-                        _inj.append(_by_key.get(_k, _rh))
-                        _inj_keys.add(_k)
-                    for _ri, _ih in enumerate(_inj):
-                        _ih["_fused"] = (_top_fused + 0.02
-                                         - _ri * 0.001)
-                    hits = _inj + [
-                        h for h in hits
-                        if (h["url"], h["excerpt"][:60])
-                        not in _inj_keys]
-                    rescue_hits = _inj
-                    _note_rescue(
-                        _uncovered,
-                        sum(1 for h in _inj
-                            if (h["url"], h["excerpt"][:60])
-                            not in _sel_keys),
-                        "weak_pool", query)
-    # v20.2 (observability): snapshot the fused scores and
-    # the per-list ranks BEFORE the strip below erases
-    # _fused; the pool record is assembled once the final
-    # selection exists (after rerank + bridge pins) and
-    # stashed on the ask context for the ask record.
-    _pool_ranks = {}
-    for _lname, _lst in (("kw", kw_hits), ("vec", vec_hits),
-                         ("kw2", kw2_hits), ("br", bridge_hits),
-                         ("rg", registry_hits),
-                         ("rs", rescue_hits)):
-        _rm = {}
-        for _r, _hh in enumerate(_lst):
-            _rm.setdefault((_hh["url"], _hh["excerpt"][:60]), _r)
-        _pool_ranks[_lname] = _rm
-    _pool_fused = {(h["url"], h["excerpt"][:60]):
-                   round(h.get("_fused", 0.0), 4) for h in hits}
-
-    # strip internal keys
-    for h in hits:
-        h.pop("_fused", None)
-        h.pop("_vscore", None)
-        _rl = h.pop("_rank_lift", 0.0)
-        if _rl:
-            h["rank_lift"] = round(_rl, 3)
-    _retr_note("fusion", time.monotonic() - _t_fusion)
-    # LLM rerank: the candidate window scales with the requested result
-    # count (top 12 for a 6-result search, top 24 for a 12-excerpt
-    # narrative ask), then rerank down to n.
-    candidates = hits[:max(12, n * 2)]
-    result = None
-    if use_rerank and RERANK_ENABLED and len(candidates) > n:
-        _t_seg = time.monotonic()
-        ranked = rerank_with_llm(query, candidates)
-        _retr_note("rerank", time.monotonic() - _t_seg)
-        if ranked:
-            result = ranked[:n]
-    if result is None:
-        result = hits[:n]
-
-    # v21 (WS1b + WS1a): registry pins (at most 2) and the
-    # rescue's best chunk (at most 1) join the result ahead of
-    # the rerank order, UNDER the bridge pins: the bridge block
-    # below re-fronts its own pins, so the served order is
-    # bridges, then registry, then rescue, then the reranked
-    # pool (overall pin cap 4 with the bridge cap of 3 is
-    # bounded by n itself on small result sets).
-    if boosts and result and (registry_tops or rescue_hits):
-        _xpins = []
-        for _eid, _top in registry_tops:
-            if len(_xpins) >= 2:
-                break
-            _k = (_top["url"], _top["excerpt"][:60])
-            _ex = next((h for h in result
-                        if (h["url"], h["excerpt"][:60]) == _k),
-                       None)
-            if _ex is None and sum(
-                    1 for h in result
-                    if h["url"] == _top["url"]) >= 2:
-                continue
-            _xpins.append(_ex if _ex is not None else
-                          {k: v for k, v in _top.items()
-                           if k not in ("_fused", "_vscore")})
-        if rescue_hits and len(_xpins) < 3:
-            _top = rescue_hits[0]
-            _k = (_top["url"], _top["excerpt"][:60])
-            if all((h["url"], h["excerpt"][:60]) != _k
-                   for h in _xpins):
-                _ex = next((h for h in result
-                            if (h["url"], h["excerpt"][:60])
-                            == _k), None)
-                if _ex is not None or sum(
-                        1 for h in result
-                        if h["url"] == _top["url"]) < 2:
-                    _xpins.append(
-                        _ex if _ex is not None else
-                        {k: v for k, v in _top.items()
-                         if k not in ("_fused", "_vscore")})
-        if _xpins:
-            _xk = {(h["url"], h["excerpt"][:60]) for h in _xpins}
-            _rest = [h for h in result
-                     if (h["url"], h["excerpt"][:60]) not in _xk]
-            result = (_xpins + _rest)[:n]
-
-    # guaranteed bridge slots (v7; pins moved to the FRONT in v8): when
-    # a topic bridge fired, its top chunk is the operative rule
-    # statement the bridge exists to find. Pin up to 2 of them at the
-    # head of the excerpt list (the answering model weighs early
-    # excerpts most), moving them up if they are already present,
-    # respecting the 2-per-URL cap.
-    if boosts and bridge_tops and result:
-        # v11 fix round: allocate pins per bridge first (one each, up
-        # to 3), then fill any remaining slots with second pins. The
-        # old global cap of 2 let the spouse bridge's two phrases eat
-        # every slot and starved the difficulty-of-care pin entirely.
-        ordered, seen_bridges = [], set()
-        for bidx, top in bridge_tops:
-            if bidx not in seen_bridges:
-                seen_bridges.add(bidx)
-                ordered.append(top)
-        for bidx, top in bridge_tops:
-            if top not in ordered:
-                ordered.append(top)
-        pins = []
-        for top in ordered:
-            if len(pins) >= 3:
-                break
-            key = (top["url"], top["excerpt"][:60])
-            existing = next((h for h in result
-                             if (h["url"], h["excerpt"][:60]) == key),
-                            None)
-            if existing is None and \
-                    sum(1 for h in result if h["url"] == top["url"]) >= 2:
-                continue
-            pins.append(existing if existing is not None else
-                        {k: v for k, v in top.items()
-                         if k not in ("_fused", "_vscore")})
-        if pins:
-            pin_keys = {(h["url"], h["excerpt"][:60]) for h in pins}
-            rest = [h for h in result
-                    if (h["url"], h["excerpt"][:60]) not in pin_keys]
-            result = (pins + rest)[:n]
-
-    # v11: tag every returned hit with its program and document type;
-    # the ask functions label excerpts with these for the model.
-    for h in result:
-        prog, dtype = _classify_hit(h)
-        h["program"] = prog
-        h["dtype"] = dtype
-
-    # v20.2 (observability): the pool record — every chunk
-    # in the rerank window (the diversity-filtered fused
-    # top), plus any bridge pin selected from outside it,
-    # with its fused score, its rank in each source list
-    # (kw = keyword, vec = vector, kw2 = rewrite-keyword,
-    # br = bridge; null = absent from that list), whether
-    # it sat in the rerank window (w), and its final
-    # position in the served result (sel, null = not
-    # served). Stashed on the ask context for the record.
-    if boosts:
-        _corp = corpus if corpus is not None else CORPUS_IN
-        _win = {(h["url"], h["excerpt"][:60]) for h in candidates}
-        _sel = {(h["url"], h["excerpt"][:60]): i
-                for i, h in enumerate(result)}
-        _pool, _seen = [], set()
-        for h in list(candidates) + [h for h in result
-                                     if (h["url"],
-                                         h["excerpt"][:60])
-                                     not in _win]:
-            _k = (h["url"], h["excerpt"][:60])
-            if _k in _seen:
-                continue
-            _seen.add(_k)
-            _pool.append({
-                "t": (h.get("title") or "")[:70], "u": h["url"],
-                "s": _pool_fused.get(_k, 0.0),
-                "kw": _pool_ranks["kw"].get(_k),
-                "vec": _pool_ranks["vec"].get(_k),
-                "kw2": _pool_ranks["kw2"].get(_k),
-                "br": _pool_ranks["br"].get(_k),
-                "rg": _pool_ranks["rg"].get(_k),
-                "rs": _pool_ranks["rs"].get(_k),
-                "w": _k in _win, "sel": _sel.get(_k)})
-            if len(_pool) >= 28:
-                break
-        _retr_pool_note({
-            "q": query[:80], "n": n,
-            "corp": ("in" if _corp is CORPUS_IN else
-                     "federal" if _corp is CORPUS_FED else
-                     "both"),
-            "pool": _pool})
-
-    _cache_put(_SEARCH_CACHE, cache_key, result)
-    return [dict(h) for h in result]  # v18: copies, see above
 
 def rerank_with_llm(query, hits):
     """Rerank search hits by relevance to the query (v15.1: NIM
@@ -5560,98 +4975,21 @@ def _flash_spend():
 # unavailable for that ask), timeouts sized per seat (the
 # judge answers in seconds warm; a cold flagship drafter took
 # ~51s for its first reply in the pre-build catalog smoke).
-THIRD_JUDGE_PROVIDERS = {
-    "nvidia": {
-        "base_url": "https://integrate.api.nvidia.com/v1",
-        "model": "nvidia/nemotron-3-super-120b-a12b",
-        "key_file": "nvidia_key.txt",
-        "key_env": "NVIDIA_API_KEY",
-    },
-    "groq": {
-        "base_url": "https://api.groq.com/openai/v1",
-        "model": "openai/gpt-oss-120b",
-        "key_file": "groq_key.txt",
-        "key_env": "GROQ_API_KEY",
-    },
-    "cerebras": {
-        "base_url": "https://api.cerebras.ai/v1",
-        "model": "gpt-oss-120b",
-        "key_file": "cerebras_key.txt",
-        "key_env": "CEREBRAS_API_KEY",
-    },
-}
-THIRD_JUDGE_PROVIDER = "nvidia"  # <-- the one-line provider flip
-_THIRD_CFG = THIRD_JUDGE_PROVIDERS[THIRD_JUDGE_PROVIDER]
-THIRD_JUDGE_BASE_URL = _THIRD_CFG["base_url"]
-THIRD_JUDGE_MODEL = _THIRD_CFG["model"]
-THIRD_JUDGE_KEY_FILE = _THIRD_CFG["key_file"]
-THIRD_JUDGE_KEY_ENV = _THIRD_CFG["key_env"]
-THIRD_JUDGE_TIMEOUT = 30  # v19 (§G3): was 60; a stalled judge
-# provider now costs at most ~30s before the seat fails over.
-_THIRD_STATE = {"date": "", "count": 0}
-_THIRD_LOCK = threading.Lock()
+# v23 (WS2): the third-judge provider block is GONE. The judge
+# panel is two seats (see SEATS below): Gemini 3.5 Flash Lite
+# and Qwen3.8-27B on Groq, with a paid relief bench behind
+# seat 2. No NIM model sits on any timed path.
+JUDGE_LEG_TIMEOUT = 30  # v19 (§G3): was 60; a stalled judge
+# leg now costs at most ~30s before the seat fails over.
 
-# v15: the NIM drafting seat (plan item 2 + speedup S4). "model"
-# drafts hard questions and generates redrafts; "simple_model"
-# drafts simple questions. Ids verified against the live NIM
-# catalog at build time (80 models, 2026-10-13): kimi-k3 and
-# nemotron-3.5-lightning-30b-a3b both present and answering.
-DRAFTER_PROVIDERS = {
-    "nvidia": {
-        "base_url": "https://integrate.api.nvidia.com/v1",
-        "model": "moonshotai/kimi-k3",
-        "simple_model": "nvidia/nemotron-3.5-lightning-30b-a3b",
-        # v16: the drafting fallback key is key SLOT 2 (the
-        # seats pass their slot's key explicitly; these
-        # constants are only the no-seat fallback).
-        "key_file": "nvidia_key2.txt",
-        "key_env": "NVIDIA_API_KEY2",
-    },
-    "groq": {
-        "base_url": "https://api.groq.com/openai/v1",
-        "model": "openai/gpt-oss-120b",
-        "simple_model": "openai/gpt-oss-20b",
-        "key_file": "groq_key.txt",
-        "key_env": "GROQ_API_KEY",
-    },
-    "cerebras": {
-        "base_url": "https://api.cerebras.ai/v1",
-        "model": "gpt-oss-120b",
-        "simple_model": "gpt-oss-20b",
-        "key_file": "cerebras_key.txt",
-        "key_env": "CEREBRAS_API_KEY",
-    },
-}
-DRAFTER_PROVIDER = "nvidia"  # <-- the one-line provider flip
-_DRAFT_CFG = DRAFTER_PROVIDERS[DRAFTER_PROVIDER]
-DRAFTER_BASE_URL = _DRAFT_CFG["base_url"]
-DRAFTER_MODEL = _DRAFT_CFG["model"]
-DRAFTER_SIMPLE_MODEL = _DRAFT_CFG["simple_model"]
-DRAFTER_KEY_FILE = _DRAFT_CFG["key_file"]
-DRAFTER_KEY_ENV = _DRAFT_CFG["key_env"]
-DRAFTER_TIMEOUT = 240  # cold flagship drafts are slow (see header)
-# v20 (acceptance discipline): NIM drafting legs get a tight
-# per-call bound (~60s) so the free-first chain fits the
-# per-class unit budgets; DRAFTER_TIMEOUT remains the
-# unbounded-retry default for non-seat callers.
-NIM_DRAFTER_TIMEOUT = 60
-# v15.1 (see V151_AUDIT.md): two NIM seats that keep the local
-# models cold. The divergence oracle (item 4) and the emergency
-# draft seat both run on the NIM judge-seat model (Nemotron
-# Super: strong, fast warm, and independent of the Kimi
-# drafter). In v15.0 the oracle drafted on the local 14B, and a
-# failed Kimi draft fell straight to local generation; now a
-# single slow or dead NIM seat degrades to another NIM seat,
-# and the local models generate only when NIM as a whole
-# cannot run (or the caller explicitly picked a local model).
-DIVERGENCE_ORACLE_MODEL = THIRD_JUDGE_MODEL
-EMERGENCY_DRAFT_MODEL = THIRD_JUDGE_MODEL
-# v16 supersedes both constants' code paths (kept for the
-# record): the divergence oracle drafts on the hard_draft
-# seat's runner-up family (see _diverge_model), and the
-# emergency-draft role is the drafting seats' measured
-# failover inside _generate. Neither constant is referenced
-# by v16 code paths.
+# v23 (WS3.1): the NIM drafter provider block is GONE, with
+# the divergence-oracle and emergency-draft constants that
+# rode on it. Drafting is a 3-tier ladder (see _generate):
+# free Groq/Gemini primaries, paid xAI/OpenRouter, local
+# qwen3.5:9b. The nominal model names _draft_choice passes
+# are the ladder's free primary ids (GROQ_HARD_MODEL /
+# GROQ_SIMPLE_MODEL, defined in the provider block below);
+# the ladder itself owns the actual choice.
 _NIM_KEYS = {}
 
 
@@ -5672,91 +5010,34 @@ def _nim_key_for(key_env, key_file):
     return _NIM_KEYS[cache_key]
 
 
-def _third_judge_key():
-    """The active judge provider's key (see _nim_key_for)."""
-    return _nim_key_for(THIRD_JUDGE_KEY_ENV, THIRD_JUDGE_KEY_FILE)
-
-
-def _drafter_key():
-    """The active drafter provider's key (see _nim_key_for)."""
-    return _nim_key_for(DRAFTER_KEY_ENV, DRAFTER_KEY_FILE)
-
-
-def _third_calls_today():
-    with _THIRD_LOCK:
-        today = time.strftime("%Y-%m-%d")
-        if _THIRD_STATE["date"] != today:
-            _THIRD_STATE["date"] = today
-            _THIRD_STATE["count"] = 0
-        return _THIRD_STATE["count"]
-
-
-def _third_count_one():
-    """Count one completed third-judge call (soft telemetry for the
-    free tier's daily token budget; in memory, resets on restart,
-    like the Flash counter)."""
-    with _THIRD_LOCK:
-        today = time.strftime("%Y-%m-%d")
-        if _THIRD_STATE["date"] != today:
-            _THIRD_STATE["date"] = today
-            _THIRD_STATE["count"] = 0
-        _THIRD_STATE["count"] += 1
-
-
 # --- v16: measured seats (item 1) + branch-out (item 7) --------------
-# Every NIM job (hard drafting, simple drafting, the two NIM judge
-# seats) is a SEAT: an ordered candidate list of (model, key slot)
-# assigned by the build-time bake-off (see v16/STATUS.md for the
-# table), a latency budget, and a failover order (the bake-off
-# runner-up order). Three key slots pin seats to separate key
-# files so parallel seats stop sharing one key's rate ceiling.
-# Runtime seat health benches a seat on repeated timeouts or a
-# rolling median over budget; the job fails over to its next
-# measured candidate. Seats are never re-shopped per ask.
+# v23 (WS2/WS3.1): the seat machinery now serves ONE job, the
+# judge seat-2 verdict seat (see SEATS below). A SEAT is an
+# ordered candidate list of (model, key slot), a latency
+# budget, and a failover order. Runtime seat health benches a
+# candidate on repeated timeouts or a rolling median over
+# budget; the job fails over to its next candidate. Seats are
+# never re-shopped per ask.
 SEAT_SLOTS = {
-    # v17.1: slot 0 is the OpenRouter pseudo-slot. Candidates
-    # pinned to it are served by _or_text (the v17 OpenRouter
-    # path: usage reporting, deny routing, cost ledgering)
-    # instead of a NIM key. _slot_has_key gates the slot on
+    # v23 (WS2): only the three pseudo-slots remain. Slot 0 is
+    # the OpenRouter pseudo-slot: candidates pinned to it are
+    # served by _or_text (usage reporting, deny routing, cost
+    # ledgering), and _slot_has_key gates the slot on
     # _or_available(), so a missing key or a tripped daily cap
-    # benches every OpenRouter candidate at once and the seat
-    # fails over to its NIM candidates, exactly as a keyless
-    # NIM slot degrades instead of burning retries.
+    # benches every OpenRouter candidate at once. Slot 4 is
+    # xAI (an ordinary paid provider), slot 5 is Groq (free
+    # tier, daily-guarded). The NIM key slots (1-3) and the
+    # rationed Flash rung (slot 6) are DELETED: no NIM model
+    # and no Flash rung sits on any timed path in v23.
     0: ("OPENROUTER_API_KEY", "openrouter_key.txt"),
-    1: ("NVIDIA_API_KEY", "nvidia_key.txt"),
-    2: ("NVIDIA_API_KEY2", "nvidia_key2.txt"),
-    3: ("NVIDIA_API_KEY3", "nvidia_key3.txt"),
-    # v20: two more pseudo-slots in the same pattern. Slot 4
-    # is xAI (an ordinary paid provider; see the v20 provider
-    # block below), slot 5 is Groq (free tier, daily-guarded).
-    # A missing key file leaves the slot dormant, exactly as
-    # the NIM slots have always behaved.
     4: ("XAI_API_KEY", "xai_key.txt"),
     5: ("GROQ_API_KEY", "groq_key.txt"),
 }
-SEAT_BASE_URL = "https://integrate.api.nvidia.com/v1"
-# v20: per-slot base URLs + provider names. Slots 1-3 are
-# the NIM slots (SEAT_BASE_URL); slot 0 never reaches the
-# generic transport (it is served by _or_text); slots 4/5
-# are served by _xai_text / _groq_text, which wrap the same
-# OpenAI-compatible client.
-SLOT_BASE_URLS = {1: SEAT_BASE_URL, 2: SEAT_BASE_URL,
-                  3: SEAT_BASE_URL,
-                  4: "https://api.x.ai/v1",
-                  5: "https://api.groq.com/openai/v1"}
-# Slot 6 is the rationed Gemini 3.8 Flash mid-ladder rung
-# (v20 layer model): no key file and no base URL — it is
-# served by _gemini_text under its own sub-cap counter.
-_SLOT_PROVIDERS = {0: "openrouter", 4: "xai", 5: "groq",
-                  6: "gemini"}
-
-
-def _slot_base_url(slot):
-    return SLOT_BASE_URLS.get(slot, SEAT_BASE_URL)
+_SLOT_PROVIDERS = {0: "openrouter", 4: "xai", 5: "groq"}
 
 
 def _slot_provider_name(slot):
-    return _SLOT_PROVIDERS.get(slot, "nim")
+    return _SLOT_PROVIDERS.get(slot, "unknown")
 
 
 # --- v20: the xAI + Groq provider block ------------------------------
@@ -5850,148 +5131,37 @@ _XAI_CREDIT_FILE = "xai_spend.json"
 _XAI_CREDIT_LOCK = threading.Lock()
 _XAI_CREDIT_STATE = {"date": "", "credit": 0.0,
                      "broken": False, "loaded": False}
-# Candidate lists are in bake-off finishing order (winner first).
-# These assignments are written from the bake-off table in
-# v16/STATUS.md; if this block and the table ever disagree, the
-# table is the record and this block is the bug.
-# v20 note: the drafting seats below are now the NIM BENCH
-# layer of the drafting chains. The primaries live in
-# _generate's explicit chain (hard: Groq GPT-OSS-120B ->
-# xAI Grok 4.7 -> OpenRouter GPT-OSS-120B -> this bench ->
-# local; simple: Groq GPT-OSS-20B -> OpenRouter -> this
-# bench, whose gpt-oss-20b head is the NIM simple primary).
-# The judge seats carry their full chains here, as before.
-# v18 (§B, pass 2 item B): judge seat 2 is a Qwen-family
-# NON-THINKING instruct. The originally planned GPT-OSS-20B was
-# rejected in the pass-2 challenge round: on simple questions
-# it is the identical model that drafted the answer and ran
-# the retrieval utilities, so it would have judged its own
-# output, and its price edge is noise under a $2/day ceiling.
-# The slug is a single named constant and a PLACEHOLDER pending
-# pre-battery verification of the exact OpenRouter slug and
-# price (a live read, forbidden during the offline build); the
-# seat passes the §E replay-calibration gate before it judges
-# live traffic (PLAN §F).
-JUDGE_SEAT2_MODEL = "qwen/qwen3-235b-a22b-2507"
-JUDGE_SEAT2_MAX_TOKENS = 1500  # non-thinking: no reasoning burn
-# Seat 2's failover: a fifth-family OpenRouter open-weight
-# model (placeholder slug, same pre-battery verification),
-# then the NIM Nemotron Ultra lane.
-SEAT2_FAILOVER_MODEL = "meta-llama/llama-4-maverick"
+# Candidate lists are in chain order (primary first).
+# v23 (WS2, the judge switch, James's proposal 2026-10-15):
+# the panel is TWO seats. Seat 1 is Gemini 3.5 Flash Lite
+# (extraction + verdicts; served by _primary_judgment's "lite"
+# engine, not by this seat machinery). Seat 2, the verdict
+# seat below, is Qwen3.8-27B on the Groq free tier. Behind
+# seat 2 sits the paid RELIEF BENCH: xAI Grok 4.7, then the
+# OpenRouter relief model. Relief is reached ONLY when the
+# free seat is down, quota'd, benched, or timed out (the
+# layer rule in _candidate_layer plus seat failover), and
+# every relief call is ledger-bounded exactly as paid calls
+# have always been ($10/day, $1/ask). Every candidate is a
+# DISTINCT model family (qwen / xai / deepseek), and none is
+# the seat-1 family (google): the two-distinct-family rule
+# for the full verified badge holds for every combination.
+# The v18-v22 judge seats (judge_nim1, judge_nim2), the NIM
+# drafting benches (hard_draft, simple_draft), the Groq
+# GPT-OSS judge leg, and the rationed Flash rung are all
+# DELETED from the timed paths.
+# The OpenRouter relief model: a strong-cheap DeepSeek on
+# the V4-Pro tier. The slug is a single named constant,
+# pending the deploy-stage live catalog check (the v18
+# seat-2 placeholder precedent); if the catalog disagrees,
+# this one line changes.
+OR_RELIEF_MODEL = "deepseek/deepseek-v4-pro"
 
 SEATS = {
-    "hard_draft": {
-        # v20: the bench order follows the Layer-2 chain spec
-        # (Kimi K3, then GLM-5.3, lead); Nemotron Ultra and
-        # DeepSeek V4.1-Flash remain as deeper free depth.
-        "candidates": [("moonshotai/kimi-k3", 2),
-                       ("z-ai/glm-5.3", 2),
-                       ("nvidia/nemotron-3-ultra-550b-a55b", 2),
-                       ("deepseek-ai/deepseek-v4.1-flash", 2)],
-        "budget_median": 30.0, "budget_p95": 120.0},
-    "simple_draft": {
-        "candidates": [("openai/gpt-oss-20b", 2),
-                       ("z-ai/glm-5.3-flash", 2),
-                       ("nvidia/nemotron-3.5-lightning-30b-a3b", 2)],
-        "budget_median": 30.0, "budget_p95": 120.0},
-    "judge_nim1": {
-        # v17.1 (operator ruling, 2026-10-14): the paid judges
-        # lead this seat — OpenRouter DeepSeek V3.1, then
-        # OpenRouter Qwen3-32B, with NIM Nemotron Super kept
-        # as the free failover (the seat's old runner-ups
-        # served in judge_nim2's chain until v17.2 moved
-        # that seat to OpenRouter too). Evidence is the
-        # coordinator's 10-claim Miller-packet probe, accepted
-        # by the operator in place of a battery run: DeepSeek 10/10
-        # verdicts at $0.000573/call (31s), Qwen 10/10 at
-        # $0.000297 (23s), Super 8/10 (36s, one empty first
-        # attempt). The median budget rises from 20s to 45s
-        # because it was written for the old seat: at 20s the
-        # bench rule would bench the new primaries on their
-        # own measured latency and silently hand the seat
-        # back to the failover.
-        # v20 (seat B, DeepSeek family; final form under
-        # the operator's layer model, 2026-10-14): NIM DeepSeek
-        # V4.1-Flash is the FREE primary (id verified in the
-        # live NIM catalog pull of 2026-10-14, where it is
-        # deepseek-ai/deepseek-v4.1-flash; it already serves
-        # on the hard_draft bench), then NIM Nemotron Super
-        # (the rest of the free layer), then the rationed
-        # Gemini 3.8 Flash mid-ladder rung (slot 6, Layer 1
-        # rules: sub-cap FLASH_MID_DAILY_CAP, never a badge
-        # stand-in for this seat's family — the panel records
-        # it as-served, a google voice), then the proven
-        # V3.1 on OpenRouter as the prepaid fallover. All
-        # three judge primaries are free (Lite via Google,
-        # V4.1-Flash via NIM, Qwen3.8-27B via Groq). NOTE:
-        # V4.1-Flash is UNGRADED as a primary judge — Stage 3
-        # grading compares this panel against the v19 panel
-        # (V3.1 primary) on the anchors before the free-first
-        # panel is trusted, and this candidate order stays
-        # config-reversible until then (v20/STATUS.md).
-        "candidates": [("deepseek-ai/deepseek-v4.1-flash", 2),
-                       ("nvidia/nemotron-3-super-120b-a12b", 1),
-                       (FLASH_MODEL, 6),
-                       ("deepseek/deepseek-chat-v3.1", 0)],
-        "budget_median": 45.0, "budget_p95": None},
-    "judge_nim2": {
-        # v17.2 (operator ruling, 2026-10-14): this seat goes
-        # paid too, mirroring v17.1's judge_nim1 swap. The
-        # v17.1 single test isolated this seat as the
-        # remaining drag: Ultra benched on timeouts, its
-        # DeepSeek-flash call ~90s and GLM calls ~120s on the
-        # free tier (judge_ms 363s of that ask's total), while
-        # the new OpenRouter seat ran a 12.4s median.
-        # OpenRouter Qwen3-32B leads: judge_nim1's primary is
-        # DeepSeek, so the two paid seats lead on different
-        # model families and the standing panel is Gemini
-        # Lite + DeepSeek + Qwen when all primaries serve.
-        # OpenRouter DeepSeek V3.1 is second; NIM Nemotron
-        # Ultra stays as free failover depth on slot 3. The
-        # slot-0 candidates ride the same OpenRouter
-        # pseudo-slot as judge_nim1's: a daily-cap trip
-        # benches both at once and the seat falls to Ultra.
-        # The median budget rises from 20s to 45s, mirroring
-        # judge_nim1's v17.1 adjustment: the accepted probe
-        # measured 23s (Qwen) and 31s (DeepSeek) per verdict
-        # call, so at 20s the bench rule would bench the new
-        # primaries on their own measured latency and
-        # silently hand the seat back to the failover.
-        # v18 (§B): seat 2's primary is now the Qwen-family
-        # non-thinking instruct named by JUDGE_SEAT2_MODEL
-        # (GPT-OSS-20B was rejected in pass 2: it drafts and
-        # runs utilities on simple asks, so it would judge its
-        # own output). Qwen3-32B is OUT of both judge chains:
-        # it stays a drafting/utility candidate only. Failover
-        # is a fifth-family OpenRouter model, then NIM Ultra.
-        # v20 (seat C, Alibaba family; final form under
-        # the operator's layer model, 2026-10-14): the Groq free
-        # tier leads with Qwen3.8-27B (GROQ_QWEN_MODEL; id
-        # verified on Groq's official models page AND in the
-        # live account catalog pull, both 2026-10-14 — a
-        # preview model, so this chain's depth is the
-        # protection), then the rationed Gemini 3.8 Flash
-        # mid-ladder rung (slot 6, Layer 1 rules), then the
-        # v19 primary — the proven Qwen3-235B instruct on
-        # OpenRouter — as the prepaid fallover.
-        # v20.1 (fix 1, operator approval 2026-10-14): the
-        # v19 tail is RESTORED behind the 235B, for depth
-        # and for the Meta-family tail voice: NIM Nemotron
-        # Ultra — the v19 seat's own Ultra entry,
-        # nvidia/nemotron-3-ultra-550b-a55b on key slot 3 —
-        # listed ahead of the paid legs per the layer model,
-        # then SEAT2_FAILOVER_MODEL (Llama-4-Maverick,
-        # OpenRouter). The first v20 pass dropped the tail
-        # because the concrete chain in the operator's layer
-        # directive ended at the 235B; both models remained
-        # in the file throughout (SEAT2_FAILOVER_MODEL
-        # stayed defined and priced; Ultra still serves the
-        # hard_draft bench), so the restore is config-only.
+    "judge_seat2": {
         "candidates": [(GROQ_QWEN_MODEL, 5),
-                       (FLASH_MODEL, 6),
-                       ("nvidia/nemotron-3-ultra-550b-a55b", 3),
-                       (JUDGE_SEAT2_MODEL, 0),
-                       (SEAT2_FAILOVER_MODEL, 0)],
+                       (XAI_HARD_MODEL, 4),
+                       (OR_RELIEF_MODEL, 0)],
         "budget_median": 45.0, "budget_p95": None},
 }
 SEAT_BENCH_COOLDOWN_S = 600
@@ -6028,35 +5198,23 @@ def _slot_has_key(slot):
         # while the key is present AND the daily guard has
         # not shed Groq for the rest of the ledger day.
         return _groq_available()
-    if slot == 6:
-        # v20: the Flash mid-ladder rung counts as keyed
-        # only while its daily ration lasts (the Gemini
-        # client itself enforces spacing, backoff, and the
-        # model's hard 20/day cap at call time).
-        return _flash_mid_available()
-    key_env, key_file = SEAT_SLOTS[slot]
-    return _nim_key_for(key_env, key_file) is not None
+    # v23: no other slots exist (the NIM key slots and the
+    # Flash rung are deleted); an unknown slot is never keyed.
+    return False
 
 
 def _candidate_layer(model, slot):
-    """v20 (the operator's layer model, 2026-10-14): a seat
-    candidate's chain layer. Layer 0 = free + fast (Groq,
-    slot 5); Layer 2 = free + slow (the NIM slots); Layer 3 =
-    paid (OpenRouter slot 0, xAI slot 4). Gemini 3.8 Flash's
-    rationed mid-ladder rung (slot 6) is classed Layer 1
-    (free + strong + scarce) as a PROVIDER, but its chain
-    position is the mid-ladder one the concrete seat chains
-    assign it — after the seat's free primaries, ahead of
-    every paid fallover — so its ordering value sits between
-    the NIM layer and the paid layer. Ordering rule: layer
-    wins over latency; the v19 latency ordering applies
-    INSIDE a layer only."""
+    """The operator's layer model, v23 form: Layer 0 = free
+    (Groq, slot 5); Layer 3 = paid (OpenRouter slot 0, xAI
+    slot 4). The free-but-slow NIM layer and the rationed
+    Flash rung are deleted, so nothing sits between: a paid
+    relief candidate is reachable ONLY when the free seat is
+    down, quota'd, benched, or timed out, which is exactly
+    the relief bench's charter. Ordering rule: layer wins
+    over latency; latency ordering applies INSIDE a layer
+    only."""
     if slot == 5:
         return 0.0
-    if slot in (1, 2, 3):
-        return 2.0
-    if slot == 6:
-        return 2.5
     return 3.0
 
 
@@ -6099,15 +5257,23 @@ def _seat_pick(job, skip=(), exclude_families=()):
     skipped, or keyless. v18 (§C): `exclude_families` bars
     whole model FAMILIES (the drafting family; a family already
     holding another verdict seat), and a round's atomically
-    planned pick (see _plan_panel) leads when present: the
-    planned seat, once tried and failed, is NOT replaced
-    mid-round (a same-family substitute is how the Miller
-    panel silently became Lite + DeepSeek + DeepSeek)."""
+    planned pick (see _plan_panel) leads when present.
+    v23 (WS2): a planned pick that was tried and failed falls
+    through to the guarded scan below instead of ending the
+    seat. The v18-v22 rule (a planned seat is never replaced
+    mid-round) protected a TWO-seat stage 2 from same-family
+    double-voting; with one stage-2 seat the danger it named
+    is excluded structurally — the scan enforces the same
+    family exclusions (drafting family, seat 1's family,
+    every family that already served a verdict) — and the
+    seat's charter (the relief bench serves when the free
+    seat is down) requires the failover to reach relief
+    inside the call, not one round later."""
     now = time.monotonic()
     cands = SEATS[job]["candidates"]
     ctx = _ask_ctx()
     excl = set(exclude_families)
-    if job in ("judge_nim1", "judge_nim2"):
+    if job == "judge_seat2":
         for other, pick in ctx.panel_plan.items():
             if other != job:
                 excl.add(_model_family(pick[0]))
@@ -6115,8 +5281,8 @@ def _seat_pick(job, skip=(), exclude_families=()):
     if plan is not None:
         pmodel, pslot = plan
         if pmodel in skip:
-            return None, None, False
-        if _model_family(pmodel) not in excl \
+            pass  # v23: fall through to the guarded scan
+        elif _model_family(pmodel) not in excl \
                 and _slot_has_key(pslot):
             with _SEAT_LOCK:
                 benched = _seat_state(job, pmodel)[
@@ -6175,16 +5341,14 @@ def _seat_median(job, model):
 
 
 def _plan_panel():
-    """§C (pass 1 D4 + pass 2 item B5): plan the round's two
-    stage-2 verdict seats ATOMICALLY on the ask context, before
-    any verdict call starts. The seats get DISTINCT model
-    families; the drafting family and families that already
-    served verdicts this ask are excluded from both. Without
-    the plan, two concurrent picks could each see the other's
-    seat as empty and land on the same family. A seat that
-    cannot be filled with a distinct family stays unfilled:
-    the badge degrades via per-claim coverage instead of a
-    same-family substitute voting twice.
+    """§C (pass 1 D4 + pass 2 item B5): plan the round's
+    stage-2 verdict seat ATOMICALLY on the ask context, before
+    any verdict call starts. The seat gets a DISTINCT model
+    family; the drafting family, seat 1's family, and families
+    that already served verdicts this ask are excluded. A seat
+    that cannot be filled with a distinct family stays
+    unfilled: the badge degrades via per-claim coverage
+    instead of a same-family substitute voting twice.
     v19 (§G2): among the eligible candidates the seat leads
     with the FASTEST MEASURED one (rolling median latency);
     an unmeasured candidate is scored at 75% of the seat's
@@ -6192,17 +5356,22 @@ def _plan_panel():
     Ties keep the configured candidate order. Failover inside
     a call still walks the configured order (§C's rule that a
     planned seat is not replaced mid-round is unchanged).
-    v20: the plan key is (layer, latency, order) — the operator's
-    layer model wins over latency, and the §G2 latency
-    ordering applies inside a layer only, so a measured-fast
-    paid candidate can never lead a seat over a free one."""
+    v20: the plan key is (layer, latency, order) — the
+    operator's layer model wins over latency, and the §G2
+    latency ordering applies inside a layer only, so a paid
+    relief candidate can never lead the seat over the free
+    Qwen primary while the free seat can serve.
+    v23 (WS2): the panel has ONE stage-2 seat (judge_seat2);
+    the atomicity the plan protected (two concurrent picks
+    landing on one family) is now structural, and the plan's
+    remaining job is the family exclusion + layer discipline."""
     ctx = _ask_ctx()
     taken = set()
     if ctx.draft_family:
         taken.add(ctx.draft_family)
     for fams in ctx.verdict_families.values():
         taken |= set(fams)
-    for job in ("judge_nim1", "judge_nim2"):
+    for job in ("judge_seat2",):
         if job in ctx.panel_plan:
             taken.add(_model_family(ctx.panel_plan[job][0]))
             continue
@@ -6211,12 +5380,12 @@ def _plan_panel():
             fam = _model_family(model)
             if fam in taken or not _slot_has_key(slot):
                 continue
+            if _ask_judge_benched(job, model):
+                continue
             with _SEAT_LOCK:
                 if _seat_state(job, model)["benched_until"] \
                         > time.monotonic():
                     continue
-            if _ask_judge_benched(job, model):
-                continue
             med = _seat_median(job, model)
             score = med if med is not None \
                 else SEATS[job]["budget_median"] * 0.75
@@ -6303,20 +5472,19 @@ class _AskContext:
     __slots__ = ("cost", "events", "retr", "verdict_families",
                  "served_models", "panel_plan", "draft_family",
                  "lock", "unit_deadline", "retr_pools", "ask_id",
-                 "seat_skip_noted", "judge_benched")
+                 "seat_skip_noted", "phase_ms", "phase_open",
+                 "judge_benched")
 
     def __init__(self):
         self.cost = 0.0
         self.events = []
-        # v22.3 (fix 3): judge-seat candidates benched for the
-        # REST OF THE ASK after one full leg timeout, keyed
-        # (job, model) -> reason. The runtime seat-health rule
-        # needs two consecutive timeouts and cools down on a
-        # clock; inside one ask a single full 30s timeout is
-        # already the whole story (the 2026-10-15 CSRA ask
-        # burned 60.6s re-seating one dead judge candidate in
-        # consecutive rounds before the global rule benched
-        # it). Ask-scoped only: the next ask starts clean.
+        # v23 (WS1): per-phase wall seconds for the ask record
+        # (see _set_phase) + the currently open phase.
+        self.phase_ms = {}
+        self.phase_open = None
+        # v22.3 (fix 3, carried in at the v23 rebase): judge-seat
+        # candidates benched for the REST OF THE ASK after one
+        # full leg timeout, keyed (job, model) -> reason.
         self.judge_benched = {}
         # v21: the ask's id (set by _events_reset per ask;
         # gap-log rows carry it so a queue candidate joins
@@ -6604,18 +5772,17 @@ def _note_rescue(terms, injected, trigger, query=""):
 
 
 def _judge_seat_text(job, system, user):
-    """One verdict call on a judge seat, with seat health
-    and failover to the seat's next measured candidate.
-    Raises RuntimeError when every candidate fails (the caller
-    degrades per the panel rules). v17.1: a candidate on the
-    OpenRouter pseudo-slot (slot 0) is served by _or_text with
-    a 4000-token budget (both pinned judges are reasoning
-    models; the NIM seats keep their 2048). v18 (§C): the pick
-    honors the round's atomic panel plan and the family
-    exclusions (the drafting family never judges); seat 2's
-    non-thinking instruct gets JUDGE_SEAT2_MAX_TOKENS instead
-    of the reasoning budget, since there is no reasoning to
-    burn and the cap is what the reservation prices."""
+    """One verdict call on the judge_seat2 seat, with seat
+    health and failover to the seat's next candidate. Raises
+    RuntimeError when every candidate fails (the caller
+    degrades per the panel rules). v23 (WS2): the seat's
+    chain is the free Groq Qwen primary, then the paid relief
+    bench (xAI Grok 4.7, then the OpenRouter relief model);
+    relief is reached only on failover, and both relief
+    transports ledger their spend exactly as before. The
+    pick honors the round's atomic panel plan and the family
+    exclusions (the drafting family and seat 1's family never
+    judge)."""
     # v20: if this seat's chain carries a Groq candidate and
     # the daily guard has shed Groq, the shed is logged in
     # the ask record (the pick below silently skips the slot,
@@ -6643,7 +5810,7 @@ def _judge_seat_text(job, system, user):
         # v20: the leg runs clamped to the unit's remaining
         # budget; at the budget edge the seat sheds instead
         # of starting a call that cannot finish inside it.
-        _jt = _leg_timeout(THIRD_JUDGE_TIMEOUT)
+        _jt = _leg_timeout(JUDGE_LEG_TIMEOUT)
         # v21 (WS4a): the leg's hard deadline, threaded into
         # the transports so the retry inside a leg cannot
         # double this budget (see _nim_text).
@@ -6656,45 +5823,24 @@ def _judge_seat_text(job, system, user):
         t0 = time.monotonic()
         try:
             if slot == 0:
-                max_tokens = 4000
-                if job == "judge_nim2" \
-                        and model == JUDGE_SEAT2_MODEL:
-                    max_tokens = JUDGE_SEAT2_MAX_TOKENS
                 content = _or_text(
                     model, system, user, temperature=0,
-                    max_tokens=max_tokens,
+                    max_tokens=4000,
                     timeout=_jt, deadline=_leg_deadline)
             elif slot == 4:
-                # v20: xAI candidate (no v20 judge chain seats
-                # one by default; the dispatch keeps the slot
-                # config-reversible like the others).
                 content = _xai_text(
                     model, system, user, temperature=0,
                     max_tokens=4000,
                     timeout=_jt, deadline=_leg_deadline)
             elif slot == 5:
-                # v20: Groq candidate (seat C's Qwen primary).
                 content = _groq_text(
                     model, system, user, temperature=0,
                     max_tokens=4000,
                     timeout=_jt, deadline=_leg_deadline)
-            elif slot == 6:
-                # v20: the rationed Gemini 3.8 Flash
-                # mid-ladder rung (counted at attempt time;
-                # the Gemini client applies its own spacing
-                # and timeout discipline). The verdict records
-                # as-served: a google voice in this seat, never
-                # a stand-in for the seat's own family.
-                _flash_mid_note()
-                content = _gemini_text(FLASH_MODEL, system, user)
             else:
-                key_env, key_file = SEAT_SLOTS[slot]
-                content = _nim_text(
-                    _slot_base_url(slot), key_env, key_file,
-                    model, system, user, temperature=0,
-                    max_tokens=2048,
-                    timeout=_jt,
-                    provider="nim", deadline=_leg_deadline)
+                raise RuntimeError(
+                    f"{job}: candidate {model} sits on retired "
+                    f"slot {slot}")
             lat = time.monotonic() - t0
             _seat_report(job, model, lat, True)
             if failover:
@@ -6705,7 +5851,7 @@ def _judge_seat_text(job, system, user):
             return content
         except Exception as e:
             lat = time.monotonic() - t0
-            _timed_out = lat >= THIRD_JUDGE_TIMEOUT * 0.9 \
+            _timed_out = lat >= JUDGE_LEG_TIMEOUT * 0.9 \
                 or "timed out" in str(e) \
                 or "timeout" in str(e).lower()
             _seat_report(job, model, lat, False,
@@ -6714,25 +5860,27 @@ def _judge_seat_text(job, system, user):
             # the ask record (see _note_seat_fail).
             _note_seat_fail(job, model, slot, lat, _timed_out,
                             f"{type(e).__name__}: {e}")
-            # v22.3 (fix 3): a FULL leg timeout benches this
-            # candidate for the rest of the ask. Full means
-            # the leg was granted (nearly) the whole judge
-            # discipline bound — _leg_timeout had not clamped
-            # it to a budget remainder — and the call consumed
-            # it. A budget-clamped shed does NOT bench: the
-            # seat never got its full bound, so the timeout
-            # indicts the budget, not the seat. The global
-            # two-consecutive-timeouts rule still applies
-            # across asks; this rule is stricter inside one
-            # ask, where re-seating a candidate that just ate
-            # a full 30s is how the 2026-10-15 CSRA ask lost
-            # 60.6s to one dead seat across two rounds.
+            # v22.3 (fix 3, rebased into v23): a FULL leg
+            # timeout benches this candidate for the rest of
+            # the ask. Full means the leg was granted (nearly)
+            # the whole judge discipline bound — _leg_timeout
+            # had not clamped it to a budget remainder — and
+            # the call consumed it. A budget-clamped shed does
+            # NOT bench: the seat never got its full bound, so
+            # the timeout indicts the budget, not the seat.
+            # The global two-consecutive-timeouts rule still
+            # applies across asks; this rule is stricter
+            # inside one ask, where re-seating a candidate
+            # that just ate a full 30s is how the 2026-10-15
+            # CSRA ask lost 60.6s to one dead seat across two
+            # rounds. (v23: the bound constant is
+            # JUDGE_LEG_TIMEOUT, the renamed THIRD_JUDGE_TIMEOUT.)
             if job.startswith("judge") and _timed_out \
-                    and _jt >= THIRD_JUDGE_TIMEOUT * 0.9 \
+                    and _jt >= JUDGE_LEG_TIMEOUT * 0.9 \
                     and lat >= _jt * 0.9:
                 _reason = (
                     f"full leg timeout ({lat:.1f}s at the "
-                    f"{THIRD_JUDGE_TIMEOUT}s judge bound); "
+                    f"{JUDGE_LEG_TIMEOUT}s judge bound); "
                     f"benched for the rest of the ask")
                 _bctx = _ask_ctx()
                 with _bctx.lock:
@@ -7011,7 +6159,6 @@ OPENROUTER_UTILITY_MODEL = "openai/gpt-oss-20b"
 # primary judge's fallover keeps its model and its family.
 # Slug and price read off the live OpenRouter catalog on
 # 2026-10-14 ($0.30 in / $2.50 out per 1M).
-OR_LITE_MODEL = "google/gemini-3.5-flash-lite"
 OPENROUTER_DRAFTER_TIMEOUT = 120  # Cerebras drafts land in
 # seconds; the bound only caps a degraded backend before the
 # NIM seat takes over (the NIM path keeps DRAFTER_TIMEOUT).
@@ -7024,24 +6171,12 @@ _OR_ROUTES = {
     OPENROUTER_SIMPLE_MODEL: {
         "order": ["Groq"], "allow_fallbacks": True,
         "data_collection": "deny"},
-    # v17.1: the judge seats' OpenRouter candidates (judge_nim1
-    # in v17.1; judge_nim2 joined in v17.2 with the same two
-    # models in the opposite order). No
-    # backend order is pinned (no per-backend latency
-    # measurement exists for judging; the probe ran unpinned),
-    # but the deny restriction matches the drafting seats, so
-    # only backends that do not collect prompts may serve.
-    "deepseek/deepseek-chat-v3.1": {
-        "allow_fallbacks": True, "data_collection": "deny"},
-    "qwen/qwen3-32b": {
-        "allow_fallbacks": True, "data_collection": "deny"},
-    # v18: the seat-2 pair (JUDGE_SEAT2_MODEL and its
-    # fifth-family failover). Same posture: fallbacks allowed
-    # across the model's backends, data collection denied.
-    # Slugs/prices verified pre-battery (see the constant).
-    JUDGE_SEAT2_MODEL: {
-        "allow_fallbacks": True, "data_collection": "deny"},
-    SEAT2_FAILOVER_MODEL: {
+    # v23 (WS2): the relief bench's OpenRouter leg. Same
+    # posture as every judge route before it: fallbacks
+    # allowed across the model's backends, data collection
+    # denied, so only backends that do not collect prompts
+    # may serve.
+    OR_RELIEF_MODEL: {
         "allow_fallbacks": True, "data_collection": "deny"},
 }
 
@@ -7089,15 +6224,12 @@ _OR_STATE = {"date": "", "spend": 0.0, "reservations": {},
 _OR_PRICES = {
     "openai/gpt-oss-120b": (0.10, 0.50),
     "openai/gpt-oss-20b": (0.05, 0.30),
-    "deepseek/deepseek-chat-v3.1": (0.25, 0.95),
-    "qwen/qwen3-32b": (0.30, 1.20),
 }
-# v18 seat-2 rows (placeholder prices pending the pre-battery
-# verification, set conservatively at the class maximum).
-_OR_PRICES[JUDGE_SEAT2_MODEL] = (0.30, 1.20)
-_OR_PRICES[SEAT2_FAILOVER_MODEL] = (0.60, 2.40)
-# v20: seat A's Lite fallover row (catalog-verified above).
-_OR_PRICES[OR_LITE_MODEL] = (0.30, 2.50)
+# v23 (WS2): the relief model's row, priced conservatively
+# at the strong-cheap class maximum pending the deploy-stage
+# catalog check (the reservation gate prices from this row;
+# settled cost comes from the API's own usage report).
+_OR_PRICES[OR_RELIEF_MODEL] = (0.60, 2.40)
 _OR_PRICE_DEFAULT = (2.00, 6.00)
 
 
@@ -7587,96 +6719,12 @@ def _groq_health_block():
             "provider_tier": "free"}
 
 
-# --- v20: the Gemini 3.8 Flash mid-ladder ration ---------------------
-# Layer 1 of the operator's layer model: Gemini 3.8 Flash may step
-# in mid-ladder as a replacement judge (judge seats B and C,
-# slot 6) when a free primary fails — but it is free, strong,
-# and SCARCE (20 requests/day on the free key), and its
-# final-rung/arbitration reserve must survive. A persistent
-# per-day counter (Indiana ledger day, the spend ledger's
-# pattern) sub-caps mid-ladder use at FLASH_MID_DAILY_CAP
-# (default 10): the other half of the day's quota is never
-# touched by mid-ladder duty. The rung records as-served
-# (a google voice); it never impersonates the seat's family
-# for badge purposes.
-FLASH_MID_DAILY_CAP = int(
-    os.environ.get("FSSA_FLASH_MID_DAILY_CAP", "10"))
-_FLASH_MID_FILE = "flash_mid_usage.json"
-_FLASH_MID_LOCK = threading.Lock()
-_FLASH_MID_STATE = {"date": "", "count": 0, "broken": False,
-                    "loaded": False}
+# --- v23 (WS2): the Flash mid-ladder ration is DELETED ------
+# The rationed Gemini 3.8 Flash rung (slot 6) leaves judging
+# entirely in the judge switch: Flash now serves ONLY as the
+# dispute arbitrator and the final-rung ruler, under its own
+# FLASH_DAILY_CAP, exactly as those paths have always run.
 
-
-def _flash_mid_load_locked():
-    """(Caller holds _FLASH_MID_LOCK.)"""
-    today = _ledger_today()
-    if _FLASH_MID_STATE["loaded"] \
-            and _FLASH_MID_STATE["date"] == today:
-        return
-    count, broken = 0, False
-    try:
-        with open(_FLASH_MID_FILE, encoding="utf-8") as f:
-            st = json.load(f)
-        if st.get("date") == today:
-            count = int(st.get("count") or 0)
-    except FileNotFoundError:
-        pass
-    except Exception:
-        broken = True
-    _FLASH_MID_STATE.update({"date": today, "count": count,
-                             "broken": broken, "loaded": True})
-    if broken:
-        print("[flash-mid] ration counter unreadable; the "
-              "mid-ladder rung sheds until it is repaired",
-              flush=True)
-
-
-def _flash_mid_persist_locked():
-    """(Caller holds _FLASH_MID_LOCK.)"""
-    if _FLASH_MID_STATE["broken"]:
-        return
-    try:
-        _atomic_write_json(_FLASH_MID_FILE, {
-            "date": _FLASH_MID_STATE["date"],
-            "count": _FLASH_MID_STATE["count"]})
-    except Exception as e:
-        print(f"[flash-mid] ration counter write failed: {e}",
-              flush=True)
-
-
-def _flash_mid_count_today():
-    with _FLASH_MID_LOCK:
-        _flash_mid_load_locked()
-        return _FLASH_MID_STATE["count"]
-
-
-def _flash_mid_available():
-    """The mid-ladder rung may run: today's ration is not
-    spent (an unreadable counter sheds the rung, fail-safe
-    toward the reserve)."""
-    with _FLASH_MID_LOCK:
-        _flash_mid_load_locked()
-        if _FLASH_MID_STATE["broken"]:
-            return False
-        return _FLASH_MID_STATE["count"] < FLASH_MID_DAILY_CAP
-
-
-def _flash_mid_note():
-    """Count one mid-ladder Flash call (at attempt time: the
-    ration protects a scarce quota, spent or failed)."""
-    with _FLASH_MID_LOCK:
-        _flash_mid_load_locked()
-        _FLASH_MID_STATE["count"] += 1
-        _flash_mid_persist_locked()
-
-
-def _flash_mid_health_block():
-    """GET /health's flash-mid block: today's ration use."""
-    return {"model": FLASH_MODEL,
-            "used_today": _flash_mid_count_today(),
-            "daily_sub_cap": FLASH_MID_DAILY_CAP,
-            "final_rung_daily_cap": FLASH_DAILY_CAP,
-            "available": _flash_mid_available()}
 
 
 # --- v20: the xAI credit ledger (grant mode only) --------------------
@@ -7985,24 +7033,12 @@ def _nim_text(base_url, key_env, key_file, model, system, user,
     raise RuntimeError(f"{provider} unavailable after retry: {last_err}")
 
 
-def _third_judge_text(system, user):
-    """One verdict call to the judge_nim1 seat (v16: seat-based;
-    health-tracked with failover to the seat's runner-up
-    candidates; v17.1: the seat's lead candidates ride
-    OpenRouter, NIM Nemotron Super is its free failover).
-    Temperature 0."""
-    content = _judge_seat_text("judge_nim1", system, user)
-    _third_count_one()
-    return content
+def _seat2_judge_text(system, user):
+    """One verdict call to the judge_seat2 seat (v23 WS2:
+    Qwen3.8-27B on the Groq free tier; the paid relief bench
+    serves only on failover). Temperature 0."""
+    return _judge_seat_text("judge_seat2", system, user)
 
-
-def _nim2_judge_text(system, user):
-    """One verdict call to the judge_nim2 seat (v16 item 3: the
-    second standing judge seat, a different model family from
-    seat 1 where the bake-off allowed; v17.2: the seat's lead
-    candidates ride OpenRouter, NIM Nemotron Ultra is its free
-    failover on key slot 3)."""
-    return _judge_seat_text("judge_nim2", system, user)
 
 
 # --- v17.1: GPT-OSS citation dialect normalization ------------------
@@ -8045,46 +7081,12 @@ def _normalize_citations(text):
     return _CITE_DIALECT_FULLWIDTH.sub(r"[\1]", text)
 
 
-def nim_ask(model, question, hits, instructions="", key_env=None,
-            key_file=None, timeout=None, deadline=None):
-    """One NIM draft generation (v15 item 2 / S4): the same prompt
-    shape as the local and Gemini drafters (SYSTEM_PROMPT +
-    instructions, numbered excerpts), temperature 0.3. Returns
-    (answer, prompt). Raises when the seat cannot run; callers
-    fall back through the drafting seat's candidates first and
-    to local models only when the whole seat is down (v16).
-    `timeout` overrides DRAFTER_TIMEOUT for bounded retries."""
-    context = _numbered_context(hits)
-    user_msg = f"Question: {question}\n\nDocument excerpts:\n{context}"
-    sys_prompt = _system_prompt_for(question) + (("\n\n" + instructions) if instructions
-                                  else "")
-    content = _nim_text(DRAFTER_BASE_URL, key_env or DRAFTER_KEY_ENV,
-                        key_file or DRAFTER_KEY_FILE, model,
-                        sys_prompt, user_msg,
-                        temperature=0.3, max_tokens=2048,
-                        timeout=timeout or DRAFTER_TIMEOUT,
-                        provider=DRAFTER_PROVIDER, deadline=deadline)
-    # Hosted open models occasionally trail control-token debris
-    # (kimi-k3's catalog smoke ended "<|close|>response"); it is
-    # never answer text, so cut anything from the first such
-    # marker onward.
-    content = re.split(r"<\|[^>]{0,40}>", content)[0].strip()
-    # v17.1: the GPT-OSS models serve these seats too (on NIM
-    # as fallback candidates); normalize their citation
-    # dialect before the pipeline reads the draft.
-    content = _normalize_citations(content)
-    if not content:
-        raise RuntimeError("NIM drafter returned an empty response")
-    return content, sys_prompt + "\n\n" + user_msg
-
-
 def or_ask(model, question, hits, instructions="", timeout=None,
            deadline=None):
     """One OpenRouter draft generation (v17): nim_ask's exact
     prompt shape and debris strip on the paid primary seat.
     Returns (answer, prompt). Raises when the seat cannot run;
-    _generate then fails over to the drafting seat's v16 NIM
-    candidates."""
+    _generate then fails over down the drafting ladder."""
     context = _numbered_context(hits)
     user_msg = f"Question: {question}\n\nDocument excerpts:\n{context}"
     sys_prompt = _system_prompt_for(question) + (("\n\n" + instructions) if instructions
@@ -8149,48 +7151,43 @@ def groq_ask(model, question, hits, instructions="", timeout=None,
     return content, sys_prompt + "\n\n" + user_msg
 
 
-def _panel_info(judges, ms, third_status, third_error=None,
-                nim2_status="not-run", nim2_error=None,
+def _panel_info(judges, ms, seat2_status, seat2_error=None,
                 served=None):
     """The judging-metadata panel record: which judges produced
-    verdicts, per-seat wall-clock ms, and the NIM seats' status
-    ('ok', 'no-key', 'unavailable', or 'not-run'). v16: the
-    "third" record describes the judge_nim1 seat and a "nim2"
-    record the judge_nim2 seat; the model named
-    is the seat's assigned candidate — the ask's seat events
-    record the model that actually served. v17.1: judge_nim1's
-    primary candidate rides the OpenRouter pseudo-slot, so
-    the third record's provider and key_slot are read off the
-    seat's active candidate instead of hardcoded to NIM.
-    v17.2: judge_nim2's primary rides the pseudo-slot too, so
-    the nim2 record is read off its seat's active candidate
-    the same way. v18 (F10): when `served` is given (the ask
-    context's served-model map), the records name the model
-    that actually SERVED each seat, not the seat's assigned
-    candidate."""
-    nim1_model, _s1, _f1 = _seat_pick("judge_nim1")
-    nim2_model, _s2, _f2 = _seat_pick("judge_nim2")
-    if served:
-        nim1_model = served.get("judge_nim1", nim1_model)
-        nim2_model = served.get("judge_nim2", nim2_model)
+    verdicts, per-seat wall-clock ms, and the seats' status
+    ('ok', 'no-key', 'unavailable', or 'not-run'). v23 (WS2):
+    the record describes the two-seat panel — seat 1 (Gemini
+    Lite, or the relief bench when it extracted) and seat 2
+    (the judge_seat2 seat: Qwen on Groq, relief on failover).
+    When `served` is given (the ask context's served-model
+    map), the records name the model that actually SERVED
+    each seat, not the seat's assigned candidate."""
+    served = served or {}
+    seat2_model, _s2, _f2 = _seat_pick("judge_seat2")
+    seat2_model = served.get("judge_seat2", seat2_model)
+    seat1_model = served.get("lite") or served.get("relief") \
+        or GEMINI_CHAIN[0]
+    seat1_status = "ok" if ("lite" in judges
+                            or "relief" in judges) else "not-run"
+    if "relief" in judges:
+        seat1_status = "relief"
     return {"judges": list(judges),
             "primary_ms": ms.get("primary"),
-            "second_ms": ms.get("second"),
-            "third_ms": ms.get("third"),
-            "nim2_ms": ms.get("nim2"),
-            "third": {"provider": _slot_provider_name(_s1),
-                      "model": nim1_model or THIRD_JUDGE_MODEL,
-                      "key_slot": _s1,
-                      "status": third_status,
-                      "error": third_error},
-            "nim2": {"provider": _slot_provider_name(_s2),
-                     "model": nim2_model,
-                     "key_slot": _s2,
-                     "status": nim2_status,
-                     "error": nim2_error},
-            "third_calls_today": _third_calls_today(),
+            "seat2_ms": ms.get("seat2"),
+            "seat1": {"provider": "google"
+                                  if seat1_model == GEMINI_CHAIN[0]
+                                  else _model_family(seat1_model),
+                      "model": seat1_model,
+                      "status": seat1_status,
+                      "error": None},
+            "seat2": {"provider": _slot_provider_name(_s2),
+                      "model": seat2_model,
+                      "key_slot": _s2,
+                      "status": seat2_status,
+                      "error": seat2_error},
             "cached_claims": ms.get("cached_claims", 0),
             "refuted_claims": ms.get("refuted_claims", 0)}
+
 
 
 # --- v14: judging -------------------------------------------------------------
@@ -8325,7 +7322,9 @@ def _judge_excerpts(hits, cap=3000):
 
 def _primary_judgment(engine, question, hits, answer, mech_block):
     """Extract the draft's claims AND verdict them in one call.
-    engine is 'lite' (Gemini) or 'local' (the 14B). Returns
+    engine is 'lite' (seat 1: Gemini Lite), 'orelief' /
+    'xairelief' (seat 1 down: the paid relief bench extracts),
+    or 'local' (the 14B). Returns
     {available, claims: [{text, load_bearing, verdict, note}], error}.
     Only substantive factual claims are extracted: rules, figures,
     conclusions. Connective text, citations, restatements of the
@@ -8352,36 +7351,22 @@ def _primary_judgment(engine, question, hits, answer, mech_block):
     try:
         if engine == "lite":
             text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM, user)
-        elif engine == "flashmid":
-            # v20.1 (fix 2): seat A's rationed Gemini 3.8
-            # Flash mid-ladder rung (slot 6, Layer 1 rules),
-            # tried between the free Lite path and the paid
-            # Lite-via-OpenRouter attempt. Counted at attempt
-            # time against the shared mid-ladder ration,
-            # exactly as the judge seats' slot-6 dispatch
-            # counts it; the caller gates on
-            # _flash_mid_available(), and the rung refuses
-            # here too rather than overspend the ration.
-            # Served by _gemini_text like every Flash call;
-            # the caller records the serving model, so the
-            # rung never impersonates the Lite primary.
-            if not _flash_mid_available():
-                raise RuntimeError(
-                    "flash mid-ladder ration spent")
-            _flash_mid_note()
-            text = _gemini_text(FLASH_MODEL, _JUDGE_SYSTEM, user)
-        elif engine == "orlite":
-            # v20: seat A's paid fallover — the same Lite
-            # model via OpenRouter, tried ahead of the
-            # NIM-seat extractor so a Gemini outage degrades
-            # the transport before it changes the judge.
-            text = _or_text(OR_LITE_MODEL, _JUDGE_SYSTEM, user,
+        elif engine == "orelief":
+            # v23 (WS2): seat 1's extraction relief #1 — the
+            # OpenRouter relief model extracts when Lite is
+            # down. Its verdicts ride the round's "relief"
+            # voice and the serving model is recorded, so the
+            # panel math (coverage families, panel state)
+            # sees a deepseek voice, never a Lite stand-in.
+            text = _or_text(OR_RELIEF_MODEL, _JUDGE_SYSTEM, user,
                             temperature=0, max_tokens=4000,
                             timeout=60)
-        elif engine == "nim":
-            # v15: the NIM seat extracts when Lite is down (the
-            # local 14B is the extractor of last resort).
-            text = _third_judge_text(_JUDGE_SYSTEM, user)
+        elif engine == "xairelief":
+            # v23 (WS2): extraction relief #2 — Grok 4.7 on
+            # xAI, the relief bench's other leg.
+            text = _xai_text(XAI_HARD_MODEL, _JUDGE_SYSTEM, user,
+                             temperature=0, max_tokens=4000,
+                             timeout=60)
         else:
             text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM, user)
         obj = _parse_judge_json(text)
@@ -8506,14 +7491,30 @@ def _second_verdicts(engine, question, hits, claims, mech_block):
     try:
         if engine == "lite":
             text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM, user)
-        elif engine == "nim":
-            # v15: the NIM seat as second judge (verdicts only in
-            # this seat's other role; the missed-claims pass is
-            # part of this function's contract for every engine).
-            text = _third_judge_text(_JUDGE_SYSTEM, user)
-        elif engine == "nim2":
-            # v16: the second NIM judge seat (key slot 3).
-            text = _nim2_judge_text(_JUDGE_SYSTEM, user)
+        elif engine == "relief":
+            # v23 (WS2): verdicts from the SAME relief model
+            # that extracted this round (the evidence hunt
+            # re-asks the extraction voice). The serving
+            # model is on the ask context; without one this
+            # engine is unavailable.
+            _rm = _ask_ctx().served_models.get("relief")
+            if _rm == OR_RELIEF_MODEL:
+                text = _or_text(_rm, _JUDGE_SYSTEM, user,
+                                temperature=0, max_tokens=4000,
+                                timeout=60)
+            elif _rm == XAI_HARD_MODEL:
+                text = _xai_text(_rm, _JUDGE_SYSTEM, user,
+                                 temperature=0, max_tokens=4000,
+                                 timeout=60)
+            else:
+                raise RuntimeError("no relief model served "
+                                   "this round")
+        elif engine == "seat2":
+            # v23 (WS2): the judge_seat2 seat verdicts (Qwen
+            # on Groq; the relief bench on failover). The
+            # missed-claims pass is part of this function's
+            # contract for every engine.
+            text = _seat2_judge_text(_JUDGE_SYSTEM, user)
         else:
             _note_local_load("fallback-judge")
             text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM, user,
@@ -8566,14 +7567,14 @@ def _flash_arbitrate(question, hits, claims, indices):
     scoped = _scoped_evidence(hits, subset,
                               labels=[i + 1 for i in indices])
     served = dict(_ask_ctx().served_models)
-    labels = {"lite": GEMINI_CHAIN[0] + " (primary judge)",
-              "nim": (served.get("judge_nim1")
-                      or "judge seat 1"),
-              "nim2": (served.get("judge_nim2")
-                       or "judge seat 2"),
+    labels = {"lite": GEMINI_CHAIN[0] + " (seat 1 judge)",
+              "relief": (served.get("relief")
+                         or "relief bench") + " (seat 1 relief)",
+              "seat2": (served.get("judge_seat2")
+                        or "judge seat 2"),
               "local": ROUTED_MODEL + " (local judge)"}
     panel_split = any(
-        len({claims[i].get(k) for k in ("lite", "nim", "nim2",
+        len({claims[i].get(k) for k in ("lite", "relief", "seat2",
                                         "local")
              if claims[i].get(k)}) > 1 for i in indices)
     who = "The judges disagree" if panel_split \
@@ -8582,7 +7583,7 @@ def _flash_arbitrate(question, hits, claims, indices):
     for i in indices:
         c = claims[i]
         parts = [f"{i + 1}. {c['text']}"]
-        for eng in ("lite", "nim", "nim2", "local"):
+        for eng in ("lite", "relief", "seat2", "local"):
             if c.get(eng):
                 parts.append(f"   {labels[eng]}: {c[eng]}")
         if c.get("refute_verdict"):
@@ -9209,100 +8210,96 @@ def _verdict_cache_put(key, value):
 
 
 def _panel_state(judges, served):
-    """v18 (§C, operator ruling 2026-10-14): the round's panel
-    state. FULL only when all three seats served (Lite,
-    judge_nim1, judge_nim2), each by its PRIMARY (non-failover)
-    candidate, from three distinct families, with no local seat
-    on the panel and no seat missing. Anything less (a seat
-    served by a failover candidate, a seat missing or
-    unavailable, a local fallback seat, or fewer than three
-    distinct families among the seats that served) is DEGRADED.
-    A top-class badge earned on a degraded panel is renamed
+    """v23 (WS2): the round's panel state for the TWO-seat
+    panel. FULL only when both seats served by their free
+    primaries — seat 1 by Gemini Lite itself (the GEMINI_CHAIN
+    head) and seat 2 by Qwen3.8-27B on Groq (the seat chain's
+    head) — from their two distinct families, with no local
+    seat on the panel and no seat missing. Anything less (a
+    relief model served either seat, a seat missing or
+    unavailable, a local fallback seat) is DEGRADED. A
+    top-class badge earned on a degraded panel is renamed
     (verified_reduced / partial_reduced) where badges are
-    assigned in _run_unit, so the degradation is visible in the
-    badge itself and not only in the panel annotation. The
-    lite seat counts as primary-served only when
-    GEMINI_CHAIN[0] itself served: its same-model OpenRouter
-    transport (the "orlite" fallover) leaves no served record
-    and keeps the seat's primary standing, but when the
-    rationed Flash mid-ladder rung serves the extraction
-    (v20.1 fix 2) the serving model is recorded in
-    served["lite"], and the comparison below then degrades
-    the panel — the rung is a google voice, never a stand-in
-    for the Lite primary."""
+    assigned in _run_unit, so the degradation is visible in
+    the badge itself and not only in the panel annotation."""
     if "local" in (judges or ()):
         return "degraded"
-    models = {}
-    if "lite" in judges:
-        models["lite"] = (served or {}).get("lite") \
-            or GEMINI_CHAIN[0]
-    if "nim" in judges:
-        models["nim"] = (served or {}).get("judge_nim1")
-    if "nim2" in judges:
-        models["nim2"] = (served or {}).get("judge_nim2")
-    if len(models) < 3 or any(m is None for m in models.values()):
+    served = served or {}
+    lite_model = served.get("lite") or (
+        GEMINI_CHAIN[0] if "lite" in judges else None)
+    if "relief" in judges:
+        # the relief bench extracted for seat 1: recorded
+        # as-served, never a stand-in for the Lite primary.
+        lite_model = served.get("relief") or lite_model
+    seat2_model = served.get("judge_seat2")
+    if lite_model is None or seat2_model is None:
         return "degraded"
-    primaries = {"lite": GEMINI_CHAIN[0],
-                 "nim": SEATS["judge_nim1"]["candidates"][0][0],
-                 "nim2": SEATS["judge_nim2"]["candidates"][0][0]}
-    if any(models[k] != primaries[k] for k in models):
+    if "lite" not in judges and "relief" not in judges:
         return "degraded"
-    if len({_model_family(m) for m in models.values()}) < 3:
+    if "seat2" not in judges:
+        return "degraded"
+    if lite_model != GEMINI_CHAIN[0]:
+        return "degraded"
+    if seat2_model != SEATS["judge_seat2"]["candidates"][0][0]:
+        return "degraded"
+    if len({_model_family(lite_model),
+            _model_family(seat2_model)}) < 2:
         return "degraded"
     return "full"
+
 
 
 def _judge_round(question, hits, answer, hard, mech_block="",
                  corp=None, mechanisms=None, extra_claims=None,
                  local_only=False, use_cache=True, deadline=None):
-    """One full judging round over a draft. v16 composition: the
-    PRIMARY judge extracts claims and verdicts them (Gemini Lite;
-    the judge_nim1 seat when Lite is down; a local model only
-    when both remotes are down). TWO further verdict seats run
-    concurrently with refutation retrieval (S1): the second
-    seat (judge_nim1 by default; Lite when nim1 extracted) and
-    the judge_nim2 seat on its own key, a different family.
-    A single failed remote seat composes from the survivors;
-    no local seat ever joins a remote-primary round. Claims
-    whose refutation surfaced new material are re-verdicted
-    against the union evidence, and a re-verdict that does not
-    affirm them sends them to the disputed pool. Cached claims
-    (S2) resolve from the verdict cache unless the join's
+    """One full judging round over a draft. v23 composition
+    (WS2, the judge switch): the panel is TWO seats. Seat 1
+    (Gemini 3.5 Flash Lite) extracts claims and verdicts them;
+    when Lite is down the paid relief bench extracts instead
+    (the OpenRouter relief model, then Grok 4.7), recorded
+    as-served under the round's "relief" voice. Seat 2
+    (judge_seat2: Qwen3.8-27B on Groq, the relief bench on
+    failover) verdicts the same claim list concurrently with
+    refutation retrieval (S1). The local 14B judges only when
+    every remote path is down, or on an explicit local ask;
+    a local-primary round stays local-only. Claims whose
+    refutation surfaced new material are re-verdicted against
+    the union evidence, and a re-verdict that does not affirm
+    them sends them to the disputed pool. Cached claims (S2)
+    resolve from the verdict cache unless the join's
     refutation invalidates them. Disputes go to Flash
-    (load-bearing, or any claim on hard questions); v16 REMOVES
-    the 14B tiebreak (operator ruling): whatever Flash does not
-    rule on fails closed on the worst verdict. Returns
-    {mode, claims, flash_used, pass, errors, panel, refute_ms}
-    where each claim carries lite/nim/nim2/local/flash/final
-    verdicts (plus the v14.2-era 'third' alias of nim). mode is
-    'panel' (2+ remote seats), 'dual', 'arbitrated',
-    'gemini-only', 'nim-only', 'local-only', or 'none'."""
+    (load-bearing, or any claim on hard questions); whatever
+    Flash does not rule on fails closed on the worst verdict.
+    Returns {mode, claims, flash_used, pass, errors, panel,
+    refute_ms} where each claim carries lite/relief/seat2/
+    local/flash/final verdicts (plus the v14.2-era 'third'
+    alias of seat2). mode is 'panel' (both seats), 'gemini-
+    only', 'relief-only', 'local-only', 'arbitrated', or
+    'none'."""
     errors = []
-    panel_ms = {"primary": None, "second": None, "third": None,
-                "nim2": None,
+    panel_ms = {"primary": None, "seat2": None,
                 "cached_claims": 0, "refuted_claims": 0,
                 "repaired_claims": 0}
-    nim_status = "ok" if _third_judge_key() else "no-key"
-    nim_error = None
-    # v17.2: judge_nim2's primary rides the OpenRouter
-    # pseudo-slot; the seat counts as keyed while any of its
-    # candidates is pickable, not only while slot 3 has a key.
-    nim2_status = "ok" if _seat_pick("judge_nim2")[0] \
+    seat2_status = "ok" if _seat_pick("judge_seat2")[0] \
         is not None else "no-key"
-    nim2_error = None
+    seat2_error = None
+    # v23 (WS1): the stepper's extracting phase + seat states.
+    _set_phase("extracting")
+    _set_seat_phase("seat1", "checking")
+    _set_seat_phase("seat2", "waiting")
 
     # --- Stage 1: primary extraction + verdicts. Lite first,
-    # then the NIM seat, then (both remotes down) the demoted
-    # local 14B. The local GPU warm-up runs alongside ONLY when
-    # a local seat is likely to be needed, which v15 knows only
-    # after a remote failure — so there is no speculative warm-up
-    # on the default path (that is the demotion's latency win).
+    # then the relief bench (OpenRouter relief model, then
+    # Grok 4.7), then (every remote path down) the demoted
+    # local 14B. The local GPU warm-up runs alongside ONLY
+    # when a local seat is likely to be needed, which is
+    # known only after a remote failure — so there is no
+    # speculative warm-up on the default path.
     pt0 = time.monotonic()
     if local_only:
         # v18 (F19 widened): a "Run locally" ask is judged by
-        # the local model only; no hosted seat is consulted at
-        # any stage of the round (in v17.3 the Lite primary and
-        # hosted utilities ran regardless of the selection).
+        # the local model only; no hosted seat is consulted
+        # at any stage of the round.
         _note_local_load("local-ask-judge")
         primary = _primary_judgment("local", question, hits,
                                     answer, mech_block)
@@ -9313,73 +8310,54 @@ def _judge_round(question, hits, answer, hard, mech_block="",
         primary_engine = "lite"
     if not primary["available"] and not local_only:
         errors.append("lite judge: " + str(primary["error"]))
-        # v20.1 (fix 2, operator approval 2026-10-14): seat A
-        # gains the rationed Gemini 3.8 Flash mid-ladder
-        # rung (slot 6, Layer 1 rules) between the free Lite
-        # path and the paid Lite-via-OpenRouter attempt —
-        # the same shared ration as seats B and C
-        # (flash_mid_usage.json, FLASH_MID_DAILY_CAP/day,
-        # counted at attempt time). A spent ration skips
-        # the rung silently, exactly as _slot_has_key(6)
-        # skips a rationed seat candidate. As-served: the
-        # extraction verdicts keep the round's "lite" voice
-        # slot, but the serving model is recorded in
-        # served_models["lite"], and _panel_state counts a
-        # Flash-served seat A as DEGRADED — the rung never
-        # impersonates the Lite primary for badges.
-        if _flash_mid_available():
-            _flash_primary = _primary_judgment(
-                "flashmid", question, hits, answer, mech_block)
-            if _flash_primary["available"]:
-                primary = _flash_primary
-                primary_engine = "lite"
-                _ask_ctx().served_models["lite"] = FLASH_MODEL
-            else:
-                errors.append("lite (flash rung) judge: "
-                              + str(_flash_primary["error"]))
+        # v23 (WS2): seat 1's relief bench extracts, in
+        # bench order. The serving model is recorded on the
+        # ask context (served_models["relief"]) and its
+        # family joins the verdict families, so seat 2's
+        # plan can never seat the same family twice.
+        for _reng, _rmodel, _rlabel in (
+                ("orelief", OR_RELIEF_MODEL, "openrouter"),
+                ("xairelief", XAI_HARD_MODEL, "xai")):
+            _rp = _primary_judgment(_reng, question, hits,
+                                    answer, mech_block)
+            if _rp["available"]:
+                primary = _rp
+                primary_engine = "relief"
+                _rctx = _ask_ctx()
+                _rctx.served_models["relief"] = _rmodel
+                _rctx.verdict_families.setdefault(
+                    "primary", set()).add(_model_family(_rmodel))
+                break
+            errors.append(f"relief ({_rlabel}) judge: "
+                          + str(_rp["error"]))
         if not primary["available"]:
-            # v20: seat A's paid fallover — Lite via
-            # OpenRouter (the same model, the same "lite"
-            # voice) is tried before the extractor changes
-            # family to the NIM seat.
-            _or_primary = _primary_judgment(
-                "orlite", question, hits, answer, mech_block)
-            if _or_primary["available"]:
-                primary = _or_primary
-                primary_engine = "lite"
-            else:
-                errors.append("lite (openrouter) judge: "
-                              + str(_or_primary["error"]))
-                primary = _primary_judgment(
-                    "nim", question, hits, answer, mech_block)
-                primary_engine = "nim"
-        if not primary["available"]:
-            errors.append("nim judge: " + str(primary["error"]))
-            nim_status = "unavailable"
-            nim_error = str(primary["error"])
             if LOCAL_FALLBACK_JUDGE:
-                # Both remote extraction paths are down: the one
-                # sanctioned local judging load (item 5); the
-                # model loads cold, on demand (v15.1 removed the
-                # speculative warm-up).
+                # Every remote extraction path is down: the
+                # one sanctioned local judging load (item 5);
+                # the model loads cold, on demand.
                 _note_local_load("fallback-judge")
-                primary = _primary_judgment("local", question, hits,
-                                            answer, mech_block)
+                primary = _primary_judgment("local", question,
+                                            hits, answer,
+                                            mech_block)
                 primary_engine = "local"
     panel_ms["primary"] = int((time.monotonic() - pt0) * 1000)
     if not primary["available"]:
+        _set_seat_phase("seat1", "down")
         if primary_engine == "local":
             errors.append("local judge: " + str(primary["error"]))
         return {"mode": "none", "claims": [], "flash_used": False,
                 "pass": False, "errors": errors, "refute_ms": 0,
                 # no panel sat at all: degraded by definition
                 "panel_state": "degraded",
-                "panel": _panel_info([], panel_ms, nim_status,
-                                     nim_error)}
+                "panel": _panel_info([], panel_ms, seat2_status,
+                                     seat2_error)}
+    _set_seat_phase("seat1", "done")
+    _set_phase("judging")
+    _set_seat_phase("seat2", "checking")
     claims = [{"text": c["text"], "load_bearing": c["load_bearing"],
-               "lite": None, "nim": None, "nim2": None, "third": None,
-               "local": None, "flash": None, "final": None,
-               "notes": [], "origin": "extracted",
+               "lite": None, "relief": None, "seat2": None,
+               "third": None, "local": None, "flash": None,
+               "final": None, "notes": [], "origin": "extracted",
                "meta": _is_meta_claim(c["text"]),
                "sources": list(c.get("sources") or []),
                "refutations": []}
@@ -9388,24 +8366,27 @@ def _judge_round(question, hits, answer, hard, mech_block="",
         claims[i][primary_engine] = c["verdict"]
         if c["note"]:
             claims[i]["notes"].append(c["note"])
-    # Extra claims (v15): citation-derived claims the extractor
-    # did not list, divergence completeness claims, and conflict
-    # claims. They carry no primary verdict; the verdict stage
-    # and the arbitrator rule on them like any other claim.
+    # Extra claims (v15): citation-derived claims the
+    # extractor did not list and conflict claims. They carry
+    # no primary verdict; the verdict stage and the
+    # arbitrator rule on them like any other claim. (The
+    # v16-v22 divergence completeness claims died with the
+    # divergence oracle in v23.)
     seen_norm = {_norm_claim_text(c["text"]) for c in claims}
     for ec in extra_claims or ():
         if _norm_claim_text(ec["text"]) in seen_norm:
             continue
-        # v22.3 (fix 1): a raw-form duplicate of a claim
-        # already on the list (the same draft sentence in its
-        # citation-carrying form: bold label, ** emphasis,
-        # [n]/[registry] markers) merges into that claim
-        # instead of sitting beside it as a second load-bearing
-        # claim with no verdict path. The survivor keeps the
-        # verdict; the duplicate contributes its sources and
-        # its load-bearing flag. Matching is the conservative
-        # _claim_dupe_score rule — when in doubt the extra is
-        # appended like any other claim.
+        # v22.3 (fix 1, rebased into v23): a raw-form
+        # duplicate of a claim already on the list (the same
+        # draft sentence in its citation-carrying form: bold
+        # label, ** emphasis, [n]/[registry] markers) merges
+        # into that claim instead of sitting beside it as a
+        # second load-bearing claim with no verdict path. The
+        # survivor keeps the verdict; the duplicate
+        # contributes its sources and its load-bearing flag.
+        # Matching is the conservative _claim_dupe_score
+        # rule — when in doubt the extra is appended like any
+        # other claim.
         _survivor, _best = None, 0.0
         for _c in claims:
             if _c.get("meta"):
@@ -9426,23 +8407,25 @@ def _judge_round(question, hits, answer, hard, mech_block="",
         seen_norm.add(_norm_claim_text(ec["text"]))
         claims.append({"text": ec["text"],
                        "load_bearing": bool(ec.get("load_bearing")),
-                       "lite": None, "nim": None, "nim2": None, "third": None,
-                       "local": None, "flash": None, "final": None,
-                       "notes": [], "origin": ec.get("origin", "extra"),
+                       "lite": None, "relief": None, "seat2": None,
+                       "third": None, "local": None, "flash": None,
+                       "final": None, "notes": [],
+                       "origin": ec.get("origin", "extra"),
                        "meta": _is_meta_claim(ec["text"]),
                        "sources": list(ec.get("sources") or []),
                        "refutations": []})
-    # --- v22.3 (fix 2): registry-carrying claims are judged
-    # FIRST, while the round's budget is fresh. A claim is
-    # registry-carrying when it cites the registry ([registry]
-    # in its text) or states a figure the engaged registry
-    # entries admit for the question's date. Judging itself is
-    # unchanged — every claim still needs its verdicts, and
-    # the two-family rule for the full verified badge is
-    # untouched; only the queue order changes, so a panel that
-    # degrades mid-round has already covered the claims the
-    # server's own verified figures anchor. The sort is
-    # stable: relative order inside each class is preserved.
+    # --- v22.3 (fix 2, rebased into v23): registry-carrying
+    # claims are judged FIRST, while the round's budget is
+    # fresh. A claim is registry-carrying when it cites the
+    # registry ([registry] in its text) or states a figure
+    # the engaged registry entries admit for the question's
+    # date. Judging itself is unchanged — every claim still
+    # needs its verdicts, and the two-family rule for the
+    # full verified badge is untouched; only the queue order
+    # changes, so a panel that degrades mid-round has already
+    # covered the claims the server's own verified figures
+    # anchor. The sort is stable: relative order inside each
+    # class is preserved.
     try:
         _admitted = _registry_values(
             _registry_matches(question),
@@ -9459,14 +8442,14 @@ def _judge_round(question, hits, answer, hard, mech_block="",
         return 1
 
     claims = sorted(claims, key=_registry_priority)
-    # --- S2: verdict cache. Resolved claims (identical claim +
-    # identical scoped evidence) resolve without new judge
-    # calls; the join below can still invalidate a cached claim
-    # whose refutation returns new material. v18 (F12): the
-    # key is computed ONCE per claim here and reused for the
-    # put; a claim the fresh primary just contradicted never
-    # resolves from the cache; a fresh/nocache ask skips the
-    # cache entirely.
+    # --- S2: verdict cache. Resolved claims (identical claim
+    # + identical scoped evidence) resolve without new judge
+    # calls; the join below can still invalidate a cached
+    # claim whose refutation returns new material. v18
+    # (F12): the key is computed ONCE per claim here and
+    # reused for the put; a claim the fresh primary just
+    # contradicted never resolves from the cache; a
+    # fresh/nocache ask skips the cache entirely.
     def _claim_vkey(c):
         if "_vkey" not in c:
             c["_vkey"] = _verdict_cache_key(question, hits, c,
@@ -9485,69 +8468,44 @@ def _judge_round(question, hits, answer, hard, mech_block="",
                 cached_idx.add(i)
     panel_ms["cached_claims"] = len(cached_idx)
     live_idx = [i for i in range(len(claims)) if i not in cached_idx]
-    # --- Stage 2 (S1): the second judge's verdicts and the
-    # refutation retrieval run CONCURRENTLY; local fallback
-    # seats compose per the demotion rules.
-    if primary_engine == "lite":
-        second_engine = "nim"
-    elif primary_engine == "nim":
-        second_engine = "lite"
-    else:
-        second_engine = None  # local extracted: no second remote
-    second = {"available": False, "verdicts": {}, "missed": [],
-              "error": "not run"}
+    # --- Stage 2 (S1): seat 2's verdicts and the refutation
+    # retrieval run CONCURRENTLY. Seat 2 runs on every remote
+    # round, simple and hard alike: with a two-seat panel it
+    # is the only second voice, and without it every answer
+    # would cap at one family (the v19 §G5 fast lane skipped
+    # a THIRD seat; v23 has no third seat to skip).
+    seat2 = {"available": False, "verdicts": {}, "missed": [],
+             "error": "not run"}
     refute_ms = 0
 
     def _run_refutation():
         # v18 (F12 defect c): cached load-bearing claims are
-        # refutation-checked too. Through v17.3 only live claims
-        # were passed, so a cached claim could never gain
-        # refutations and the join's invalidation branch below
-        # was dead code.
+        # refutation-checked too.
         return _refutation_retrieve(
             corp, hits,
             [c for c in claims if c["load_bearing"]],
             mechanisms)
 
     st0 = time.monotonic()
-    nim2 = {"available": False, "verdicts": {}, "missed": [],
-            "error": "not run"}
-    # v16: the judge_nim2 seat verdicts alongside the second
-    # seat whenever the primary is remote. A local-primary round
-    # (both remotes down) stays local-only, as in v15.
-    # v19 (§G5): the fast lane. A SIMPLE question's round runs
-    # the primary plus the second seat only; the third seat
-    # sits out (two distinct families can still earn a full
-    # verified badge under §C coverage). Hard questions keep
-    # the full three-seat panel, unchanged.
-    run_nim2 = primary_engine != "local" and hard
-    # v18 (§C): plan the two stage-2 verdict seats ATOMICALLY
-    # before dispatch (distinct families; the drafting family
-    # excluded). A local-only round plans nothing: no remote
-    # seat runs at all (F19).
+    # v18 (§C): plan the stage-2 seat ATOMICALLY before
+    # dispatch (distinct families; the drafting family and
+    # seat 1's family excluded). A local-only round plans
+    # nothing: no remote seat runs at all (F19).
     _jr_ctx = _ask_ctx()
     _jr_ctx.panel_plan = {}
     if not local_only:
         _plan_panel()
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        fut_second = _submit(pool, _second_verdicts, second_engine,
-                             question, hits,
-                             [claims[i] for i in live_idx],
-                             mech_block) if second_engine \
-            else None
-        fut_nim2 = _submit(pool, _second_verdicts, "nim2",
-                           question, hits,
-                           [claims[i] for i in live_idx],
-                           mech_block) if run_nim2 else None
+    run_seat2 = primary_engine != "local" and not local_only
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_seat2 = _submit(pool, _second_verdicts, "seat2",
+                            question, hits,
+                            [claims[i] for i in live_idx],
+                            mech_block) if run_seat2 else None
         fut_refute = _submit(pool, _run_refutation)
-        if fut_second is not None:
-            second = fut_second.result()
-        if fut_nim2 is not None:
-            nim2 = fut_nim2.result()
+        if fut_seat2 is not None:
+            seat2 = fut_seat2.result()
         refute_ms = fut_refute.result()
-    panel_ms["second"] = int((time.monotonic() - st0) * 1000)
-    if run_nim2:
-        panel_ms["nim2"] = panel_ms["second"]
+    panel_ms["seat2"] = int((time.monotonic() - st0) * 1000)
     judges = [primary_engine]
 
     def _absorb(res, engine):
@@ -9562,8 +8520,8 @@ def _judge_round(question, hits, answer, hard, mech_block="",
             known.add(_norm_claim_text(m["text"]))
             claims.append({"text": m["text"],
                            "load_bearing": m["load_bearing"],
-                           "lite": None, "nim": None,
-                           "nim2": None, "third": None,
+                           "lite": None, "relief": None,
+                           "seat2": None, "third": None,
                            "local": None, "flash": None,
                            "final": None,
                            "notes": [m["note"]] if m["note"] else [],
@@ -9573,74 +8531,51 @@ def _judge_round(question, hits, answer, hard, mech_block="",
             claims[-1][engine] = m["verdict"]
             live_idx.append(len(claims) - 1)
 
-    if second["available"]:
-        judges.append(second_engine)
-        _absorb(second, second_engine)
-    elif second_engine:
-        errors.append(second_engine + " judge: "
-                      + str(second["error"]))
-        if second_engine == "nim":
-            nim_status = "unavailable"
-            nim_error = str(second["error"])
-    if nim2["available"]:
-        judges.append("nim2")
-        _absorb(nim2, "nim2")
-    elif run_nim2:
-        errors.append("nim2 judge: " + str(nim2["error"]))
-        nim2_status = "unavailable"
-        nim2_error = str(nim2["error"])
-    if primary_engine == "nim":
-        panel_ms["third"] = panel_ms["primary"]
-    elif second_engine == "nim" and second["available"]:
-        panel_ms["third"] = panel_ms["second"]
+    if seat2["available"]:
+        judges.append("seat2")
+        _absorb(seat2, "seat2")
+        _set_seat_phase("seat2", "done")
+    elif run_seat2:
+        errors.append("seat2 judge: " + str(seat2["error"]))
+        seat2_status = "unavailable"
+        seat2_error = str(seat2["error"])
+        _set_seat_phase("seat2", "down")
     # --- v19 (§G1): completeness repair. A verdict seat's
-    # batched reply can parse cleanly yet silently OMIT claims
-    # (the seat counts as available; the omitted claims end up
-    # covered by one family only). On the 2026-10-14 SFC ask
-    # both stage-2 seats omitted the same 3 load-bearing
-    # claims, and no path ever re-asked them. Each seat that
-    # ran now gets ONE follow-up call naming only the claims
-    # it skipped; a claim the seat already verdicted is never
-    # re-asked, and the repair is skipped when the round's
-    # deadline is nearly spent.
-    if not local_only:
-        for _eng in dict.fromkeys(
-                ([second_engine] if second["available"] else [])
-                + (["nim2"] if nim2["available"] else [])):
-            _missing = [i for i in live_idx
-                        if claims[i].get(_eng) is None
-                        and not claims[i].get("meta")]
-            if not _missing:
-                continue
-            if deadline is not None \
-                    and deadline - time.monotonic() < 45:
-                break
+    # batched reply can parse cleanly yet silently OMIT
+    # claims (the seat counts as available; the omitted
+    # claims end up covered by one family only). Seat 2 gets
+    # ONE follow-up call naming only the claims it skipped;
+    # a claim the seat already verdicted is never re-asked,
+    # and the repair is skipped when the round's deadline is
+    # nearly spent.
+    if seat2["available"]:
+        _missing = [i for i in live_idx
+                    if claims[i].get("seat2") is None
+                    and not claims[i].get("meta")]
+        if _missing and not (
+                deadline is not None
+                and deadline - time.monotonic() < 45):
             _rv = _second_verdicts(
-                _eng, question, hits,
+                "seat2", question, hits,
                 [claims[i] for i in _missing], mech_block)
             if _rv["available"]:
                 for _sub, _v in _rv["verdicts"].items():
                     _ci = _missing[_sub]
-                    claims[_ci][_eng] = _v["verdict"]
+                    claims[_ci]["seat2"] = _v["verdict"]
                     if _v["note"]:
                         claims[_ci]["notes"].append(
                             "completeness repair: " + _v["note"])
                 panel_ms["repaired_claims"] += len(_rv["verdicts"])
     # --- v15.1 (operator ruling, 2026-10-13): NO local second
-    # seat. Through v15.0 a failed remote second seat was filled
-    # by the local 14B, which put the 14B on the panel of
-    # ordinary remote asks. The 14B now judges ONLY in
-    # local-only degradation (both remote seats down; stage 1
-    # above) or on an explicit local pick. A failed second seat
-    # degrades the round to the surviving remote judge alone
-    # (mode gemini-only / nim-only, the *_single badges); the
-    # seat's error is already recorded above.
-    # --- The join (S1): cached claims whose refutation returned
-    # NEW material lose their cached verdict (their evidence
-    # changed); every claim carrying refutation candidates is
-    # re-verdicted against the union evidence by the second
-    # seat. A re-verdict that does not affirm the claim sends
-    # it to the disputed pool below.
+    # seat. A failed seat 2 degrades the round to seat 1
+    # alone (mode gemini-only / relief-only, the *_single
+    # badges); the seat's error is already recorded above.
+    # --- The join (S1): cached claims whose refutation
+    # returned NEW material lose their cached verdict (their
+    # evidence changed); every claim carrying refutation
+    # candidates is re-verdicted against the union evidence
+    # by seat 2. A re-verdict that does not affirm the claim
+    # sends it to the disputed pool below.
     refuted = [i for i in range(len(claims))
                if claims[i].get("refutations")]
     panel_ms["refuted_claims"] = len(refuted)
@@ -9651,8 +8586,7 @@ def _judge_round(question, hits, answer, hard, mech_block="",
             panel_ms["cached_claims"] -= 1
             if i not in live_idx:
                 live_idx.append(i)
-    rejudge_engine = second_engine if second["available"] else (
-        "nim2" if nim2["available"] else None)
+    rejudge_engine = "seat2" if seat2["available"] else None
     if refuted and rejudge_engine:
         subset = [claims[i] for i in refuted]
         rv = _second_verdicts(rejudge_engine, question, hits,
@@ -9666,15 +8600,15 @@ def _judge_round(question, hits, answer, hard, mech_block="",
                         "refutation check: " + v["note"])
     # --- Mode + resolution. Code resolves verdicts, never
     # averages (v14's rule, unchanged).
-    remote = [j for j in judges if j in ("lite", "nim", "nim2")]
+    remote = [j for j in judges if j in ("lite", "relief", "seat2")]
     if len(remote) >= 2:
         mode = "panel"
-    elif len(judges) >= 2:
-        mode = "dual"
     elif judges == ["lite"]:
         mode = "gemini-only"
-    elif judges == ["nim"]:
-        mode = "nim-only"
+    elif judges == ["relief"]:
+        mode = "relief-only"
+    elif judges == ["seat2"]:
+        mode = "seat2-only"
     else:
         mode = "local-only"
     disputed = []
@@ -9684,8 +8618,10 @@ def _judge_round(question, hits, answer, hard, mech_block="",
             c["final"] = _cv["verdict"] if isinstance(_cv, dict) \
                 else _cv
             continue
-        vs = [c[k] for k in ("lite", "nim", "nim2", "local") if c.get(k)]
-        if c.get("refute_verdict") and c["refute_verdict"] != "supported":
+        vs = [c[k] for k in ("lite", "relief", "seat2", "local")
+              if c.get(k)]
+        if c.get("refute_verdict") \
+                and c["refute_verdict"] != "supported":
             disputed.append(i)
             continue
         if len(vs) >= 3:
@@ -9704,10 +8640,11 @@ def _judge_round(question, hits, answer, hard, mech_block="",
         else:
             c["final"] = "not_addressed"
     for c in claims:  # keep the arbitration evidence's alias fresh
-        c["third"] = c.get("nim")
+        c["third"] = c.get("seat2")
     flash_used = False
     if disputed:
         _set_stage("arbitrating")
+        _set_seat_phase("arbitrator", "ruling")
         to_rule = [i for i in disputed
                    if claims[i]["load_bearing"] or hard]
         if to_rule:
@@ -9722,28 +8659,20 @@ def _judge_round(question, hits, answer, hard, mech_block="",
                     claims[idx]["flash"] = verdict
                     claims[idx]["final"] = verdict
         # v15.1 (operator ruling, 2026-10-13): NO local
-        # tiebreak. Through v15.0, disputes Flash could not
-        # rule on went to the local 14B for a tiebreak verdict
-        # (the Miller smoke's [lite, nim, local] panel). That
-        # seat is removed: a disputed claim with no Flash
-        # ruling FAILS CLOSED in the loop below (worst verdict
-        # on record, or not_addressed). The local model is
+        # tiebreak. A disputed claim with no Flash ruling
+        # FAILS CLOSED in the loop below (worst verdict on
+        # record, or not_addressed). The local model is
         # never seated on a remote ask.
         for i in disputed:
             if claims[i]["final"] is None:
-                vs = [claims[i][k] for k in ("lite", "nim", "nim2", "local")
+                vs = [claims[i][k]
+                      for k in ("lite", "relief", "seat2", "local")
                       if claims[i].get(k)]
                 if claims[i].get("refute_verdict") \
                         and claims[i]["refute_verdict"] != "supported":
-                    # v18 (F1, pass 2 item A3): Flash was asked
-                    # (this claim is load-bearing or the question
-                    # is hard) and did not rule, so the
+                    # v18 (F1, pass 2 item A3): Flash was
+                    # asked and did not rule, so the
                     # refutation verdict STANDS as the final.
-                    # Through v17.3 it was honored only when no
-                    # seat had said "supported"; whenever the
-                    # panel had, the refutation silently dropped
-                    # out of the worst-of fold and a refuted
-                    # claim shipped Verified.
                     claims[i]["final"] = claims[i]["refute_verdict"]
                 elif vs:
                     w = vs[0]
@@ -9753,10 +8682,11 @@ def _judge_round(question, hits, answer, hard, mech_block="",
                 else:
                     claims[i]["final"] = "not_addressed"
     # --- Targeted evidence hunt (item 1, regression fix b):
-    # claims still not_addressed get one hunt for the specific
-    # passage before they are abandoned. Promotion is strict:
-    # at least two judges must re-verdict supported against the
-    # enlarged evidence; the hunt never demotes.
+    # claims still not_addressed get one hunt for the
+    # specific passage before they are abandoned. Promotion
+    # is strict: at least two judges must re-verdict
+    # supported against the enlarged evidence; the hunt
+    # never demotes.
     if corp is not None \
             and not (deadline is not None
                      and deadline - time.monotonic() < 90):
@@ -9772,26 +8702,27 @@ def _judge_round(question, hits, answer, hard, mech_block="",
             claims[i]["hunt"] = new
             verdicts = []
             for eng in dict.fromkeys(
-                    [primary_engine] +
-                    ([second_engine] if second["available"] else [])
-                    + (["nim2"] if nim2["available"] else [])):
+                    [primary_engine]
+                    + (["seat2"] if seat2["available"] else [])):
                 rv = _second_verdicts(eng, question, hits,
                                       [claims[i]], mech_block)
                 if rv["available"] and 0 in rv["verdicts"]:
                     claims[i][eng] = rv["verdicts"][0]["verdict"]
                     _mdl = {"lite": GEMINI_CHAIN[0],
-                            "local": ROUTED_MODEL}.get(
-                        eng, _ask_ctx().served_models.get(
-                            "judge_" + eng))
+                            "relief": _ask_ctx().served_models.get(
+                                "relief"),
+                            "local": ROUTED_MODEL,
+                            "seat2": _ask_ctx().served_models.get(
+                                "judge_seat2")}.get(eng)
                     verdicts.append(
                         (rv["verdicts"][0]["verdict"],
                          _model_family(_mdl) if _mdl else eng))
                     if rv["verdicts"][0]["note"]:
                         claims[i]["notes"].append(
                             rv["verdicts"][0]["note"])
-            # v18 (pass 2 item E): promotion needs two distinct
-            # FAMILIES affirming, not two verdicts that may be
-            # one model serving two seats.
+            # v18 (pass 2 item E): promotion needs two
+            # distinct FAMILIES affirming, not two verdicts
+            # that may be one model serving two seats.
             _sup_fams = {fam for v, fam in verdicts
                          if v == "supported"}
             if verdicts and all(v == "supported"
@@ -9803,29 +8734,26 @@ def _judge_round(question, hits, answer, hard, mech_block="",
                     "re-judged supported")
     # --- v18 (§C): per-claim coverage + serving models. A
     # claim's coverage is the set of DISTINCT MODEL FAMILIES
-    # among its SUPPORTING verdicts (pass 2 item B: a seat and
-    # its own failover are one family and can never make a
-    # claim panel-verified; two seats served by one model are
-    # one voice). Badges derive from coverage in _run_unit;
-    # §E persists both maps per claim. Cached claims carry the
+    # among its SUPPORTING verdicts (a seat and its own
+    # failover are one family and can never make a claim
+    # panel-verified; two seats served by one model are one
+    # voice). Badges derive from coverage in _run_unit; §E
+    # persists both maps per claim. Cached claims carry the
     # coverage recorded when their verdict was stored.
     _served = dict(_ask_ctx().served_models)
-    # v20.1 (fix 2): seat A's model attribution is as-served
-    # too — FLASH_MODEL when the mid-ladder rung extracted,
-    # else the Lite primary (the rung is google-family either
-    # way, so coverage families are unchanged).
     _engine_model = {"lite": _served.get("lite")
                      or GEMINI_CHAIN[0],
-                     "local": ROUTED_MODEL, "flash": FLASH_MODEL,
-                     "nim": _served.get("judge_nim1"),
-                     "nim2": _served.get("judge_nim2")}
+                     "relief": _served.get("relief"),
+                     "local": ROUTED_MODEL,
+                     "flash": FLASH_MODEL,
+                     "seat2": _served.get("judge_seat2")}
     for c in claims:
         if isinstance(c.get("cached"), dict):
             c["coverage"] = list(c["cached"].get("coverage") or [])
             c["models"] = dict(c["cached"].get("models") or {})
             continue
         _models, _fams = {}, set()
-        for _eng in ("lite", "nim", "nim2", "local", "flash"):
+        for _eng in ("lite", "relief", "seat2", "local", "flash"):
             if c.get(_eng):
                 _mdl = _engine_model.get(_eng)
                 if _mdl:
@@ -9836,11 +8764,9 @@ def _judge_round(question, hits, answer, hard, mech_block="",
         c["coverage"] = sorted(_fams)
     # Cache the trustworthy resolutions (S2 + v18 F12): a
     # verdict is stored only when at least two DISTINCT
-    # FAMILIES produced verdicts on the claim, or Flash ruled.
-    # Through v17.3 the put counted engine fields, so one model
-    # serving two seats wrote a "unanimous" entry. Hunt-promoted
-    # verdicts are not stored: they were earned on evidence
-    # outside the key's scope.
+    # FAMILIES produced verdicts on the claim, or Flash
+    # ruled. Hunt-promoted verdicts are not stored: they
+    # were earned on evidence outside the key's scope.
     if use_cache:
         for i, c in enumerate(claims):
             if i in cached_idx or c.get("origin") == "conflict" \
@@ -9854,9 +8780,9 @@ def _judge_round(question, hits, answer, hard, mech_block="",
                     {"verdict": c["final"],
                      "coverage": c.get("coverage") or [],
                      "models": c.get("models") or {}})
-    # Keep the v14.2-era 'third' alias pointing at the NIM seat.
+    # Keep the v14.2-era 'third' alias pointing at seat 2.
     for c in claims:
-        c["third"] = c.get("nim")
+        c["third"] = c.get("seat2")
     # Meta claims (about the documents themselves) never sink
     # an answer: the pass is computed over substantive claims.
     substantive = [c for c in claims if not c.get("meta")]
@@ -9865,12 +8791,11 @@ def _judge_round(question, hits, answer, hard, mech_block="",
     return {"mode": mode, "claims": claims, "flash_used": flash_used,
             "pass": passed, "errors": errors, "refute_ms": refute_ms,
             # §C (operator ruling 2026-10-14): the panel state
-            # rides the round so _run_unit can rename a top-class
-            # badge earned on a degraded panel.
+            # rides the round so _run_unit can rename a
+            # top-class badge earned on a degraded panel.
             "panel_state": _panel_state(judges, _served),
-            "panel": _panel_info(judges, panel_ms, nim_status,
-                                 nim_error, nim2_status, nim2_error,
-                                 served=_served)}
+            "panel": _panel_info(judges, panel_ms, seat2_status,
+                                 seat2_error, served=_served)}
 
 # --- v14: the escalation ladder ----------------------------------------------
 # Per answering unit (the whole question, or one part of a bundled
@@ -9892,24 +8817,22 @@ def _generate(engine, model, question, hits, instructions):
             label += " (downgraded: best Gemini unavailable)"
         return answer, prompt, label, dg, False
     if engine in ("nim", "nimfast"):
-        # v16: the drafting SEATS own model choice (the model
-        # argument is the v15-era nominal pick and is ignored):
-        # the seat's active candidate drafts; on failure the job
-        # fails over to the seat's next measured candidate
-        # before this raises, and only a fully-down seat raises
-        # (the caller then applies the genuine-unavailability
-        # local fallback). Seat health records every call.
+        # v23 (WS3.1): the drafting ladder is THREE TIERS.
+        # Tier 1 (free): the Groq primary (hard: GPT-OSS-120B;
+        # simple: GPT-OSS-20B). Tier 2 (paid): xAI Grok 4.7
+        # (hard only), then OpenRouter (hard: GPT-OSS-120B;
+        # simple: GPT-OSS-20B). Tier 3 (local qwen3.5:9b /
+        # the routed local model) is the caller's
+        # genuine-unavailability fallback in _try_generate,
+        # reached only when this raises. The v16-v22 NIM
+        # bench tier is DELETED, as is the divergence
+        # oracle's nimx engine. (The engine names "nim" /
+        # "nimfast" are v15-era labels for this hosted ladder,
+        # kept so callers and records stay comparable; no NIM
+        # model is in it.) The model argument is the nominal
+        # pick and is ignored: the ladder owns model choice.
+        # Seat-style events record every call.
         job = "hard_draft" if engine == "nim" else "simple_draft"
-        # v20: the drafting chain in strict layer order
-        # (the operator's layer model, 2026-10-14): Layer 0 Groq's
-        # free tier (hard: GPT-OSS-120B; simple: GPT-OSS-20B);
-        # Layer 2 the v16 NIM bench loop (free, slow — the
-        # hard bench leads with Kimi K3 and GLM-5.3 per the
-        # chain spec); Layer 3 the paid seats (hard: Grok 4.7
-        # on xAI, then GPT-OSS on OpenRouter; simple:
-        # GPT-OSS-20B on OpenRouter). A fully-down chain
-        # raises into the caller's genuine-unavailability
-        # local fallback (Layer 4), unchanged from v16.
         _gt = _leg_timeout(GROQ_DRAFTER_TIMEOUT)
         if _groq_available() and _gt > 0:
             _gmodel = (GROQ_HARD_MODEL if engine == "nim"
@@ -9939,70 +8862,7 @@ def _generate(engine, model, question, hits, instructions):
                       flush=True)
         elif _groq_key() is not None and _groq_guard_tripped():
             _note_groq_shed(job)
-        # Layer 2: the NIM bench. The loop walks the seat's
-        # candidates as in v16 (seat health records every
-        # call); exhausting the bench no longer raises — the
-        # paid layer below gets its turn first.
-        tried, last_err = [], None
-        while True:
-            # v20: a leg starts only while the unit's budget
-            # has room for it, and runs clamped to what is
-            # left (NIM legs are the slow ones: ~60s bound).
-            _lt = _leg_timeout(NIM_DRAFTER_TIMEOUT)
-            if _lt <= 0:
-                break
-            smodel, slot, failover = _seat_pick(job, skip=tried)
-            if smodel is None:
-                _note_seat_skips(job, None, tried)  # v21 (WS4b)
-                break
-            key_env, key_file = SEAT_SLOTS[slot]
-            t0 = time.monotonic()
-            try:
-                answer, prompt = nim_ask(
-                    smodel, question, hits,
-                    instructions=instructions,
-                    key_env=key_env, key_file=key_file,
-                    timeout=_lt, deadline=t0 + _lt)
-                lat = time.monotonic() - t0
-                _seat_report(job, smodel, lat, True)
-                _note_seat(job, smodel, failover)
-                _note_seat_skips(job, smodel, tried)  # v21 (WS4b)
-                label = smodel + " (NIM API)"
-                if failover:
-                    label += " (failover seat)"
-                return answer, prompt, label, False, False
-            except Exception as e:
-                lat = time.monotonic() - t0
-                _to = (lat >= NIM_DRAFTER_TIMEOUT * 0.9
-                       or "timed out" in str(e)
-                       or "timeout" in str(e).lower())
-                _seat_report(job, smodel, lat, False,
-                             timed_out=_to)
-                # v21 (WS4b): bench failures persist their
-                # reasons (through v20.2 this path recorded
-                # only the aggregate seat-health counters).
-                _note_seat_fail(job, smodel, slot, lat, _to,
-                                f"{type(e).__name__}: {e}")
-                tried.append(smodel)
-                last_err = e
-                if len(tried) >= len(SEATS[job]["candidates"]):
-                    break
-        # v21 (WS4b): the bench's outcome is never silent —
-        # why it did not serve lands in the record before the
-        # paid layer gets its turn.
-        if tried:
-            _note_seat_down(
-                job, f"nim bench exhausted: {len(tried)} "
-                f"candidate(s) failed; last: "
-                f"{type(last_err).__name__}: {last_err}")
-        elif _lt <= 0:
-            _note_seat_down(
-                job, "nim bench shed: unit budget spent")
-        else:
-            _note_seat_down(
-                job, "nim bench: no candidate available "
-                "(benched, keyless, or family-excluded)")
-        # Layer 3 (paid): xAI Grok 4.7 first on hard
+        # Tier 2 (paid): xAI Grok 4.7 first on hard
         # questions (reservation-gated like OpenRouter), then
         # the v17 OpenRouter seat (hard: GPT-OSS-120B;
         # simple: GPT-OSS-20B).
@@ -10054,36 +8914,9 @@ def _generate(engine, model, question, hits, instructions):
                       f"{str(e)[:150]}; the chain falls over",
                       flush=True)
         _note_seat_down(
-            job, f"every drafting layer down (tried NIM bench "
-            f"{tried})")
+            job, "every drafting tier down")
         raise RuntimeError(
-            f"{job}: every drafting layer down (tried NIM "
-            f"bench {tried}): {last_err}")
-    if engine == "nimx":
-        # v16: an explicit NIM model on the drafting key slot
-        # (the divergence oracle's B draft). No seat machinery:
-        # the caller chose this model deliberately.
-        # v22.1 (secondary fix a): thread the leg deadline like
-        # every other draft leg. Through v22 this branch called
-        # nim_ask with NO deadline, so _nim_text's internal
-        # retry ran at the full NIM_DRAFTER_TIMEOUT again after
-        # a first read timeout — the WS4a bug class, surviving
-        # on this one path (found by the 2026-10-14 CSRA live
-        # diagnosis: NIM draft legs at the full transport
-        # timeout). _leg_timeout clamps to the unit's remaining
-        # budget; a spent budget sheds the leg instead of
-        # starting it.
-        _lt = _leg_timeout(NIM_DRAFTER_TIMEOUT)
-        if _lt <= 0:
-            raise RuntimeError(
-                "nimx draft leg shed: unit budget spent")
-        key_env, key_file = SEAT_SLOTS[2]
-        answer, prompt = nim_ask(model, question, hits,
-                                 instructions=instructions,
-                                 key_env=key_env, key_file=key_file,
-                                 timeout=_lt,
-                                 deadline=time.monotonic() + _lt)
-        return answer, prompt, model + " (NIM API)", False, False
+            f"{job}: every drafting tier down")
     try:
         answer, prompt = ollama_ask(model, question, hits,
                                     instructions=instructions)
@@ -10137,7 +8970,7 @@ def _is_memo_shaped_draft(text):
 
 
 def _build_objections(jr, mech_failures, ungrounded, uncited=(),
-                      quantities=(), required_points=(), conflicts=()):
+                      quantities=(), conflicts=()):
     lines = ["CORRECTIONS REQUIRED: a previous draft of this answer "
              "failed verification. Fix every item below. Ground each "
              "claim in the excerpts or the verified figures, correct "
@@ -10169,12 +9002,6 @@ def _build_objections(jr, mech_failures, ungrounded, uncited=(),
     for f in quantities or ():
         lines.append(f"- Quantity check failed: {f['label']} "
                      "Correct the arithmetic.")
-    for p in required_points or ():
-        lines.append("- This point was established by the "
-                     "independent second draft and confirmed by "
-                     "a second judge model, but the current "
-                     "draft omits it: "
-                     "\"" + p + "\" — work it in accurately.")
     for cf in conflicts or ():
         # v18 (F16): conflict objections format non-dollar
         # kinds (the ABLE age conflict) with their units.
@@ -10194,35 +9021,6 @@ def _build_objections(jr, mech_failures, ungrounded, uncited=(),
                          "State BOTH figures with where each comes "
                          "from; do not present one as settled.")
     return "\n".join(lines)
-
-
-def _points_missing(points, draft, question=""):
-    """v15 (item 4): which divergence-required points a draft
-    fails to cover: every figure in the point must appear, and
-    at least half its content words must be present.
-    v18 (F14): a point must also pass a RELEVANCE test before
-    it can block shipping — it shares at least two content
-    words with the question, or carries a figure. Through
-    v17.3 any B-draft tangent, however unrelated to what was
-    asked, blocked the A draft's ship."""
-    low = (draft or "").lower()
-    low_flat = low.replace(",", "")
-    draft_toks = set(re.findall(r"[a-z]{4,}", low))
-    q_toks = {w for w in re.findall(r"[a-z]{4,}",
-                                    (question or "").lower())
-              if w not in STOP}
-    missing = []
-    for p in points or ():
-        nums = re.findall(r"\d[\d,]*\.?\d*", p)
-        toks = {w for w in re.findall(r"[a-z]{4,}", p.lower())
-                if w not in STOP}
-        if not nums and len(toks & q_toks) < 2:
-            continue  # not relevant to what was asked
-        num_ok = all(n.replace(",", "") in low_flat for n in nums)
-        overlap = (len(toks & draft_toks) / len(toks)) if toks else 1.0
-        if not (num_ok and overlap >= 0.5):
-            missing.append(p)
-    return missing
 
 
 def _assemble_capped_partial(draft, jr, question, hits,
@@ -10290,27 +9088,6 @@ def _assemble_capped_partial(draft, jr, question, hits,
     return None
 
 
-def _diverge_model():
-    """The divergence oracle's model (v16 item 4 + the operator's
-    ruling): a NIM flagship from a DIFFERENT family than the
-    hard-draft seat's active pick — normally the seat's
-    runner-up candidate. Never a local model. v18 (§C):
-    "different family" is literal — through v17.3 the oracle
-    merely differed in slug and could share the drafting
-    family; the ask's drafting family is excluded too."""
-    active, _slot, _fo = _seat_pick("hard_draft")
-    fams = {_model_family(active)} if active else set()
-    if _ask_ctx().draft_family:
-        fams.add(_ask_ctx().draft_family)
-    for model, _s in SEATS["hard_draft"]["candidates"]:
-        if _model_family(model) not in fams:
-            return model
-    for model, _s in SEATS["hard_draft"]["candidates"]:
-        if model != active:
-            return model
-    return SEATS["hard_draft"]["candidates"][0][0]
-
-
 def _lead_citation(ctx):
     """The citation a mechanism-led answer's lead sentence must
     carry: the first excerpt that literally states the matched
@@ -10367,7 +9144,7 @@ def _panel_annotation(jr):
     records. Empty when no judge served (mode none)."""
     claims = (jr or {}).get("claims") or []
     sat = []
-    for eng in ("lite", "nim", "nim2", "local", "flash"):
+    for eng in ("lite", "relief", "seat2", "local", "flash"):
         for c in claims:
             mdl = (c.get("models") or {}).get(eng)
             if mdl and mdl not in sat:
@@ -10441,8 +9218,6 @@ def _run_unit(ctx):
         judge_q = (ctx["full_question"]
                    + "\n\n(This unit answers only this part: "
                    + ctx["unit_q"] + ")")
-    diverge = bool(ctx.get("diverge")) and ctx["engine"] == "local" \
-        and not ctx.get("explicit_model") and hard
     ev0 = len(_events())
     # v20.2: this unit's retrieval-pool snapshots (any
     # ask-mode hybrid_search that runs inside the unit).
@@ -10464,29 +9239,31 @@ def _run_unit(ctx):
     cost_capped = False
     conflict_fail = False
     judged_draft = None       # last draft that went through judging
-    required_points = []      # item 4: confirmed B-only points
-    missing_points = []
-    divergence = None
+    # v23: divergence-required points are gone with the
+    # oracle; the ship tests keep no missing-points term.
+    divergence = None  # v23: the oracle is deleted; always None
 
     def _draft_choice(rung):
-        """(engine, model) for one generation attempt. v15: the
-        local path drafts on NIM (hard: kimi-k3; simple: the fast
-        tier; redrafts: kimi-k3) unless the caller explicitly
-        picked a model. Gemini units are unchanged."""
+        """(engine, model) for one generation attempt. The
+        hosted ladder (engines "nim"/"nimfast", v15-era names)
+        owns its model choice in _generate; the model named
+        here is the ladder's free primary, for the record.
+        Gemini units are unchanged."""
         if ctx["engine"] == "gemini" or ctx.get("explicit_model"):
             if rung > 0 and ctx["engine"] == "local":
                 return "local", ROUTED_MODEL  # v14 redraft rule
             return ctx["engine"], ctx["draft_model"]
         if rung == 0 and not hard:
-            return "nimfast", DRAFTER_SIMPLE_MODEL
-        return "nim", DRAFTER_MODEL
+            return "nimfast", GROQ_SIMPLE_MODEL
+        return "nim", GROQ_HARD_MODEL
 
     def _try_generate(engine, model, instr):
-        """Generate with the fallback chains. v16: _generate
-        already failed over through every candidate in the NIM
-        seat, so reaching the local branch means the remote
-        drafting path is genuinely unavailable (item 5's one
-        sanctioned drafting load); the load is recorded."""
+        """Generate with the fallback chains. v23: _generate's
+        hosted ladder already walked its tiers (free Groq,
+        then paid xAI/OpenRouter), so reaching the local
+        branch means the remote drafting path is genuinely
+        unavailable (item 5's one sanctioned drafting load);
+        the load is recorded."""
         try:
             return _generate(engine, model, ctx["unit_q"],
                              ctx["hits"], instr)
@@ -10528,6 +9305,7 @@ def _run_unit(ctx):
         rungs = rung + 1
         _set_stage("drafting" if rung == 0
                    else f"redrafting (round {rung + 1})")
+        _set_phase("drafting", round=rung + 1)
         instr = ctx["instructions"]
         if draft_extra:
             instr = (instr + "\n\n" + draft_extra).strip()
@@ -10535,26 +9313,8 @@ def _run_unit(ctx):
         if objections:
             instr = (instr + "\n\n" + objections).strip()
         eng, mdl = _draft_choice(rung)
-        draft_b_text = None
         try:
-            if rung == 0 and diverge:
-                # Item 4 (v16): the independent second draft comes
-                # from a NIM flagship of a different family than
-                # draft A's seat (the bake-off runner-up seat),
-                # never a local model (operator ruling).
-                with ThreadPoolExecutor(max_workers=2) as pool:
-                    fa = _submit(pool, _try_generate, eng, mdl, instr)
-                    fb = _submit(pool, _generate, "nimx",
-                                     _diverge_model(),
-                                     ctx["unit_q"], ctx["hits"],
-                                     instr)
-                    res = fa.result()
-                    try:
-                        draft_b_text = fb.result()[0]
-                    except Exception:
-                        draft_b_text = None
-            else:
-                res = _try_generate(eng, mdl, instr)
+            res = _try_generate(eng, mdl, instr)
         except Exception as e:
             gen_error = str(e)[:200]
             draft = None
@@ -10617,6 +9377,7 @@ def _run_unit(ctx):
             # judging in case a local fallback seat is needed.
             _unload_others(ROUTED_MODEL)
         _set_stage(f"judging round {rung + 1}")
+        _set_phase("judging", round=rung + 1)
         jt0 = time.monotonic()
         jr = _judge_round(judge_q, ctx["hits"], draft,
                           hard, judge_block, corp=ctx.get("corp"),
@@ -10670,88 +9431,14 @@ def _run_unit(ctx):
                     quantities = _quantities_for(draft)
                     lead_uncited = bool(
                         lead_sentence and lead_sentence in uncited_lb)
-        if rung == 0 and diverge and draft_b_text:
-            # Divergence mapping: B-only load-bearing claims the
-            # NIM extractor confirms become required points the
-            # final draft must cover; contested overlaps are
-            # recorded (their A-side claims already went through
-            # refutation as load-bearing claims).
-            bj = _primary_judgment("nim", judge_q,
-                                   ctx["hits"], draft_b_text,
-                                   judge_block)
-            if bj["available"]:
-                a_toks = [{w for w in re.findall(
-                    r"[a-z]{4,}", c["text"].lower()) if w not in STOP}
-                    for c in jr["claims"]]
-                points, contested = [], []
-                for bc in bj["claims"]:
-                    if not bc["load_bearing"] \
-                            or bc["verdict"] != "supported":
-                        continue
-                    btoks = {w for w in re.findall(
-                        r"[a-z]{4,}", bc["text"].lower())
-                        if w not in STOP}
-                    best = max((len(btoks & at) / max(1, len(btoks))
-                                for at in a_toks), default=0.0)
-                    if best < 0.5:
-                        points.append(bc["text"])
-                for c in jr["claims"]:
-                    if c["final"] == "supported":
-                        continue
-                    ctoks = {w for w in re.findall(
-                        r"[a-z]{4,}", c["text"].lower())
-                        if w not in STOP}
-                    for bc in bj["claims"]:
-                        btoks = {w for w in re.findall(
-                            r"[a-z]{4,}", bc["text"].lower())
-                            if w not in STOP}
-                        if ctoks and len(ctoks & btoks) / max(
-                                1, len(ctoks)) >= 0.3:
-                            contested.append(c["text"])
-                            break
-                # v18 (F14): a B-only point becomes REQUIRED
-                # only when a SECOND model confirms it. Through
-                # v17.3 one _primary_judgment call both proposed
-                # the points and (in the objection text) claimed
-                # the judges had confirmed them; unconfirmed
-                # points now never block shipping.
-                lj = _primary_judgment("lite", judge_q,
-                                       ctx["hits"], draft_b_text,
-                                       judge_block)
-                if lj["available"]:
-                    confirmed = []
-                    for p in points:
-                        ptoks = {w for w in re.findall(
-                            r"[a-z]{4,}", p.lower())
-                            if w not in STOP}
-                        for lc in lj["claims"]:
-                            if lc["verdict"] != "supported":
-                                continue
-                            ltoks = {w for w in re.findall(
-                                r"[a-z]{4,}", lc["text"].lower())
-                                if w not in STOP}
-                            if ptoks and len(ptoks & ltoks) / max(
-                                    1, len(ptoks)) >= 0.5:
-                                confirmed.append(p)
-                                break
-                    points = confirmed
-                else:
-                    points = []
-                required_points = points
-                divergence = {"b_claims": len(bj["claims"]),
-                              "required_points": points,
-                              "contested": contested}
-        missing_points = _points_missing(required_points, draft,
-                                         ctx["unit_q"])
         if jr["mode"] == "none":
             break  # no judge can run: redrafting blind helps nothing
         if jr["pass"] and not ungrounded and not mech_failures \
                 and not quantities and not uncited_lb \
-                and not missing_points and not conflict_fail:
+                and not conflict_fail:
             break  # every gate passed: ship this draft
         objections = _build_objections(
             jr, mech_failures, ungrounded, uncited_lb, quantities,
-            missing_points,
             conflicts if conflict_fail else ())
         if lead_uncited:
             # Item 4 (b): the redraft objection for a failed lead
@@ -10804,9 +9491,6 @@ def _run_unit(ctx):
                 stripped_draft, ctx["mechanisms"],
                 ctx.get("csra_comp"))
             quantities = _quantities_for(stripped_draft)
-            missing_points = _points_missing(required_points,
-                                             stripped_draft,
-                                             ctx["unit_q"])
             # v18 (F7): the stripped draft is RE-JUDGED before
             # it can ship. Through v17.3 only the deterministic
             # gates re-ran and the ship test below read the
@@ -10828,11 +9512,15 @@ def _run_unit(ctx):
             _cc3, _cf3 = _conflict_claims(conflicts,
                                           stripped_draft)
             conflict_fail = bool(_cf3)
+    # v23 (WS1): the ladder is done; what remains (the final
+    # Flash ruling, capped assembly, IDK assembly) is the
+    # final-checks phase on the page's stepper.
+    _set_phase("final checks")
     shipped = False
     if draft is not None and jr is not None and jr["mode"] != "none":
         if jr["pass"] and not ungrounded and not mech_failures \
                 and not quantities and not uncited_lb \
-                and not missing_points and not conflict_fail:
+                and not conflict_fail:
             shipped = True
         elif deadline and time.monotonic() > deadline:
             cap_hit = True  # no budget left for the final ruling
@@ -10848,12 +9536,12 @@ def _run_unit(ctx):
                       if c["final"] != "supported"
                       and c["flash"] is None and not c.get("meta")
                       and c.get("origin") != "conflict"
-                      and sum(1 for k in ("lite", "nim", "nim2",
-                                          "local")
+                      and sum(1 for k in ("lite", "relief",
+                                          "seat2", "local")
                               if c.get(k) == "contradicted") < 2]
             if failed and not ungrounded and not mech_failures \
                     and not quantities and not uncited_lb \
-                    and not missing_points and not conflict_fail:
+                    and not conflict_fail:
                 rulings = _flash_arbitrate(judge_q, ctx["hits"],
                                            jr["claims"], failed)
                 if rulings:
@@ -11079,6 +9767,13 @@ button:disabled{background:var(--ink-disabled); cursor:default;}
 .badge.err{background:var(--surface-3); color:var(--error);}
 #verifyNote{margin-top:12px; font-size:13px; color:var(--ink-tertiary);}
 .spinner{display:none; margin-top:16px; color:var(--ink-tertiary); font-size:14px;}
+.steps{display:none; margin-top:14px;}
+.steps ol{list-style:none; margin:0; padding:0; display:flex; flex-wrap:wrap; gap:6px;}
+.steps li{font-size:13px; padding:5px 11px; border-radius:999px; border:1px solid var(--surface-3); color:var(--ink-disabled); background:var(--surface-2);}
+.steps li.done{color:var(--ink-secondary); border-color:var(--ink-disabled);}
+.steps li.now{color:var(--ink); border-color:var(--ink-secondary); font-weight:600;}
+.steps .seats{margin-top:8px; font-size:13px; color:var(--ink-tertiary);}
+.steps .elapsed{margin-top:4px; font-size:12px; color:var(--ink-disabled);}
 footer{margin-top:48px; font-size:12px; color:var(--ink-disabled); text-align:center; max-width:65ch;}
 </style>
 </head>
@@ -11112,6 +9807,7 @@ footer{margin-top:48px; font-size:12px; color:var(--ink-disabled); text-align:ce
     <label style="display:inline-block; text-transform:none; letter-spacing:0; font-size:14px; margin:0 0 0 12px;"><input type="checkbox" id="fresh"> Fresh answer (skip cache)</label>
     <button id="copyBtn" onclick="copyPrompt()" style="display:none; margin-left:8px; background:var(--surface-3); color:var(--ink);">Copy full prompt</button>
     <div class="spinner" id="spin">Searching documents and asking the model...</div>
+    <div class="steps" id="steps"><ol id="stepList"></ol><div class="seats" id="seatLine"></div><div class="elapsed" id="elapsedLine"></div></div>
   </div>
   <div id="answer">
     <div class="card">
@@ -11127,6 +9823,39 @@ footer{margin-top:48px; font-size:12px; color:var(--ink-disabled); text-align:ce
 function toggleLocal(){
   const on = document.getElementById('runLocal').checked;
   document.getElementById('localPick').style.display = on ? 'block' : 'none';
+}
+// v23 (WS1): the progress stepper, rendered from the job's
+// structured phase field. Step states + per-seat judge states
+// + elapsed seconds only: no percentage and no ETA (an ask's
+// length is not predictable, so the page never guesses).
+const STEP_DEFS = [['retrieving','Retrieving'],['drafting','Drafting'],['extracting','Extracting claims'],['judging','Judging'],['final checks','Final checks']];
+function renderPhase(jp){
+  const box = document.getElementById('steps');
+  if(!jp || !jp.phase){ box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  const name = jp.phase.name || 'retrieving';
+  const cur = STEP_DEFS.findIndex(function(s){ return s[0] === name; });
+  const ol = document.getElementById('stepList');
+  ol.innerHTML = '';
+  STEP_DEFS.forEach(function(s, i){
+    const li = document.createElement('li');
+    let label = s[1];
+    if(s[0] === name && jp.phase.round && (s[0] === 'drafting' || s[0] === 'judging')) label += ' · round ' + jp.phase.round;
+    const isDone = (name === 'done' || i < cur);
+    li.textContent = isDone ? '✓ ' + label : label;
+    li.className = isDone ? 'done' : (i === cur ? 'now' : '');
+    ol.appendChild(li);
+  });
+  const seats = jp.phase.seats || {};
+  const seatNames = {seat1: 'Seat 1 (Gemini)', seat2: 'Seat 2 (Qwen)', arbitrator: 'Tiebreak (Flash)'};
+  const parts = [];
+  Object.keys(seatNames).forEach(function(k){
+    if(seats[k]) parts.push(seatNames[k] + ': ' + seats[k]);
+  });
+  document.getElementById('seatLine').textContent =
+    (name === 'judging' || name === 'extracting') ? parts.join(' · ') : '';
+  document.getElementById('elapsedLine').textContent =
+    (typeof jp.elapsed_s === 'number') ? ('Elapsed: ' + Math.round(jp.elapsed_s) + 's') : '';
 }
 async function ask(){
   // v18 (F18): a second submit while an ask is running is
@@ -11169,6 +9898,7 @@ async function ask(){
       if(!j0.job_id) throw new Error('no job id');
       jobId = j0.job_id;
       spin.textContent = 'Working: ' + (j0.stage || 'retrieving') + '...';
+      renderPhase(j0);
       for(let i = 0; i < 400 && !d; i++){
         await new Promise(res => setTimeout(res, 2000));
         // v18 (F18): a failed POLL is tolerated and polling
@@ -11180,7 +9910,7 @@ async function ask(){
         }catch(pollErr){ continue; }
         if(jp.status === 'done'){ d = jp.result; }
         else if(jp.status === 'error'){ throw new Error(jp.error || 'job failed'); }
-        else { spin.textContent = 'Working: ' + (jp.stage || 'retrieving') + '...'; }
+        else { spin.textContent = 'Working: ' + (jp.stage || 'retrieving') + '...'; renderPhase(jp); }
       }
       if(!d) throw new Error('timed out waiting for the answer');
     }catch(jobErr){
@@ -11252,6 +9982,7 @@ async function ask(){
   btn.disabled = false;
   window._asking = false;
   document.getElementById('spin').style.display = 'none';
+  document.getElementById('steps').style.display = 'none';
 }
 async function copyPrompt(){
   if(!window._lastPrompt) return;
@@ -11377,6 +10108,7 @@ def _run_job(rec, raw_body, headers):
         rec["status"] = "error"
         rec["error"] = str(e)[:300]
     rec["stage"] = "done"
+    _set_phase("done")
     # v18 (§E): the job layer's own timestamps persist too (pass
     # 1 item P1's correction: total_ms is honest; what was
     # missing is exactly this job record).
@@ -11435,8 +10167,7 @@ class Handler(BaseHTTPRequestHandler):
                         # accounting mode + credit-ledger
                         # figure, and Groq's daily guard.
                         "xai": _xai_health_block(),
-                        "groq": _groq_health_block(),
-                        "gemini_flash_mid": _flash_mid_health_block()})
+                        "groq": _groq_health_block()})
         elif u.path == "/gaps":
             # v14: the gap log (IDKs, abstained parts, failed gates)
             # for the monthly rescrape watchlist and registry growth.
@@ -11449,7 +10180,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "unknown job"}, 404)
             else:
                 out = {"job_id": job["id"], "status": job["status"],
-                       "stage": job["stage"]}
+                       "stage": job["stage"],
+                       # v23 (WS1): the structured phase the
+                       # page's stepper renders, plus elapsed
+                       # seconds (elapsed only; never an ETA).
+                       "phase": job.get("phase") or
+                                {"name": job["stage"], "round": None,
+                                 "seats": {}},
+                       "elapsed_s": round(time.time()
+                                          - job["ts"], 1)}
                 if job["status"] == "done":
                     out["result"] = job["result"]
                 elif job["status"] == "error":
@@ -11469,11 +10208,14 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(u.query)
             q = qs.get("q", [""])[0]
             corp = get_corpus(qs.get("corpus", ["in"])[0])
-            # use hybrid search when embeddings are available, fallback to keyword
-            if EMBEDDINGS:
-                self._json({"query": q, "hits": hybrid_search(q, corpus=corp,
-                                                              boosts=False)})
-            else:
+            # v23: plain search rides the same v2 engine as the
+            # ask path. If the generation store is down the box
+            # degrades to the keyword scan; the ASK path never
+            # does (it fails closed in the pipeline).
+            try:
+                self._json({"query": q, "hits": hybrid_search(
+                    q, corpus=corp, boosts=False)})
+            except Exception:
                 self._json({"query": q, "hits": search(q, corpus=corp)})
         elif u.path == "/icon.png":
             try:
@@ -11554,6 +10296,7 @@ class Handler(BaseHTTPRequestHandler):
                 use_rerank = False
             t_start = time.monotonic()
             _set_stage("retrieving")
+            _set_phase("retrieving")
             # v15: the per-ask wall-clock cap (config
             # ASK_TIME_CAP_S); the ladder and the units loop
             # consult this deadline and never ship unverified.
@@ -11697,27 +10440,45 @@ class Handler(BaseHTTPRequestHandler):
             n_ex = 12 if _is_narrative(question) else 8
             missing_areas = []
             instructions = ""
-            if discovery and EMBEDDINGS:
-                hits, missing_areas = discovery_hits(question, corpus=corp)
-                if not hits:  # nothing per-area: fall back to normal search
-                    hits = hybrid_search(question, corpus=corp, n=n_ex,
-                                         use_rewrite=use_rewrite,
-                                         use_rerank=use_rerank)
-                instructions = SURVEY_INSTRUCTIONS
-                if missing_areas:
-                    instructions += (" Retrieval found no documents for: "
-                                     + ", ".join(missing_areas)
-                                     + ". List those categories in the "
-                                       "'Not covered' line.")
-            elif EMBEDDINGS:
-                # v11: bundled (multi-part) narrative questions get
-                # per-sub-question retrieval with guaranteed slots.
-                hits = retrieve_ask_hits(question, corp, n_ex,
-                                         use_rewrite=use_rewrite,
-                                         use_rerank=use_rerank)
-                hits = _drop_payee_admin(question, hits)
-            else:
-                hits = search(question, corpus=corp)
+            # v23 (WS3.2): ask retrieval is the v2 engine,
+            # unconditionally — the legacy EMBEDDINGS gate and
+            # the keyword-only else branch are deleted with
+            # the legacy path. An engine that cannot open
+            # fails the ask closed with a 503, never a silent
+            # keyword downgrade.
+            try:
+                if discovery:
+                    hits, missing_areas = discovery_hits(
+                        question, corpus=corp)
+                    if not hits:  # nothing per-area: normal search
+                        hits = hybrid_search(
+                            question, corpus=corp, n=n_ex,
+                            use_rewrite=use_rewrite,
+                            use_rerank=use_rerank)
+                    instructions = SURVEY_INSTRUCTIONS
+                    if missing_areas:
+                        instructions += (
+                            " Retrieval found no documents for: "
+                            + ", ".join(missing_areas)
+                            + ". List those categories in the "
+                            "'Not covered' line.")
+                else:
+                    # v11: bundled (multi-part) narrative
+                    # questions get per-sub-question retrieval
+                    # with guaranteed slots.
+                    hits = retrieve_ask_hits(
+                        question, corp, n_ex,
+                        use_rewrite=use_rewrite,
+                        use_rerank=use_rerank)
+                    hits = _drop_payee_admin(question, hits)
+            except Exception as e:
+                if _inf_entry is not None:
+                    _inflight_release(_inf_key)
+                    _inf_entry = None
+                self._json({"error": "retrieval engine "
+                                    "unavailable: "
+                                    + str(e)[:200]}, 503)
+                return
             # v13: verified-figures registry + server-computed CSRA.
             # Matched entries ride in the prompt as an authoritative
             # block, and their figures join the checker's allowed set.
@@ -11819,6 +10580,9 @@ class Handler(BaseHTTPRequestHandler):
                     "kind": "ask", "ask_id": _ask_ctx().ask_id,
                     "ts": time.time(),
                     "wall_s": round(t_end - t_start, 3),
+                    # v23 (WS1): per-phase wall seconds (the
+                    # held budget test's measurement).
+                    "phase_ms": _phase_ms_snapshot(),
                     "question": question, "corpus": corpus_name,
                     "local": local_mode, "badge": badge,
                     "cost_usd": result["cost_usd"],
@@ -11843,7 +10607,7 @@ class Handler(BaseHTTPRequestHandler):
                             "text": c.get("text"),
                             "final": c.get("final"),
                             "verdicts": {k: c.get(k) for k in
-                                         ("lite", "nim", "nim2",
+                                         ("lite", "relief", "seat2",
                                           "local", "flash",
                                           "refute_verdict")},
                             "coverage": c.get("coverage"),
@@ -11882,10 +10646,9 @@ class Handler(BaseHTTPRequestHandler):
             no_judging = {"mode": "none", "flash_used": False,
                           "flash_calls_today": _flash_calls_today(),
                           "panel": _panel_info(
-                              [], {"primary": None, "second": None,
-                                   "third": None},
-                              "no-key" if not _third_judge_key()
-                              else "not-run")}
+                              [], {"primary": None, "seat2": None},
+                              "no-key" if _seat_pick("judge_seat2")[0]
+                              is None else "not-run")}
             if not hits:
                 # v16 item 7: zero corpus hits is an honest IDK
                 # disposition: branch out to the official web
@@ -12056,12 +10819,10 @@ class Handler(BaseHTTPRequestHandler):
                        "reg_in_instructions":
                            spec["reg_in_instructions"],
                        # v15: corpus for refutation/hunt retrieval,
-                       # the ask deadline, divergence eligibility
-                       # (single-unit asks only, never per-part),
-                       # and the explicit-model guard.
+                       # the ask deadline, and the explicit-model
+                       # guard. (v23: the divergence-eligibility
+                       # key died with the oracle.)
                        "corp": corp, "deadline": deadline,
-                       "diverge": spec["part"] is None
-                       and not discovery,
                        "explicit_model": bool(
                            model and not use_gemini
                            and model != LOCAL_MODEL),
@@ -12326,18 +11087,25 @@ class Handler(BaseHTTPRequestHandler):
             # 'ok' if it judged any unit, else the dormant/failed
             # status every unit reported.
             panel_judges = []
-            third_status = "no-key" if not _third_judge_key() \
-                else "not-run"
+            seat2_status = "no-key" if _seat_pick("judge_seat2")[0] \
+                is None else "not-run"
+            _seat1_model = GEMINI_CHAIN[0]
+            _seat2_model = None
             for u in units:
                 p = u["judging"].get("panel") or {}
                 for j in p.get("judges") or ():
                     if j not in panel_judges:
                         panel_judges.append(j)
-                st = (p.get("third") or {}).get("status")
+                st = (p.get("seat2") or {}).get("status")
                 if st == "ok":
-                    third_status = "ok"
-                elif st == "unavailable" and third_status != "ok":
-                    third_status = "unavailable"
+                    seat2_status = "ok"
+                elif st == "unavailable" \
+                        and seat2_status != "ok":
+                    seat2_status = "unavailable"
+                if (p.get("seat2") or {}).get("model"):
+                    _seat2_model = p["seat2"]["model"]
+                if (p.get("seat1") or {}).get("status") == "relief":
+                    _seat1_model = p["seat1"]["model"]
             judging = {"mode": modes.pop() if len(modes) == 1
                        else "mixed",
                        "flash_used": any(u["judging"]["flash_used"]
@@ -12345,31 +11113,23 @@ class Handler(BaseHTTPRequestHandler):
                        "flash_calls_today": _flash_calls_today(),
                        "panel": {
                            "judges": panel_judges,
-                           "third": {
-                               # v17.1: judge_nim1's primary
-                               # rides OpenRouter; name the
-                               # provider of its active candidate.
-                               # v20: the name comes off the
-                               # slot map (xAI/Groq slots label
-                               # themselves).
+                           "seat1": {
+                               "provider": "google"
+                               if _seat1_model == GEMINI_CHAIN[0]
+                               else _model_family(_seat1_model),
+                               "model": _seat1_model,
+                               "status": "ok" if (
+                                   "lite" in panel_judges
+                                   or "relief" in panel_judges)
+                               else "not-run"},
+                           "seat2": {
                                "provider": _slot_provider_name(
-                                   _seat_pick("judge_nim1")[1]),
-                               "model": _seat_pick("judge_nim1")[0]
-                               or THIRD_JUDGE_MODEL,
-                               "status": third_status},
-                           "nim2": {
-                               # v17.2: judge_nim2's primary
-                               # rides OpenRouter too; name
-                               # the provider and key slot of
-                               # its active candidate.
-                               "provider": _slot_provider_name(
-                                   _seat_pick("judge_nim2")[1]),
-                               "model": _seat_pick("judge_nim2")[0],
+                                   _seat_pick("judge_seat2")[1]),
+                               "model": _seat2_model
+                               or _seat_pick("judge_seat2")[0],
                                "key_slot": _seat_pick(
-                                   "judge_nim2")[1],
-                               "status": "ok" if "nim2"
-                               in panel_judges else "not-run"},
-                           "third_calls_today": _third_calls_today(),
+                                   "judge_seat2")[1],
+                               "status": seat2_status},
                            "cached_claims": sum(
                                (u["judging"].get("panel") or {})
                                .get("cached_claims", 0)
@@ -12378,6 +11138,7 @@ class Handler(BaseHTTPRequestHandler):
                                (u["judging"].get("panel") or {})
                                .get("refuted_claims", 0)
                                for u in units)}}
+
             _annots = []
             for u in units:
                 _a = (u["judging"] or {}).get("annotation")

@@ -1,5 +1,6 @@
-"""v22.3 offline checks: the three fixes from the 2026-10-15
-CSRA retest diagnosis (ask 07d907a1fc52).
+"""v22.3 offline checks, carried into v23 at the rebase:
+the three fixes from the 2026-10-15 CSRA retest diagnosis
+(ask 07d907a1fc52), ported onto the v23 panel.
 
   fix 1 - claim dedupe: a draft sentence carried both as a
           normalized extracted claim and as a raw-form extra
@@ -10,6 +11,14 @@ CSRA retest diagnosis (ask 07d907a1fc52).
           values as verified quantities.
   fix 3 - a judge seat that hits a full leg timeout is
           benched for the rest of the ask.
+
+v23 adaptations (the fixes are unchanged; the panel they
+land on is): the fix-3 seat is judge_seat2 (Groq Qwen
+primary, slot 5), the bound constant is JUDGE_LEG_TIMEOUT,
+and a planned pick that fails FALLS THROUGH to the seat's
+next candidate inside the same call (the v23 _seat_pick
+rule) — so round 1's call returns via the relief bench
+instead of raising, with the benched Qwen never re-seated.
 
 Run: python3 tools/offline_checks_v223.py
 Deterministic; no network (seat transports are stubbed; the
@@ -179,6 +188,8 @@ def _stub_second(engine, question, hits, claims, mech_block):
 
 _orig_primary, _orig_second = (mod._primary_judgment,
                                mod._second_verdicts)
+_orig_refute = mod._refutation_retrieve
+mod._refutation_retrieve = lambda *a, **k: 0
 mod._primary_judgment = _stub_primary
 mod._second_verdicts = _stub_second
 try:
@@ -191,6 +202,7 @@ try:
 finally:
     mod._primary_judgment = _orig_primary
     mod._second_verdicts = _orig_second
+    mod._refutation_retrieve = _orig_refute
 
 claims = jr["claims"]
 check("replay: 7 claim forms resolve to 4 claims",
@@ -240,6 +252,7 @@ def _stub_primary2(engine, question, hits, answer, mech_block):
             "error": None}
 
 
+mod._refutation_retrieve = lambda *a, **k: 0
 mod._primary_judgment = _stub_primary2
 mod._second_verdicts = _stub_second
 try:
@@ -250,6 +263,7 @@ try:
 finally:
     mod._primary_judgment = _orig_primary
     mod._second_verdicts = _orig_second
+    mod._refutation_retrieve = _orig_refute
 check("fix2: [registry]-marked claim is judged first",
       "[registry]" in jr2["claims"][0]["text"],
       jr2["claims"][0]["text"][:60])
@@ -281,94 +295,101 @@ check("fix2: the record's draft has no quantity failures",
 
 # ----------------------------------------------------------------
 # FIX 3: one full leg timeout benches the candidate for the
-# rest of the ask; a budget-clamped shed does not.
+# rest of the ask; a budget-clamped shed does not. (v23
+# panel: judge_seat2, the Groq Qwen primary on slot 5; a
+# failed planned pick falls through to the relief bench
+# inside the same call.)
 mod._events_reset()
 _ctx = mod._ask_ctx()
-FLASH_J = "deepseek-ai/deepseek-v4.1-flash"
-SUPER_J = "nvidia/nemotron-3-super-120b-a12b"
-ULTRA_J = "nvidia/nemotron-3-ultra-550b-a55b"
-_ctx.panel_plan["judge_nim1"] = (FLASH_J, 2)
+QWEN_J = mod.GROQ_QWEN_MODEL
+_ctx.panel_plan["judge_seat2"] = (QWEN_J, 5)
 _attempts = []
 
 
-def _fake_nim_text(base, key_env, key_file, model, system,
-                   user, **kw):
+def _fake_groq_text(model, system, user, **kw):
     _attempts.append(model)
-    if model in (FLASH_J, ULTRA_J):
+    if model == QWEN_J:
         time.sleep(min(kw.get("timeout") or 1, 2) + 0.05)
         raise TimeoutError("read timed out")
     return "ok"
 
 
-_saved = (mod._nim_key_for, mod._nim_text,
-          mod.THIRD_JUDGE_TIMEOUT, mod._groq_guard_tripped)
-mod._nim_key_for = lambda e, f: "k"
-mod._nim_text = _fake_nim_text
-mod.THIRD_JUDGE_TIMEOUT = 1
+def _fake_xai_text(model, system, user, **kw):
+    return "ok"
+
+
+_saved = (mod._groq_text, mod._xai_text,
+          mod.JUDGE_LEG_TIMEOUT, mod._groq_guard_tripped,
+          mod._groq_available, mod._xai_available,
+          mod._or_available)
+mod._groq_text = _fake_groq_text
+mod._xai_text = _fake_xai_text
+mod.JUDGE_LEG_TIMEOUT = 1
 mod._groq_guard_tripped = lambda: False
+mod._groq_available = lambda: True
+mod._xai_available = lambda: True
+mod._or_available = lambda: True
 try:
-    # The planned seat's candidate IS the call (the panel
-    # plan's rule: a planned seat that fails is not replaced
-    # inside the same call), so round 1's seat call raises
-    # seat-down after exactly one attempt - the attempt that
-    # ate the full timeout and earned the bench.
-    try:
-        mod._judge_seat_text("judge_nim1", "s", "u")
-        _down1 = False
-    except RuntimeError:
-        _down1 = True
-    check("fix3: round 1 seat call fails on the planned "
-          "candidate alone",
-          _down1 and _attempts == [FLASH_J],
-          f"down={_down1} attempts={_attempts}")
-    bench = _ctx.judge_benched.get(("judge_nim1", FLASH_J), "")
+    # Round 1: the planned Qwen leg eats the full timeout
+    # and earns the bench; the v23 fall-through rule then
+    # serves the SAME call from the relief bench (xAI).
+    out1 = mod._judge_seat_text("judge_seat2", "s", "u")
+    check("fix3: round 1 call is served by failover after "
+          "the planned candidate's full timeout",
+          out1 == "ok" and _attempts == [QWEN_J],
+          f"out={out1} attempts={_attempts}")
+    bench = _ctx.judge_benched.get(("judge_seat2", QWEN_J), "")
     check("fix3: full timeout benches the candidate for "
           "the ask", "full leg timeout" in bench, bench)
     ev = [e for e in _ctx.events
           if e.get("kind") == "seat_bench"
-          and e.get("model") == FLASH_J]
+          and e.get("model") == QWEN_J]
     check("fix3: bench emits its reason as a seat_bench event",
           len(ev) == 1 and "full leg timeout" in
           ev[0].get("reason", ""), str(ev))
-    out2 = mod._judge_seat_text("judge_nim1", "s", "u")
-    check("fix3: next round never re-seats the benched "
+    out2 = mod._judge_seat_text("judge_seat2", "s", "u")
+    check("fix3: next call never re-seats the benched "
           "candidate",
-          out2 == "ok" and _attempts.count(FLASH_J) == 1,
+          out2 == "ok" and _attempts.count(QWEN_J) == 1,
           f"attempts={_attempts}")
     skips = [e for e in _ctx.events
              if e.get("kind") == "seat_skip"
-             and e.get("model") == FLASH_J]
+             and e.get("model") == QWEN_J]
     check("fix3: the skip is explained in the ask record",
           any("benched for this ask" in (e.get("reason") or "")
               for e in skips), str(skips))
     check("fix3: _seat_pick never returns the benched model",
-          mod._seat_pick("judge_nim1",
-                         exclude_families=())[0] != FLASH_J)
+          mod._seat_pick("judge_seat2",
+                         exclude_families=())[0] != QWEN_J)
 
-    # Control: same timeout text, but the leg was clamped by
-    # the unit budget (never granted its full bound) -> the
-    # seat is NOT benched; the budget takes the blame.
+    # Control: same timeout shape, but the leg was clamped
+    # by the unit budget (never granted its full bound) ->
+    # the seat is NOT benched; the budget takes the blame.
     mod._events_reset()
     _ctx2 = mod._ask_ctx()
-    _ctx2.panel_plan["judge_nim2"] = (ULTRA_J, 3)
+    _ctx2.panel_plan["judge_seat2"] = (QWEN_J, 5)
     _ctx2.unit_deadline = time.monotonic() + 0.4
+    _attempts.clear()
     try:
-        mod._judge_seat_text("judge_nim2", "s", "u")
-        _raised = False
+        mod._judge_seat_text("judge_seat2", "s", "u")
+        _shed = False
     except RuntimeError:
-        _raised = True
-    check("fix3: budget-clamped shed raises seat-down as "
-          "before", _raised)
+        _shed = True
+    check("fix3: budget-clamped leg sheds the seat call "
+          "(the failover leg cannot fit the remainder "
+          "either)", _shed and _attempts == [QWEN_J],
+          f"shed={_shed} attempts={_attempts}")
     check("fix3: budget-clamped timeout does NOT bench",
-          ("judge_nim2", ULTRA_J) not in _ctx2.judge_benched,
+          ("judge_seat2", QWEN_J) not in _ctx2.judge_benched,
           str(_ctx2.judge_benched))
 finally:
-    (mod._nim_key_for, mod._nim_text,
-     mod.THIRD_JUDGE_TIMEOUT,
-     mod._groq_guard_tripped) = _saved
+    (mod._groq_text, mod._xai_text,
+     mod.JUDGE_LEG_TIMEOUT, mod._groq_guard_tripped,
+     mod._groq_available, mod._xai_available,
+     mod._or_available) = _saved
 
 print()
 if FAILS:
     print(f"v22.3 checks: {len(FAILS)} FAILURE(S): {FAILS}")
     sys.exit(1)
-print("v22.3 offline checks: ALL PASS")
+print("v22.3 offline checks (v23 rebase): ALL PASS")

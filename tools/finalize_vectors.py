@@ -152,11 +152,24 @@ def main():
     for doc_id, url, title in docs:
         vrows = by_url.get(url, [])
         gchunks = doc_chunks(doc_id)
-        g_hashes = {h: (row, cid) for row, cid, _t, h in gchunks}
+        # v23 (WS3.4): hash -> ALL chunk rows carrying it. The
+        # pre-v23 dict kept ONE row per hash, so a chunk whose
+        # text is identical to a sibling's (identical-text
+        # twins) silently lost its vector and the exactness
+        # assert below failed the run — the bug the g0002
+        # deploy caught and fixed in the one-off variant
+        # tools/finalize_g0002.py. The fix is folded in here
+        # and the variant is retired: an embedding is a pure
+        # function of the text, so every row carrying the
+        # hash takes the same vector.
+        g_hashes = {}
+        for row, cid, _t, h in gchunks:
+            g_hashes.setdefault(h, []).append(row)
         v_hashes = {sha1_text(r["text"]): r for r in vrows}
         if vrows and set(v_hashes) == set(g_hashes):
             for h, r in v_hashes.items():
-                assigned[g_hashes[h][0]] = r["vec"]
+                for row in g_hashes[h]:
+                    assigned[row] = r["vec"]
             classes["matched"] += 1
             continue
         if vrows:
