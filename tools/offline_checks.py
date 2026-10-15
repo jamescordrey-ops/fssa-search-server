@@ -9,8 +9,9 @@ Covers the v21 changes that the retrieval harness cannot:
         divisor pair's date exclusivity, ABLE history values,
         a 2026-windowed entry staying silent for 2027.
   WS3a  gap rows carry ask_id + class_guess.
-  WS4b  seat_skip events fire (and dedupe) on a pick that
-        serves nobody.
+  WS4b  RETIRED in v23.1: seat_skip events died with the
+        judge panel (the seat machinery they explained is
+        deleted); the section now asserts the absence.
   WS1a  _rescue_search ranks the two failure docs first.
   WS3c  growth_terms.json loads and expands.
 
@@ -312,25 +313,18 @@ def main():
               "ask_id" in r and "class_guess" in r
               for r in rows))
 
-    # ---------------- WS4b: seat_skip ----------------------
-    # v23: retargeted from the deleted judge_nim1 seat to
-    # judge_seat2 (the same skip-reason machinery serves the
-    # two-seat panel's one seat-machinery job).
-    mod._events_reset()
-    mod._note_seat_skips("judge_seat2", None, [])
-    skips = [e for e in mod._ask_ctx().events
-             if e.get("kind") == "seat_skip"]
-    check("WS4b seat_skip events emitted for an unserved pick",
-          len(skips) >= 1,
-          f"{len(skips)} events; first reason: "
-          f"{skips[0]['reason'] if skips else None}")
-    check("WS4b skip reason names the cause (no key on this "
-          "machine)", bool(skips) and "no key" in
-          skips[0]["reason"])
-    n0 = len(mod._ask_ctx().events)
-    mod._note_seat_skips("judge_seat2", None, [])
-    check("WS4b seat_skip dedupes per ask",
-          len(mod._ask_ctx().events) == n0)
+    # ---------------- WS4b: seat_skip (RETIRED) ------------
+    # v23.1: the seat machinery (_note_seat_skips, _seat_pick,
+    # SEATS) is deleted with the judge panel, so the WS4b
+    # behavior checks are retired; what remains provable is
+    # the absence itself. The drafting path's failure reasons
+    # still land in the ask record via seat_fail / seat_down
+    # events (unchanged machinery, exercised in WS-A tests of
+    # offline_checks_v231.py).
+    check("WS4b retired: seat-skip machinery is deleted",
+          not hasattr(mod, "_note_seat_skips")
+          and not hasattr(mod, "_seat_pick")
+          and not hasattr(mod, "SEATS"))
 
     # ---------------- WS1a: rescue ranking -----------------
     corp = mod.get_corpus("both")

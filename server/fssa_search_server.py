@@ -56,7 +56,9 @@ _majority_final); Flash is then spent only on genuine 3-way splits
 and its final-rung role. The seat is config-driven: NVIDIA NIM,
 Groq, and Cerebras configs all live at the top of the judging
 section and one constant (THIRD_JUDGE_PROVIDER) picks the active
-provider, so moving the seat is a one-line change. The seat is
+provider, so moving the seat is a one-line change. (The third
+seat and every other panel seat are deleted in v23.1; see the
+v23.1 entry at the end of this header.) The seat is
 DORMANT without the active provider's key (its key file in the
 server dir, or its env var): the seat then simply never runs and
 judging is exactly v14.1 dual judging. It ships dormant; the key
@@ -333,7 +335,51 @@ the fence mid-session and silently gate off the paid
 legs. The reservation mechanism, the ledger, and the
 trip behavior are unchanged; the fence still exists,
 just higher.
+
+v23.1 (2026-10-15): the checks build (see v23.1/PLAN.md +
+STATUS.md). The v23 first live test answered correctly and
+still failed as a delivery: 623s wall, $0.31, a partial badge
+— retrieval and the draft were right; the two-seat judge
+panel burned 502s in Groq 413/429 retries and paid relief
+legs. v23.1 replaces the panel with ONE judge pass plus
+deterministic checks, and puts drafting on the provider
+that worked. (1) CHECKS, not a panel: Gemini 3.5 Flash Lite
+extracts + verdicts in one call; when Lite cannot serve,
+DeepSeek Chat V3.1 (OpenRouter) backs it up AT MOST ONCE
+per ask; when no judge can serve, the round runs on the
+deterministic checks alone. The V4 models are out entirely
+(the bake-off's two worst judges). Deterministic figure +
+citation checks run UNDER the judge: a claim whose money
+figures do not trace to its own cited excerpts, the
+verified figures, or a simple derivation of them is
+contradicted whatever the judge said. Deleted with the
+panel: the judge-round loop + refutation passes, judge
+seat 2, the relief bench, the seat/bench machinery, the
+verdict cache, Flash arbitration, _panel_state. (2)
+DRAFTING: xAI Grok 4.7 primary for every class, Groq
+GPT-OSS 120B backup (free), local 9B last resort; the
+OpenRouter drafting tier is deleted. (3) BUDGETS ENFORCED
+(BUG-10): one deadline per ask threaded through every
+provider call (each leg's timeout = min(its bound, the
+budget left)); at the cap the job finalizes with its best
+state and budget_cut + cut_phase recorded; the 600s cap is
+also enforced inside the job thread (a daemon child under
+a hard join). Budgets unchanged: 150s simple / 285s hard /
+600s cap. (4) BADGES: checked (checks + judge green),
+checked_det (checks green, judge unavailable or partial),
+partial (one name; the _single/_reduced splits are gone),
+the verified_web family for web-sourced answers, idk.
+(5) THE STEPPER: phases are retrieving / drafting /
+extracting / checking / final checks, with ONE fact-check
+line naming who actually served (Lite, or the DeepSeek
+V3.1 backup). (6) BUG FIXES from the v23 report: BUG-1
+(phase_ms lost "retrieving" — the context reset now runs
+before the phase opens), BUG-5(a) (the checks-stack stub
+replay replaced the refutation replay), BUG-6 (stale
+comments scrubbed), BUG-7 (phase_ms values are SECONDS;
+comments now say so). BUG-2/3/4/9 died with the panel.
 """
+
 import datetime
 import calendar
 import contextvars
@@ -475,19 +521,24 @@ try:
 except FileNotFoundError:
     pass
 
-# v14.2: the third judge's API key is loaded lazily by
-# _third_judge_key() from the provider config at the top of the
-# judging section (env var first, then the provider's gitignored
-# key file in the server dir, the same pattern as the Gemini key
-# above). Absent key = the seat stays dormant, exactly v14.1.
+# (v23.1 comment scrub, BUG-6: the v14.2 note that stood here
+# described a _third_judge_key() loader for the third judge
+# seat. That machinery is deleted — provider keys load via
+# _nim_key_for from each provider's gitignored key file in
+# the server dir, the same pattern as the Gemini key above.)
 
 # --- v15: pipeline config -------------------------------------------------
 # Per-ask wall-clock ceiling (operator decision, 2026-10-13): when an
 # ask hits the cap mid-ladder it stops climbing and ships the best
-# state reached (a Partial built ONLY from claims already verified
-# by the panel, else an IDK with its gap log entry); timing records
-# cap_hit. The cap can never make an unverified answer ship.
+# state reached (a Partial built ONLY from claims that already
+# passed the checks, else an IDK with its gap log entry); timing
+# records cap_hit (v23.1: budget_cut). The cap can never make an
+# unverified answer ship.
 ASK_TIME_CAP_S = 600
+# v23.1 (WS-A): the job-thread backstop's slack over the ask
+# cap — _run_job joins its daemon child for cap + this many
+# seconds before abandoning the job (see _run_job).
+JOB_BACKSTOP_SLACK_S = 60
 # v18 (§B remainder): the per-ask OpenRouter cost ceiling. Past
 # this line the ladder stops spending on redrafts and ships the
 # best capped Partial from the claims already judged (or IDKs);
@@ -606,17 +657,19 @@ def _set_stage(text):
 
 # --- v23 (WS1): structured phase progress ----------------------------
 # The job record carries a PHASE alongside the free-text stage:
-# one of retrieving / drafting / extracting / judging /
+# one of retrieving / drafting / extracting / checking /
 # final checks / done, a round number for the looping phases
-# (drafting and judging run once per ladder rung), and, during
-# judging, a per-seat state map the page renders under the
-# stepper. The page renders a stepper from this field ONLY:
+# (drafting and checking run once per ladder rung), and ONE
+# fact-check line naming who is checking the draft (v23.1
+# WS-F; the panel era's per-seat widgets are deleted — BUG-3).
+# The page renders a stepper from this field ONLY:
 # no percentage and no ETA anywhere (an ask's length is not
 # predictable; elapsed seconds are shown, never a guess at
 # what remains). The same transitions accumulate per-phase
-# wall time on the ask context (phase_ms in the ask record):
-# the measurement the held 150/285s budget test reads.
-_PHASE_ORDER = ("retrieving", "drafting", "extracting", "judging",
+# wall time on the ask context (phase_ms in the ask record —
+# the values are SECONDS despite the name, BUG-7): the
+# measurement the held 150/285s budget test reads.
+_PHASE_ORDER = ("retrieving", "drafting", "extracting", "checking",
                 "final checks", "done")
 
 
@@ -624,7 +677,8 @@ def _set_phase(name, round=None):
     rec = getattr(_STAGE_TLS, "job", None)
     if rec is not None:
         ph = rec.setdefault("phase", {"name": "retrieving",
-                                      "round": None, "seats": {}})
+                                      "round": None,
+                                      "check": None})
         ph["name"] = name
         if round is not None:
             ph["round"] = round
@@ -642,20 +696,10 @@ def _set_phase(name, round=None):
         ctx.phase_open = (name, now)
 
 
-def _set_seat_phase(seat, state):
-    """One judge seat's live state for the stepper (seat1 /
-    seat2 / arbitrator: waiting / checking / done / down /
-    ruling)."""
-    rec = getattr(_STAGE_TLS, "job", None)
-    if rec is not None:
-        ph = rec.setdefault("phase", {"name": "retrieving",
-                                      "round": None, "seats": {}})
-        ph.setdefault("seats", {})[seat] = state
-
-
 def _phase_ms_snapshot():
-    """The ask context's per-phase seconds, with the still-open
-    phase's elapsed included (non-mutating)."""
+    """The ask context's per-phase times (SECONDS, millisecond
+    precision), with the still-open phase's elapsed included
+    (non-mutating)."""
     try:
         ctx = _ask_ctx()
     except Exception:
@@ -677,7 +721,7 @@ def _job_create():
     job_id = uuid.uuid4().hex[:16]
     rec = {"id": job_id, "status": "running", "stage": "retrieving",
            "phase": {"name": "retrieving", "round": None,
-                     "seats": {}},
+                     "check": None},
            "result": None, "error": None, "ts": time.time()}
     with _JOBS_LOCK:
         _JOBS[job_id] = rec
@@ -2551,8 +2595,8 @@ _DOC_CHUNKS_KEY = "_chunks_v18"
 def _doc_chunks(d):
     """v18 (R7): a document's chunks, computed once and cached
     on the document dict. Through v17.3 search() re-chunked the
-    whole corpus on EVERY call (and the refutation/hunt/retry
-    paths call search repeatedly per ask). Corpus dicts are
+    whole corpus on EVERY call (and the rescue/retry paths
+    call search repeatedly per ask). Corpus dicts are
     process-lifetime objects, so the cache rides on them."""
     chs = d.get(_DOC_CHUNKS_KEY)
     if chs is None:
@@ -4685,11 +4729,11 @@ def _unload_others(keep):
 # v15.1: _warm_local_judge (v14.1) is REMOVED. It speculatively
 # loaded the local 14B with a 30-minute keep-alive whenever a
 # fallback judge seat MIGHT be needed, which put the 14B in VRAM
-# on remote-path asks. The fallback judge seats in _judge_round
-# now load the model cold, on demand, only when a remote seat
-# has actually failed — and every local judge call carries
-# keep_alive 0 (see _ollama_chat_raw), so the model unloads
-# again immediately after the call.
+# on remote-path asks. Local judge calls load the model cold,
+# on demand — in v23.1 only for an explicit local ask — and
+# every local judge call carries keep_alive 0 (see
+# _ollama_chat_raw), so the model unloads again immediately
+# after the call.
 
 
 def _gemini_normalize(model):
@@ -4702,25 +4746,42 @@ def _gemini_normalize(model):
     return GEMINI_CHAIN[0]
 
 
-def _gemini_call(api_model, payload):
+def _gemini_call(api_model, payload, deadline=None):
     """One model, bounded polite attempts (delays 0/3/8s, 45s timeout;
     v12 speed pass). Returns the
     answer text. Raises _GeminiQuota on daily-quota exhaustion and
     RuntimeError when this model is unusable right now. v15 (S3):
     the transport is the keep-alive pool; spacing, retries, and
-    error semantics are unchanged."""
+    error semantics are unchanged. v23.1 (WS-A): a deadline clamps
+    each attempt's timeout to the ask budget remaining and ends
+    the retry loop at the budget edge instead of sleeping past
+    it."""
     host = "generativelanguage.googleapis.com"
     path = (f"/v1beta/models/{api_model}:generateContent"
             f"?key={GEMINI_API_KEY}")
     last_err = None
     for delay in (0, 3, 8):
+        if deadline is not None:
+            _rem = deadline - time.monotonic()
+            if _rem <= 0:
+                raise RuntimeError(
+                    f"{api_model} judge leg budget spent")
+            if delay and _rem <= delay + 2:
+                raise RuntimeError(
+                    f"{api_model} judge leg budget spent "
+                    f"(no retry inside {_rem:.1f}s left)")
         if delay:
             time.sleep(delay)
         _gemini_space()
+        _timeout = 45
+        if deadline is not None:
+            _timeout = max(1.0, min(
+                45.0, deadline - time.monotonic()))
         try:
             status, raw = _https_post(
                 host, path, payload,
-                {"Content-Type": "application/json"}, timeout=45)
+                {"Content-Type": "application/json"},
+                timeout=_timeout)
         except Exception as e:  # network blips: also retryable
             last_err = e
             continue
@@ -4892,104 +4953,12 @@ def _read_gaps(limit=200):
     return out
 
 
-# --- v14: Flash arbitration budget ------------------------------------------
-# Flash (gemini-3.8-flash) has a 20 requests/day free-tier cap; the
-# plan budgets arbitration at ~1-2 calls/day. The counter is a hard
-# stop, not a target: at the cap, disputed claims fail closed (cut /
-# IDK) rather than shipping unarbitrated.
-FLASH_MODEL = "gemini-3.8-flash"
-FLASH_DAILY_CAP = 18
-_FLASH_STATE_FILE = "flash_state.json"
-_FLASH_STATE = {"date": "", "count": 0, "loaded": False}
-_FLASH_LOCK = threading.Lock()
-
-
-def _flash_load_locked():
-    """(Caller holds _FLASH_LOCK.) v18 (R10b): the Flash counter
-    persists beside the spend ledger, with the ledger's
-    Indianapolis day. Through v17.3 it lived in memory only, so
-    every restart re-granted up to 18 arbitrations against the
-    20/day upstream quota (and the re-grant's 429s fed F1's
-    fail-open). A state file that exists but cannot be parsed
-    reads as a SPENT budget: fail closed, never re-grant."""
-    today = _ledger_today()
-    if _FLASH_STATE["loaded"] and _FLASH_STATE["date"] == today:
-        return
-    count = 0
-    try:
-        with open(_FLASH_STATE_FILE, encoding="utf-8") as f:
-            st = json.load(f)
-        if st.get("date") == today:
-            count = int(st.get("count") or 0)
-    except FileNotFoundError:
-        pass
-    except Exception:
-        count = FLASH_DAILY_CAP
-    _FLASH_STATE.update({"date": today, "count": count,
-                         "loaded": True})
-
-
-def _flash_calls_today():
-    with _FLASH_LOCK:
-        _flash_load_locked()
-        return _FLASH_STATE["count"]
-
-
-def _flash_spend():
-    """Reserve one Flash call; False when the daily budget is gone."""
-    with _FLASH_LOCK:
-        _flash_load_locked()
-        if _FLASH_STATE["count"] >= FLASH_DAILY_CAP:
-            return False
-        _FLASH_STATE["count"] += 1
-        try:
-            _atomic_write_json(
-                _FLASH_STATE_FILE,
-                {"date": _FLASH_STATE["date"],
-                 "count": _FLASH_STATE["count"]})
-        except Exception:
-            pass  # the in-memory count still governs this run
-        return True
-
-
-# --- v14.2: third judge seat -> v15: the NIM layer ---------------------------
-# v14.2 shipped this as a third judge seat (provider decision,
-# Operator note, 2026-10-13: NVIDIA NIM default, Nemotron 3 Super 120B;
-# Cerebras began demanding a card, Groq stays a configured
-# alternate). v15 (plan item 2, the demotion) promotes the seat
-# and grows it into the server's NIM layer:
-# - the NIM Nemotron is now the STANDING SECOND JUDGE (verdicts
-#   beside the Gemini Lite primary); the metadata keeps the
-#   v14.2 "third" seat record shape so consumers do not drift.
-# - a DRAFTER block (same provider pattern) drafts hard questions
-#   on moonshotai/kimi-k3 and simple questions on a fast NIM
-#   model, and generates ladder redrafts, all with the local
-#   models as automatic fallbacks.
-# All providers here are OpenAI-compatible chat completions with
-# Bearer auth, so the client is provider-agnostic and one
-# constant per block picks the active provider. Seats are
-# DORMANT without their provider's key (gitignored key file in
-# the server dir, or env var): a dormant seat simply never runs
-# and the pipeline degrades per the v14/v15 rules. Politeness:
-# ONE retry on 5xx, NO retry on 429 (a rate-limited seat is
-# unavailable for that ask), timeouts sized per seat (the
-# judge answers in seconds warm; a cold flagship drafter took
-# ~51s for its first reply in the pre-build catalog smoke).
-# v23 (WS2): the third-judge provider block is GONE. The judge
-# panel is two seats (see SEATS below): Gemini 3.5 Flash Lite
-# and Qwen3.8-27B on Groq, with a paid relief bench behind
-# seat 2. No NIM model sits on any timed path.
-JUDGE_LEG_TIMEOUT = 30  # v19 (§G3): was 60; a stalled judge
-# leg now costs at most ~30s before the seat fails over.
-
-# v23 (WS3.1): the NIM drafter provider block is GONE, with
-# the divergence-oracle and emergency-draft constants that
-# rode on it. Drafting is a 3-tier ladder (see _generate):
-# free Groq/Gemini primaries, paid xAI/OpenRouter, local
-# qwen3.5:9b. The nominal model names _draft_choice passes
-# are the ladder's free primary ids (GROQ_HARD_MODEL /
-# GROQ_SIMPLE_MODEL, defined in the provider block below);
-# the ladder itself owns the actual choice.
+# --- provider transports ---------------------------------------------------
+# v23.1: the old third-judge / NIM-layer prose that stood here
+# described machinery deleted across v20-v23.1 (the NIM judge
+# seats, the panel, the relief bench). What remains in this
+# section is the shared OpenAI-compatible transport (_nim_text)
+# and the per-provider key loading every hosted caller uses.
 _NIM_KEYS = {}
 
 
@@ -5033,13 +5002,6 @@ SEAT_SLOTS = {
     4: ("XAI_API_KEY", "xai_key.txt"),
     5: ("GROQ_API_KEY", "groq_key.txt"),
 }
-_SLOT_PROVIDERS = {0: "openrouter", 4: "xai", 5: "groq"}
-
-
-def _slot_provider_name(slot):
-    return _SLOT_PROVIDERS.get(slot, "unknown")
-
-
 # --- v20: the xAI + Groq provider block ------------------------------
 # Seat chains are config-driven constants (here and in SEATS
 # below), so any seat can be reverted by editing one list.
@@ -5077,39 +5039,32 @@ XAI_DRAFTER_TIMEOUT = 120  # hosted flagship; the OR drafter bound
 _XAI_PRICES = {XAI_HARD_MODEL: (2.00, 6.00)}
 _XAI_PRICE_DEFAULT = (2.00, 6.00)
 #
-# Groq: the free tier is the primary rail for hard drafting
-# (GPT-OSS-120B), simple drafting + utilities (GPT-OSS-20B),
-# and judge seat C (Qwen3.8-27B). Model ids verified TWICE
-# on 2026-10-14: against Groq's official models page
+# Groq: the free tier is the drafting BACKUP rail in v23.1
+# (GPT-OSS-120B for hard questions, GPT-OSS-20B for simple
+# drafting + utilities). Model ids verified TWICE on
+# 2026-10-14: against Groq's official models page
 # (https://console.groq.com/docs/models — the two GPT-OSS
-# models are PRODUCTION; qwen/qwen3.8-27b is a PREVIEW
-# model) and against the LIVE account catalog pulled with
-# the operator's own key (exactly 11 models; the three chat ids
-# below match exactly; there is NO Llama chat model on his
-# catalog, only llama-prompt-guard classifiers, and no
-# qwen/qwen3-32b). Preview models can be discontinued at
-# short notice: seat C's fallover chain (the proven
-# Qwen3-235B on OpenRouter) is the protection, and the
-# Stage-2 deploy checklist in v20/STATUS.md re-checks the
-# catalog before go-live.
-# The operator is also vaulting their Groq key; when the parent's
-# live-catalog pull lands, these constants are the exact
-# strings to swap.
+# models are PRODUCTION) and against the LIVE account
+# catalog pulled with the operator's own key (exactly 11
+# models; the chat ids below match exactly; there is NO
+# Llama chat model on his catalog, only llama-prompt-guard
+# classifiers). The v20-v23 Groq Qwen judge seat is DELETED
+# in v23.1 with the rest of the panel: one Groq account's
+# 8,000 tokens/min organization limit backing both drafting
+# and judging was BUG-4's root cause.
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 GROQ_KEY_FILE = "groq_key.txt"
 GROQ_KEY_ENV = "GROQ_API_KEY"
 GROQ_HARD_MODEL = "openai/gpt-oss-120b"
 GROQ_SIMPLE_MODEL = "openai/gpt-oss-20b"
 GROQ_UTILITY_MODEL = "openai/gpt-oss-20b"
-GROQ_QWEN_MODEL = "qwen/qwen3.8-27b"
 GROQ_DRAFTER_TIMEOUT = 60  # Groq's whole pitch is speed
 # USD per 1M tokens (input, output), list prices from the
 # same official models page. Free-tier calls are recorded
 # at these prices for visibility (provider_tier=free) and
 # never touch the real-money ledger.
 _GROQ_PRICES = {GROQ_HARD_MODEL: (0.15, 0.60),
-                GROQ_SIMPLE_MODEL: (0.075, 0.30),
-                GROQ_QWEN_MODEL: (0.80, 4.00)}
+                GROQ_SIMPLE_MODEL: (0.075, 0.30)}
 _GROQ_PRICE_DEFAULT = (0.15, 0.60)
 # The Groq daily guard (spec item 4): a persistent per-day
 # request counter on the Indiana ledger day (the spend
@@ -5131,91 +5086,19 @@ _XAI_CREDIT_FILE = "xai_spend.json"
 _XAI_CREDIT_LOCK = threading.Lock()
 _XAI_CREDIT_STATE = {"date": "", "credit": 0.0,
                      "broken": False, "loaded": False}
-# Candidate lists are in chain order (primary first).
-# v23 (WS2, the judge switch, James's proposal 2026-10-15):
-# the panel is TWO seats. Seat 1 is Gemini 3.5 Flash Lite
-# (extraction + verdicts; served by _primary_judgment's "lite"
-# engine, not by this seat machinery). Seat 2, the verdict
-# seat below, is Qwen3.8-27B on the Groq free tier. Behind
-# seat 2 sits the paid RELIEF BENCH: xAI Grok 4.7, then the
-# OpenRouter relief model. Relief is reached ONLY when the
-# free seat is down, quota'd, benched, or timed out (the
-# layer rule in _candidate_layer plus seat failover), and
-# every relief call is ledger-bounded exactly as paid calls
-# have always been ($10/day, $1/ask). Every candidate is a
-# DISTINCT model family (qwen / xai / deepseek), and none is
-# the seat-1 family (google): the two-distinct-family rule
-# for the full verified badge holds for every combination.
-# The v18-v22 judge seats (judge_nim1, judge_nim2), the NIM
-# drafting benches (hard_draft, simple_draft), the Groq
-# GPT-OSS judge leg, and the rationed Flash rung are all
-# DELETED from the timed paths.
-# The OpenRouter relief model: a strong-cheap DeepSeek on
-# the V4-Pro tier. The slug is a single named constant,
-# pending the deploy-stage live catalog check (the v18
-# seat-2 placeholder precedent); if the catalog disagrees,
-# this one line changes.
-OR_RELIEF_MODEL = "deepseek/deepseek-v4-pro"
-
-SEATS = {
-    "judge_seat2": {
-        "candidates": [(GROQ_QWEN_MODEL, 5),
-                       (XAI_HARD_MODEL, 4),
-                       (OR_RELIEF_MODEL, 0)],
-        "budget_median": 45.0, "budget_p95": None},
-}
-SEAT_BENCH_COOLDOWN_S = 600
-_SEAT_STATE = {}
-_SEAT_LOCK = threading.Lock()
-
-
-def _seat_state(job, model):
-    key = (job, model)
-    if key not in _SEAT_STATE:
-        _SEAT_STATE[key] = {"lat": [], "consec_timeouts": 0,
-                            "benched_until": 0.0, "benches": 0,
-                            "calls": 0, "failovers": 0}
-    return _SEAT_STATE[key]
-
-
-def _slot_has_key(slot):
-    """Whether a key is configured for a key slot (env var or
-    the slot's key file). A seat whose slot has no key is
-    dormant, exactly as v15's seats were without their key.
-    Slot 0 is the OpenRouter pseudo-slot (v17.1): it counts as
-    keyed only while the OpenRouter seats may run at all (key
-    present and the daily spend cap untripped)."""
-    if slot == 0:
-        return _or_available()
-    if slot == 4:
-        # v20: the xAI pseudo-slot counts as keyed only while
-        # xAI may run (key present; in the default paid mode
-        # also the real-money ceiling untripped, exactly like
-        # the OpenRouter pseudo-slot it shares a ledger with).
-        return _xai_available()
-    if slot == 5:
-        # v20: the Groq pseudo-slot counts as keyed only
-        # while the key is present AND the daily guard has
-        # not shed Groq for the rest of the ledger day.
-        return _groq_available()
-    # v23: no other slots exist (the NIM key slots and the
-    # Flash rung are deleted); an unknown slot is never keyed.
-    return False
-
-
-def _candidate_layer(model, slot):
-    """The operator's layer model, v23 form: Layer 0 = free
-    (Groq, slot 5); Layer 3 = paid (OpenRouter slot 0, xAI
-    slot 4). The free-but-slow NIM layer and the rationed
-    Flash rung are deleted, so nothing sits between: a paid
-    relief candidate is reachable ONLY when the free seat is
-    down, quota'd, benched, or timed out, which is exactly
-    the relief bench's charter. Ordering rule: layer wins
-    over latency; latency ordering applies INSIDE a layer
-    only."""
-    if slot == 5:
-        return 0.0
-    return 3.0
+# v23.1 (WS-A/WS-B): the judge backup. When the primary judge
+# (Gemini 3.5 Flash Lite, see _primary_judgment) cannot serve,
+# the round falls back ONCE per ask to DeepSeek Chat V3.1 on
+# OpenRouter — the bake-off's accuracy winner (62/65 verdicts;
+# BAKEOFF.md), seated as backup rather than primary on
+# speed/cost grounds (Lite: free, 4.7s median). The V4 models
+# are OUT entirely (operator decision 2026-10-15: V4-Pro and
+# V4-Flash were the bake-off's two worst judges; V4-Pro zeroed
+# two claim sets when hidden reasoning ate its whole token
+# budget). No V4 slug appears anywhere in this build.
+JUDGE_BACKUP_MODEL = "deepseek/deepseek-chat-v3.1"
+JUDGE_LEG_TIMEOUT_S = 60  # one judge leg's own bound; the
+# ask deadline clamps it further via _judge_leg_timeout.
 
 
 def _leg_timeout(base):
@@ -5235,222 +5118,24 @@ def _leg_timeout(base):
     return min(float(base), remaining)
 
 
-def _ask_judge_benched(job, model):
-    """v22.3 (fix 3): is this judge candidate benched for the
-    rest of the current ask after a full leg timeout (the
-    bench is recorded by _judge_seat_text, the only place
-    marks are written)? Reads clean for any other job and
-    outside an ask."""
-    try:
-        return (job, model) in _ask_ctx().judge_benched
-    except Exception:
-        return False
-
-
-def _seat_pick(job, skip=(), exclude_families=()):
-    """The active (model, key slot) for a job: the first
-    candidate not benched, not in skip, and on a key slot that
-    has a key configured (a keyless seat is skipped over, so a
-    missing key file degrades the panel instead of burning
-    retries). Returns (model, slot, is_failover);
-    (None, None, False) when every candidate is benched,
-    skipped, or keyless. v18 (§C): `exclude_families` bars
-    whole model FAMILIES (the drafting family; a family already
-    holding another verdict seat), and a round's atomically
-    planned pick (see _plan_panel) leads when present.
-    v23 (WS2): a planned pick that was tried and failed falls
-    through to the guarded scan below instead of ending the
-    seat. The v18-v22 rule (a planned seat is never replaced
-    mid-round) protected a TWO-seat stage 2 from same-family
-    double-voting; with one stage-2 seat the danger it named
-    is excluded structurally — the scan enforces the same
-    family exclusions (drafting family, seat 1's family,
-    every family that already served a verdict) — and the
-    seat's charter (the relief bench serves when the free
-    seat is down) requires the failover to reach relief
-    inside the call, not one round later."""
-    now = time.monotonic()
-    cands = SEATS[job]["candidates"]
-    ctx = _ask_ctx()
-    excl = set(exclude_families)
-    if job == "judge_seat2":
-        for other, pick in ctx.panel_plan.items():
-            if other != job:
-                excl.add(_model_family(pick[0]))
-    plan = ctx.panel_plan.get(job)
-    if plan is not None:
-        pmodel, pslot = plan
-        if pmodel in skip:
-            pass  # v23: fall through to the guarded scan
-        elif _model_family(pmodel) not in excl \
-                and _slot_has_key(pslot):
-            with _SEAT_LOCK:
-                benched = _seat_state(job, pmodel)[
-                    "benched_until"] > now
-            if not benched \
-                    and not _ask_judge_benched(job, pmodel):
-                idx = [m for m, _s in cands].index(pmodel)
-                return pmodel, pslot, idx > 0
-        # planned seat unusable (key gone, benched, excluded):
-        # fall through to the guarded scan below
-    # v20: the scan walks layer-major order (the configured
-    # list order inside a layer): a lower layer's candidate
-    # is always tried before any higher layer's, whatever
-    # the latency table says.
-    for idx in sorted(range(len(cands)),
-                      key=lambda i: (_candidate_layer(*cands[i]),
-                                     i)):
-        model, slot = cands[idx]
-        if model in skip or not _slot_has_key(slot):
-            continue
-        if _ask_judge_benched(job, model):
-            continue
-        if _model_family(model) in excl:
-            continue
-        with _SEAT_LOCK:
-            st = _seat_state(job, model)
-            if st["benched_until"] > now:
-                continue
-        return model, slot, idx > 0
-    return None, None, False
-
-
-def _seat_exclusions(job):
-    """§C: the families that may not serve `job` as a verdict:
-    the drafting model's family, plus every family that has
-    already served ANOTHER verdict job this ask."""
-    ctx = _ask_ctx()
-    out = set()
-    if ctx.draft_family:
-        out.add(ctx.draft_family)
-    for other, fams in ctx.verdict_families.items():
-        if other != job:
-            out |= set(fams)
-    return out
-
-
-def _seat_median(job, model):
-    """v19 (§G2): the rolling median latency (seconds) of a
-    seat candidate from its recent calls, or None when the
-    candidate has never served on this server run."""
-    with _SEAT_LOCK:
-        lat = list(_seat_state(job, model)["lat"])
-    if not lat:
-        return None
-    return sorted(lat)[len(lat) // 2]
-
-
-def _plan_panel():
-    """§C (pass 1 D4 + pass 2 item B5): plan the round's
-    stage-2 verdict seat ATOMICALLY on the ask context, before
-    any verdict call starts. The seat gets a DISTINCT model
-    family; the drafting family, seat 1's family, and families
-    that already served verdicts this ask are excluded. A seat
-    that cannot be filled with a distinct family stays
-    unfilled: the badge degrades via per-claim coverage
-    instead of a same-family substitute voting twice.
-    v19 (§G2): among the eligible candidates the seat leads
-    with the FASTEST MEASURED one (rolling median latency);
-    an unmeasured candidate is scored at 75% of the seat's
-    median budget, so it gets tried without leading blind.
-    Ties keep the configured candidate order. Failover inside
-    a call still walks the configured order (§C's rule that a
-    planned seat is not replaced mid-round is unchanged).
-    v20: the plan key is (layer, latency, order) — the
-    operator's layer model wins over latency, and the §G2
-    latency ordering applies inside a layer only, so a paid
-    relief candidate can never lead the seat over the free
-    Qwen primary while the free seat can serve.
-    v23 (WS2): the panel has ONE stage-2 seat (judge_seat2);
-    the atomicity the plan protected (two concurrent picks
-    landing on one family) is now structural, and the plan's
-    remaining job is the family exclusion + layer discipline."""
-    ctx = _ask_ctx()
-    taken = set()
-    if ctx.draft_family:
-        taken.add(ctx.draft_family)
-    for fams in ctx.verdict_families.values():
-        taken |= set(fams)
-    for job in ("judge_seat2",):
-        if job in ctx.panel_plan:
-            taken.add(_model_family(ctx.panel_plan[job][0]))
-            continue
-        best = None
-        for order, (model, slot) in enumerate(SEATS[job]["candidates"]):
-            fam = _model_family(model)
-            if fam in taken or not _slot_has_key(slot):
-                continue
-            if _ask_judge_benched(job, model):
-                continue
-            with _SEAT_LOCK:
-                if _seat_state(job, model)["benched_until"] \
-                        > time.monotonic():
-                    continue
-            med = _seat_median(job, model)
-            score = med if med is not None \
-                else SEATS[job]["budget_median"] * 0.75
-            key = (_candidate_layer(model, slot), score, order)
-            if best is None or key < best[0]:
-                best = (key, model, slot, fam)
-        if best is not None:
-            _key, model, slot, fam = best
-            ctx.panel_plan[job] = (model, slot)
-            taken.add(fam)
-
-
-def _seat_report(job, model, latency_s, ok, timed_out=False):
-    """Record one seat call. Bench rule (item 1): two
-    consecutive timeouts, or a rolling median (last 8 calls,
-    at least 4 samples) over the job's median budget, benches
-    the seat for SEAT_BENCH_COOLDOWN_S; a successful call after
-    cooldown is the probe that re-enters it."""
-    with _SEAT_LOCK:
-        st = _seat_state(job, model)
-        st["calls"] += 1
-        st["lat"].append(round(latency_s, 2))
-        del st["lat"][:-8]
-        if timed_out:
-            st["consec_timeouts"] += 1
-        elif ok:
-            st["consec_timeouts"] = 0
-        bench = False
-        if st["consec_timeouts"] >= 2:
-            bench = True
-        elif len(st["lat"]) >= 4:
-            med = sorted(st["lat"])[len(st["lat"]) // 2]
-            if med > SEATS[job]["budget_median"]:
-                bench = True
-        if bench and st["benched_until"] <= time.monotonic():
-            st["benched_until"] = time.monotonic() \
-                + SEAT_BENCH_COOLDOWN_S
-            st["benches"] += 1
-            st["consec_timeouts"] = 0
-            print(f"[seat] BENCH {job} {model} "
-                  f"(median over budget or repeated timeouts)",
-                  flush=True)
-
-
-def _seat_health_block():
-    """GET /health's seat block + the ask metadata's seat
-    record: per job, the assigned candidates with live state,
-    and which model is active right now."""
-    now = time.monotonic()
-    out = {}
-    for job, cfg in SEATS.items():
-        active, _slot, _fo = _seat_pick(job)
-        seats = []
-        for model, slot in cfg["candidates"]:
-            with _SEAT_LOCK:
-                st = _seat_state(job, model)
-                lat = list(st["lat"])
-                seats.append({
-                    "model": model, "key_slot": slot,
-                    "calls": st["calls"], "benches": st["benches"],
-                    "benched": st["benched_until"] > now,
-                    "median_s": (sorted(lat)[len(lat) // 2]
-                                 if lat else None)})
-        out[job] = {"active": active, "seats": seats}
-    return out
+def _roster_health_block():
+    """GET /health's roster block (v23.1): the ask path's
+    configured servers, stated plainly so a health read shows
+    who drafts, who judges, and what backs each up. Config
+    only — per-ask service is recorded on the ask record."""
+    return {
+        "drafting": {
+            "primary": XAI_HARD_MODEL + " (xAI)",
+            "backup": GROQ_HARD_MODEL + " (Groq)",
+            "last_resort": "local " + LOCAL_MODEL},
+        "judge": {
+            "primary": GEMINI_CHAIN[0] + " (Gemini)",
+            "backup": JUDGE_BACKUP_MODEL + " (OpenRouter, "
+                      "at most once per ask)"},
+        "checks": "deterministic figure + citation checks "
+                  "under the judge",
+        "budgets_s": {"simple": 150, "hard": 285,
+                      "ask_cap": ASK_TIME_CAP_S}}
 
 
 # --- v18 (F10): the per-ask context ----------------------------------
@@ -5462,45 +5147,42 @@ def _seat_health_block():
 # diagnosed the Lite + DeepSeek + DeepSeek panel never survived).
 # The context is now an explicit object carried by a ContextVar;
 # pool submissions go through _submit, which propagates the
-# current context into the worker. The object also carries the
-# panel-integrity state (§C): which model families have served
-# verdicts this ask, which model served each job, the round's
-# atomically planned seats, and the drafting model's family
-# (excluded from every verdict path, pass 2 item B).
+# current context into the worker. The object also carries
+# which model served each job this ask, the current unit's
+# deadline, and (v23.1) whether the ask's single backup-judge
+# use has been claimed.
 
 class _AskContext:
-    __slots__ = ("cost", "events", "retr", "verdict_families",
-                 "served_models", "panel_plan", "draft_family",
+    __slots__ = ("cost", "events", "retr",
+                 "served_models", "draft_family",
                  "lock", "unit_deadline", "retr_pools", "ask_id",
-                 "seat_skip_noted", "phase_ms", "phase_open",
-                 "judge_benched")
+                 "phase_ms", "phase_open",
+                 "judge_backup_used")
 
     def __init__(self):
         self.cost = 0.0
         self.events = []
-        # v23 (WS1): per-phase wall seconds for the ask record
-        # (see _set_phase) + the currently open phase.
+        # v23 (WS1): per-phase wall time for the ask record
+        # (see _set_phase) + the currently open phase. The
+        # values are SECONDS (floats, millisecond precision)
+        # despite the field's historical _ms name (BUG-7).
         self.phase_ms = {}
         self.phase_open = None
-        # v22.3 (fix 3, carried in at the v23 rebase): judge-seat
-        # candidates benched for the REST OF THE ASK after one
-        # full leg timeout, keyed (job, model) -> reason.
-        self.judge_benched = {}
+        # v23.1: the DeepSeek V3.1 backup judge may serve at
+        # most once per ask; the checking round claims this
+        # flag atomically under the context lock.
+        self.judge_backup_used = False
         # v21: the ask's id (set by _events_reset per ask;
         # gap-log rows carry it so a queue candidate joins
-        # back to its ask record), and the set of seat-skip
-        # reasons already noted this ask (v21 WS4b dedupe).
+        # back to its ask record).
         self.ask_id = None
-        self.seat_skip_noted = set()
         self.retr = {}
         # v20.2 (observability): one fused-pool snapshot per
         # ask-mode hybrid_search call (see _retr_pool_note);
         # persisted on the ask record so a rerank-window miss
         # is diagnosable after the fact.
         self.retr_pools = []
-        self.verdict_families = {}   # judge job -> {families served}
         self.served_models = {}      # job -> model that served last
-        self.panel_plan = {}         # judge job -> (model, slot)
         self.draft_family = None
         self.lock = threading.Lock()
         # v20: the current unit's monotonic deadline, set by
@@ -5586,9 +5268,6 @@ def _note_seat(job, model, failover):
                            "model": model,
                            "failover": bool(failover)})
         ctx.served_models[job] = model
-        if job.startswith("judge"):
-            ctx.verdict_families.setdefault(job, set()).add(
-                _model_family(model))
 
 
 def _note_local_load(trigger):
@@ -5671,89 +5350,6 @@ def _note_seat_down(job, reason):
                            "error": str(reason)[:200]})
 
 
-def _note_seat_skips(job, picked_model, tried):
-    """v21 (WS4b): explain the candidates a seat pick passed
-    over. v20.2's seat_fail/seat_down events cover candidates
-    that were ATTEMPTED; a candidate the pick silently skipped
-    (benched by seat health, keyless, family-excluded, or
-    simply not the round's planned lead) left no trace — in
-    the operator's 2026-10-14 divisor ask the NIM primary
-    never served and the record could not say why (the failover
-    served; the skip reason existed nowhere). After every
-    pick in a serving loop, this notes a reason for each
-    candidate worth explaining: the configured lead when it
-    did not serve, the round's planned pick when it did not
-    serve, and any candidate sorting ahead of the pick in
-    the layer-major walk. Deduped per (job, model) per ask.
-    Display-only picks (_panel_info, _seat_health_block) do
-    NOT call this: they are not outcome paths."""
-    try:
-        ctx = _ask_ctx()
-        cands = SEATS[job]["candidates"]
-        if not cands:
-            return
-        now = time.monotonic()
-        plan = ctx.panel_plan.get(job)
-        excl = set(_seat_exclusions(job))
-        for other, pick in ctx.panel_plan.items():
-            if other != job:
-                excl.add(_model_family(pick[0]))
-
-        def _why(model, slot):
-            if model in tried:
-                return None  # attempted: its seat_fail speaks
-            if not _slot_has_key(slot):
-                return f"no key configured (slot {slot})"
-            if _ask_judge_benched(job, model):
-                return "benched for this ask (full leg timeout)"
-            with _SEAT_LOCK:
-                benched = _seat_state(job, model)[
-                    "benched_until"] > now
-            if benched:
-                return "benched (seat-health cooldown)"
-            if _model_family(model) in excl:
-                return "model family excluded this round"
-            if plan is not None and model != plan[0]:
-                return "the round's planned pick leads"
-            if plan is not None:
-                return "planned pick unusable; walk fell through"
-            return "passed over by the seat walk"
-
-        explain = set()
-        if cands[0][0] != picked_model:
-            explain.add(cands[0][0])
-        if plan is not None and plan[0] != picked_model:
-            explain.add(plan[0])
-        if picked_model is not None:
-            order = sorted(
-                range(len(cands)),
-                key=lambda i: (_candidate_layer(*cands[i]), i))
-            picked_pos = order.index(
-                [m for m, _s in cands].index(picked_model))
-            for pos, ci in enumerate(order):
-                if pos < picked_pos:
-                    explain.add(cands[ci][0])
-        slots = {m: s for m, s in cands}
-        notes = []
-        for model in explain:
-            if model == picked_model or model in tried:
-                continue
-            if (job, model) in ctx.seat_skip_noted:
-                continue
-            why = _why(model, slots[model])
-            if why is None:
-                continue
-            ctx.seat_skip_noted.add((job, model))
-            notes.append({"kind": "seat_skip", "job": job,
-                          "model": model, "slot": slots[model],
-                          "reason": why})
-        if notes:
-            with ctx.lock:
-                ctx.events.extend(notes)
-    except Exception:
-        pass  # observability must never break a seat call
-
-
 def _note_rescue(terms, injected, trigger, query=""):
     """v21 (WS1a): the exact-term rescue pass fired. The pool
     snapshots carry the injected chunks (rs/rg ranks); this
@@ -5769,135 +5365,6 @@ def _note_rescue(terms, injected, trigger, query=""):
                 "q": (query or "")[:80]})
     except Exception:
         pass
-
-
-def _judge_seat_text(job, system, user):
-    """One verdict call on the judge_seat2 seat, with seat
-    health and failover to the seat's next candidate. Raises
-    RuntimeError when every candidate fails (the caller
-    degrades per the panel rules). v23 (WS2): the seat's
-    chain is the free Groq Qwen primary, then the paid relief
-    bench (xAI Grok 4.7, then the OpenRouter relief model);
-    relief is reached only on failover, and both relief
-    transports ledger their spend exactly as before. The
-    pick honors the round's atomic panel plan and the family
-    exclusions (the drafting family and seat 1's family never
-    judge)."""
-    # v20: if this seat's chain carries a Groq candidate and
-    # the daily guard has shed Groq, the shed is logged in
-    # the ask record (the pick below silently skips the slot,
-    # exactly like a keyless slot).
-    if _groq_guard_tripped() and any(
-            s == 5 for _m, s in SEATS[job]["candidates"]):
-        _note_groq_shed(job)
-    tried = []
-    while True:
-        model, slot, failover = _seat_pick(
-            job, skip=tried,
-            exclude_families=_seat_exclusions(job))
-        if model is None:
-            _note_seat_skips(job, None, tried)  # v21 (WS4b)
-            # v20.2: the seat-down reason lands in the ask
-            # record, not only in the raised string (callers
-            # that degrade per the panel rules may not keep
-            # the exception).
-            _note_seat_down(
-                job, f"all seat candidates unavailable "
-                f"(tried {tried})")
-            raise RuntimeError(
-                f"{job}: all seat candidates unavailable "
-                f"(tried {tried})")
-        # v20: the leg runs clamped to the unit's remaining
-        # budget; at the budget edge the seat sheds instead
-        # of starting a call that cannot finish inside it.
-        _jt = _leg_timeout(JUDGE_LEG_TIMEOUT)
-        # v21 (WS4a): the leg's hard deadline, threaded into
-        # the transports so the retry inside a leg cannot
-        # double this budget (see _nim_text).
-        _leg_deadline = time.monotonic() + _jt
-        if _jt <= 0:
-            _note_seat_down(
-                job, "unit budget spent; seat leg shed")
-            raise RuntimeError(
-                f"{job}: unit budget spent; seat leg shed")
-        t0 = time.monotonic()
-        try:
-            if slot == 0:
-                content = _or_text(
-                    model, system, user, temperature=0,
-                    max_tokens=4000,
-                    timeout=_jt, deadline=_leg_deadline)
-            elif slot == 4:
-                content = _xai_text(
-                    model, system, user, temperature=0,
-                    max_tokens=4000,
-                    timeout=_jt, deadline=_leg_deadline)
-            elif slot == 5:
-                content = _groq_text(
-                    model, system, user, temperature=0,
-                    max_tokens=4000,
-                    timeout=_jt, deadline=_leg_deadline)
-            else:
-                raise RuntimeError(
-                    f"{job}: candidate {model} sits on retired "
-                    f"slot {slot}")
-            lat = time.monotonic() - t0
-            _seat_report(job, model, lat, True)
-            if failover:
-                with _SEAT_LOCK:
-                    _seat_state(job, model)["failovers"] += 1
-            _note_seat(job, model, failover)
-            _note_seat_skips(job, model, tried)  # v21 (WS4b)
-            return content
-        except Exception as e:
-            lat = time.monotonic() - t0
-            _timed_out = lat >= JUDGE_LEG_TIMEOUT * 0.9 \
-                or "timed out" in str(e) \
-                or "timeout" in str(e).lower()
-            _seat_report(job, model, lat, False,
-                         timed_out=_timed_out)
-            # v20.2: persist the per-leg failure reason on
-            # the ask record (see _note_seat_fail).
-            _note_seat_fail(job, model, slot, lat, _timed_out,
-                            f"{type(e).__name__}: {e}")
-            # v22.3 (fix 3, rebased into v23): a FULL leg
-            # timeout benches this candidate for the rest of
-            # the ask. Full means the leg was granted (nearly)
-            # the whole judge discipline bound — _leg_timeout
-            # had not clamped it to a budget remainder — and
-            # the call consumed it. A budget-clamped shed does
-            # NOT bench: the seat never got its full bound, so
-            # the timeout indicts the budget, not the seat.
-            # The global two-consecutive-timeouts rule still
-            # applies across asks; this rule is stricter
-            # inside one ask, where re-seating a candidate
-            # that just ate a full 30s is how the 2026-10-15
-            # CSRA ask lost 60.6s to one dead seat across two
-            # rounds. (v23: the bound constant is
-            # JUDGE_LEG_TIMEOUT, the renamed THIRD_JUDGE_TIMEOUT.)
-            if job.startswith("judge") and _timed_out \
-                    and _jt >= JUDGE_LEG_TIMEOUT * 0.9 \
-                    and lat >= _jt * 0.9:
-                _reason = (
-                    f"full leg timeout ({lat:.1f}s at the "
-                    f"{JUDGE_LEG_TIMEOUT}s judge bound); "
-                    f"benched for the rest of the ask")
-                _bctx = _ask_ctx()
-                with _bctx.lock:
-                    _bctx.judge_benched[(job, model)] = _reason
-                    _bctx.events.append({
-                        "kind": "seat_bench", "job": job,
-                        "model": model, "scope": "ask",
-                        "reason": _reason})
-                print(f"[seat] ASK-BENCH {job} {model}: "
-                      f"{_reason}", flush=True)
-            tried.append(model)
-            if len(tried) >= len(SEATS[job]["candidates"]):
-                _note_seat_skips(job, None, tried)  # v21 (WS4b)
-                _note_seat_down(
-                    job, f"all {len(tried)} candidates failed; "
-                    f"last: {type(e).__name__}: {e}")
-                raise
 
 
 # --- v16 item 7: Tavily branch-out ------------------------------------
@@ -6171,12 +5638,11 @@ _OR_ROUTES = {
     OPENROUTER_SIMPLE_MODEL: {
         "order": ["Groq"], "allow_fallbacks": True,
         "data_collection": "deny"},
-    # v23 (WS2): the relief bench's OpenRouter leg. Same
-    # posture as every judge route before it: fallbacks
-    # allowed across the model's backends, data collection
-    # denied, so only backends that do not collect prompts
-    # may serve.
-    OR_RELIEF_MODEL: {
+    # v23.1: the backup judge's OpenRouter leg. Same posture
+    # as every judge route before it: fallbacks allowed
+    # across the model's backends, data collection denied, so
+    # only backends that do not collect prompts may serve.
+    JUDGE_BACKUP_MODEL: {
         "allow_fallbacks": True, "data_collection": "deny"},
 }
 
@@ -6225,11 +5691,12 @@ _OR_PRICES = {
     "openai/gpt-oss-120b": (0.10, 0.50),
     "openai/gpt-oss-20b": (0.05, 0.30),
 }
-# v23 (WS2): the relief model's row, priced conservatively
-# at the strong-cheap class maximum pending the deploy-stage
-# catalog check (the reservation gate prices from this row;
-# settled cost comes from the API's own usage report).
-_OR_PRICES[OR_RELIEF_MODEL] = (0.60, 2.40)
+# v23.1: the backup judge's row, priced conservatively at
+# the strong-cheap class maximum (the reservation gate prices
+# from this row; settled cost comes from the API's own usage
+# report — the bake-off's nine V3.1 passes settled at
+# $0.0118 total, far under this row).
+_OR_PRICES[JUDGE_BACKUP_MODEL] = (0.60, 2.40)
 _OR_PRICE_DEFAULT = (2.00, 6.00)
 
 
@@ -6711,7 +6178,6 @@ def _groq_health_block():
     return {"configured": _groq_key() is not None,
             "hard_model": GROQ_HARD_MODEL,
             "simple_model": GROQ_SIMPLE_MODEL,
-            "qwen_model": GROQ_QWEN_MODEL,
             "requests_today": _groq_requests_today(),
             "daily_soft_cap": GROQ_DAILY_SOFT_CAP,
             "guard_tripped": _groq_guard_tripped(),
@@ -7033,11 +6499,7 @@ def _nim_text(base_url, key_env, key_file, model, system, user,
     raise RuntimeError(f"{provider} unavailable after retry: {last_err}")
 
 
-def _seat2_judge_text(system, user):
-    """One verdict call to the judge_seat2 seat (v23 WS2:
-    Qwen3.8-27B on the Groq free tier; the paid relief bench
-    serves only on failover). Temperature 0."""
-    return _judge_seat_text("judge_seat2", system, user)
+
 
 
 
@@ -7059,9 +6521,11 @@ def _seat2_judge_text(system, user):
 #       number (attempt 2's judging feedback quoting draft
 #       sentences: 8 instances).
 # Both rewrite to the canonical [N]. The rewrite runs where
-# remote drafts are born (nim_ask / or_ask) so every consumer
-# downstream — the citation gate, the judges, the capped
-# assembly — sees one dialect. Canonical [n] markers match
+# remote drafts are born (the hosted ask wrappers: xai_ask /
+# groq_ask / or_ask) so every consumer downstream — the
+# citation gate, the judge, the capped assembly — sees one
+# dialect. (v23.1 BUG-6 scrub: this comment named nim_ask,
+# deleted with the NIM layer.) Canonical [n] markers match
 # neither pattern and pass through byte-identical; unbracketed
 # "Excerpt N" prose (the prompt's own excerpt labels) is not
 # a citation and is never matched (the bracket is required).
@@ -7151,45 +6615,6 @@ def groq_ask(model, question, hits, instructions="", timeout=None,
     return content, sys_prompt + "\n\n" + user_msg
 
 
-def _panel_info(judges, ms, seat2_status, seat2_error=None,
-                served=None):
-    """The judging-metadata panel record: which judges produced
-    verdicts, per-seat wall-clock ms, and the seats' status
-    ('ok', 'no-key', 'unavailable', or 'not-run'). v23 (WS2):
-    the record describes the two-seat panel — seat 1 (Gemini
-    Lite, or the relief bench when it extracted) and seat 2
-    (the judge_seat2 seat: Qwen on Groq, relief on failover).
-    When `served` is given (the ask context's served-model
-    map), the records name the model that actually SERVED
-    each seat, not the seat's assigned candidate."""
-    served = served or {}
-    seat2_model, _s2, _f2 = _seat_pick("judge_seat2")
-    seat2_model = served.get("judge_seat2", seat2_model)
-    seat1_model = served.get("lite") or served.get("relief") \
-        or GEMINI_CHAIN[0]
-    seat1_status = "ok" if ("lite" in judges
-                            or "relief" in judges) else "not-run"
-    if "relief" in judges:
-        seat1_status = "relief"
-    return {"judges": list(judges),
-            "primary_ms": ms.get("primary"),
-            "seat2_ms": ms.get("seat2"),
-            "seat1": {"provider": "google"
-                                  if seat1_model == GEMINI_CHAIN[0]
-                                  else _model_family(seat1_model),
-                      "model": seat1_model,
-                      "status": seat1_status,
-                      "error": None},
-            "seat2": {"provider": _slot_provider_name(_s2),
-                      "model": seat2_model,
-                      "key_slot": _s2,
-                      "status": seat2_status,
-                      "error": seat2_error},
-            "cached_claims": ms.get("cached_claims", 0),
-            "refuted_claims": ms.get("refuted_claims", 0)}
-
-
-
 # --- v14: judging -------------------------------------------------------------
 # Judges answer one question per claim: does the cited material
 # actually say this? Verdicts: supported / contradicted /
@@ -7244,14 +6669,16 @@ def _ollama_chat_raw(model, system, user, timeout=300, num_predict=1536):
     return text
 
 
-def _gemini_text(api_model, system, user):
-    """One Gemini call for judge/arbitration work (temperature 0),
-    through the same spacing + retry discipline as answers."""
+def _gemini_text(api_model, system, user, deadline=None):
+    """One Gemini call for judge work (temperature 0), through
+    the same spacing + retry discipline as answers. deadline
+    (v23.1 WS-A) clamps every attempt to the ask budget left
+    and stops the retry loop at the edge."""
     payload = json.dumps({
         "contents": [{"parts": [{"text": system + "\n\n" + user}]}],
         "generationConfig": {"temperature": 0},
     }).encode()
-    return _gemini_call(api_model, payload)
+    return _gemini_call(api_model, payload, deadline=deadline)
 
 
 def _parse_judge_json(text):
@@ -7320,15 +6747,20 @@ def _judge_excerpts(hits, cap=3000):
     return "\n\n".join(lines)
 
 
-def _primary_judgment(engine, question, hits, answer, mech_block):
+def _primary_judgment(engine, question, hits, answer, mech_block,
+                      deadline=None):
     """Extract the draft's claims AND verdict them in one call.
-    engine is 'lite' (seat 1: Gemini Lite), 'orelief' /
-    'xairelief' (seat 1 down: the paid relief bench extracts),
-    or 'local' (the 14B). Returns
-    {available, claims: [{text, load_bearing, verdict, note}], error}.
-    Only substantive factual claims are extracted: rules, figures,
-    conclusions. Connective text, citations, restatements of the
-    question, and the confidence line are not claims."""
+    engine is 'lite' (the judge: Gemini 3.5 Flash Lite),
+    'backup' (Lite down: DeepSeek Chat V3.1 on OpenRouter — the
+    caller enforces the once-per-ask rule), or 'local' (a
+    local-only ask). deadline is the ask's WS-A budget edge:
+    every leg's timeout clamps to what is left of it, and a
+    spent budget fails the leg without starting it. Returns
+    {available, claims: [{text, load_bearing, verdict, note}],
+    model, error}. Only substantive factual claims are
+    extracted: rules, figures, conclusions. Connective text,
+    citations, restatements of the question, and the confidence
+    line are not claims."""
     user = (
         f"Question: {question}\n\nDocument excerpts:\n"
         f"{_judge_excerpts(hits)}\n\n{mech_block}\n\n"
@@ -7348,30 +6780,36 @@ def _primary_judgment(engine, question, hits, answer, mech_block):
         '{"claims": [{"text": "...", "load_bearing": true, '
         '"verdict": "supported", "note": "...", '
         '"sources": [1]}]}')
+    model = {"lite": GEMINI_CHAIN[0],
+             "backup": JUDGE_BACKUP_MODEL}.get(engine, ROUTED_MODEL)
     try:
         if engine == "lite":
-            text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM, user)
-        elif engine == "orelief":
-            # v23 (WS2): seat 1's extraction relief #1 — the
-            # OpenRouter relief model extracts when Lite is
-            # down. Its verdicts ride the round's "relief"
-            # voice and the serving model is recorded, so the
-            # panel math (coverage families, panel state)
-            # sees a deepseek voice, never a Lite stand-in.
-            text = _or_text(OR_RELIEF_MODEL, _JUDGE_SYSTEM, user,
-                            temperature=0, max_tokens=4000,
-                            timeout=60)
-        elif engine == "xairelief":
-            # v23 (WS2): extraction relief #2 — Grok 4.7 on
-            # xAI, the relief bench's other leg.
-            text = _xai_text(XAI_HARD_MODEL, _JUDGE_SYSTEM, user,
-                             temperature=0, max_tokens=4000,
-                             timeout=60)
+            if _judge_leg_timeout(deadline, 45) <= 0:
+                return {"available": False, "claims": [],
+                        "model": model,
+                        "error": "judge leg budget spent"}
+            text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM,
+                                user, deadline=deadline)
+        elif engine == "backup":
+            _bt = _judge_leg_timeout(deadline, JUDGE_LEG_TIMEOUT_S)
+            if _bt <= 0:
+                return {"available": False, "claims": [],
+                        "model": model,
+                        "error": "judge leg budget spent"}
+            text = _or_text(JUDGE_BACKUP_MODEL, _JUDGE_SYSTEM,
+                            user, temperature=0, max_tokens=4000,
+                            timeout=_bt, deadline=deadline)
         else:
-            text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM, user)
+            _lt = _judge_leg_timeout(deadline, 300)
+            if _lt <= 0:
+                return {"available": False, "claims": [],
+                        "model": model,
+                        "error": "judge leg budget spent"}
+            text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM,
+                                    user, timeout=_lt)
         obj = _parse_judge_json(text)
         if not obj or not isinstance(obj.get("claims"), list):
-            return {"available": False, "claims": [],
+            return {"available": False, "claims": [], "model": model,
                     "error": "judge reply was not usable JSON"}
         claims = []
         for c in obj["claims"][:14]:
@@ -7398,11 +6836,12 @@ def _primary_judgment(engine, question, hits, answer, mech_block):
                            "note": str(c.get("note") or "")[:200],
                            "sources": srcs})
         if not claims:
-            return {"available": False, "claims": [],
+            return {"available": False, "claims": [], "model": model,
                     "error": "judge extracted no claims"}
-        return {"available": True, "claims": claims, "error": None}
+        return {"available": True, "claims": claims,
+                "model": model, "error": None}
     except Exception as e:
-        return {"available": False, "claims": [],
+        return {"available": False, "claims": [], "model": model,
                 "error": str(e)[:200]}
 
 
@@ -7457,13 +6896,17 @@ def _scoped_evidence(hits, claims, labels=None):
         for c, lab in zip(claims, labels))
 
 
-def _second_verdicts(engine, question, hits, claims, mech_block):
-    """The second judge verdicts the SAME numbered claim list, and
-    may flag substantive claims in the draft the extractor missed
-    (returned as extra claims, which then go through disagreement
-    resolution like any other claim). v14.1: when the primary
+def _second_verdicts(engine, question, hits, claims, mech_block,
+                     deadline=None):
+    """Verdicts for a numbered claim list from ONE judge engine
+    ('lite', 'backup', or 'local'), for the claims the primary
+    pass did not cover. The judge may also flag substantive
+    claims in the draft the extractor missed (returned as extra
+    claims, which then go through the same deterministic checks
+    and finals as any other claim). v14.1: when the primary
     judgment mapped claims to their excerpts, the prompt carries
-    per-claim scoped evidence instead of the whole set."""
+    per-claim scoped evidence instead of the whole set. deadline
+    clamps every leg to the ask budget (v23.1 WS-A)."""
     verdict_instr = (
         "Give a verdict for EVERY numbered claim: supported, "
         "contradicted, or not_addressed, judging ONLY against the "
@@ -7490,34 +6933,24 @@ def _second_verdicts(engine, question, hits, claims, mech_block):
             f"Claims to judge:\n{numbered}\n\n" + verdict_instr)
     try:
         if engine == "lite":
-            text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM, user)
-        elif engine == "relief":
-            # v23 (WS2): verdicts from the SAME relief model
-            # that extracted this round (the evidence hunt
-            # re-asks the extraction voice). The serving
-            # model is on the ask context; without one this
-            # engine is unavailable.
-            _rm = _ask_ctx().served_models.get("relief")
-            if _rm == OR_RELIEF_MODEL:
-                text = _or_text(_rm, _JUDGE_SYSTEM, user,
-                                temperature=0, max_tokens=4000,
-                                timeout=60)
-            elif _rm == XAI_HARD_MODEL:
-                text = _xai_text(_rm, _JUDGE_SYSTEM, user,
-                                 temperature=0, max_tokens=4000,
-                                 timeout=60)
-            else:
-                raise RuntimeError("no relief model served "
-                                   "this round")
-        elif engine == "seat2":
-            # v23 (WS2): the judge_seat2 seat verdicts (Qwen
-            # on Groq; the relief bench on failover). The
-            # missed-claims pass is part of this function's
-            # contract for every engine.
-            text = _seat2_judge_text(_JUDGE_SYSTEM, user)
+            if _judge_leg_timeout(deadline, 45) <= 0:
+                raise RuntimeError("judge leg budget spent")
+            text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM,
+                                user, deadline=deadline)
+        elif engine == "backup":
+            _bt = _judge_leg_timeout(deadline, JUDGE_LEG_TIMEOUT_S)
+            if _bt <= 0:
+                raise RuntimeError("judge leg budget spent")
+            text = _or_text(JUDGE_BACKUP_MODEL, _JUDGE_SYSTEM,
+                            user, temperature=0, max_tokens=4000,
+                            timeout=_bt, deadline=deadline)
         else:
-            _note_local_load("fallback-judge")
-            text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM, user,
+            _lt = _judge_leg_timeout(deadline, 300)
+            if _lt <= 0:
+                raise RuntimeError("judge leg budget spent")
+            _note_local_load("local-verdicts")
+            text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM,
+                                    user, timeout=_lt,
                                     num_predict=1024)
         obj = _parse_judge_json(text)
         if not obj or not isinstance(obj.get("verdicts"), list):
@@ -7546,125 +6979,6 @@ def _second_verdicts(engine, question, hits, claims, mech_block):
     except Exception as e:
         return {"available": False, "verdicts": {}, "missed": [],
                 "error": str(e)[:200]}
-
-
-def _flash_arbitrate(question, hits, claims, indices):
-    """Flash rules on the disputed claims (one call for all of them).
-    Returns {index: verdict} or None when Flash is unavailable or
-    the daily arbitration budget is spent (callers then fail the
-    disputed claims closed). v18 (R5): the prompt shows Flash
-    EVERY verdict on record — both seats, the local seat, and
-    the refutation check — labeled with the model that actually
-    SERVED each seat (through v17.3 it printed only lite/local/
-    third, read two note fields that were never assigned, and
-    labeled the seat with stale constants: nim2 verdicts and
-    refute_verdict were invisible to the arbitrator, whose
-    ruling is final). The unscoped path now carries the
-    refutation material too, via _claim_evidence."""
-    if not indices or not _flash_spend():
-        return None
-    subset = [claims[i] for i in indices]
-    scoped = _scoped_evidence(hits, subset,
-                              labels=[i + 1 for i in indices])
-    served = dict(_ask_ctx().served_models)
-    labels = {"lite": GEMINI_CHAIN[0] + " (seat 1 judge)",
-              "relief": (served.get("relief")
-                         or "relief bench") + " (seat 1 relief)",
-              "seat2": (served.get("judge_seat2")
-                        or "judge seat 2"),
-              "local": ROUTED_MODEL + " (local judge)"}
-    panel_split = any(
-        len({claims[i].get(k) for k in ("lite", "relief", "seat2",
-                                        "local")
-             if claims[i].get(k)}) > 1 for i in indices)
-    who = "The judges disagree" if panel_split \
-        else "The panel's verdicts and the refutation check conflict"
-    lines = []
-    for i in indices:
-        c = claims[i]
-        parts = [f"{i + 1}. {c['text']}"]
-        for eng in ("lite", "relief", "seat2", "local"):
-            if c.get(eng):
-                parts.append(f"   {labels[eng]}: {c[eng]}")
-        if c.get("refute_verdict"):
-            parts.append(
-                f"   Refutation check: {c['refute_verdict']}")
-        if c.get("notes"):
-            parts.append(f"   Judge note: {c['notes'][0]}")
-        parts.append(
-            f"   Evidence:\n{_claim_evidence(hits, c)}")
-        lines.append("\n".join(parts))
-    if scoped is not None:
-        user = (
-            f"Question: {question}\n\n"
-            f"{who} on these claims. Rule on EACH "
-            "claim from the evidence shown with it alone: "
-            "supported, contradicted, or not_addressed. Your "
-            "ruling is final. Reply with ONLY this JSON:\n"
-            '{"rulings": [{"i": 1, "verdict": "supported"}]}\n\n'
-            + "\n".join(lines))
-    else:
-        user = (
-            f"Question: {question}\n\nDocument excerpts:\n"
-            f"{_judge_excerpts(hits)}\n\n"
-            f"{who} on these claims. Rule on EACH claim from "
-            "the excerpts and the evidence shown with it alone: "
-            "supported, contradicted, or not_addressed. Your "
-            "ruling is final. Reply with ONLY this "
-            "JSON:\n"
-            '{"rulings": [{"i": 1, "verdict": "supported"}]}\n\n'
-            + "\n".join(lines))
-    try:
-        text = _gemini_text(FLASH_MODEL, _JUDGE_SYSTEM, user)
-        obj = _parse_judge_json(text)
-        if not obj or not isinstance(obj.get("rulings"), list):
-            return None
-        out = {}
-        for r in obj["rulings"]:
-            try:
-                idx = int(r.get("i")) - 1
-            except (TypeError, ValueError):
-                continue
-            if idx in indices:
-                out[idx] = _norm_verdict(r.get("verdict"))
-        return out or None
-    except Exception:
-        return None
-
-
-def _worse_verdict(a, b):
-    if "contradicted" in (a, b):
-        return "contradicted"
-    if "not_addressed" in (a, b):
-        return "not_addressed"
-    return "supported"
-
-
-def _majority_final(verdicts):
-    """v14.2: resolve ONE claim from THREE judges' verdicts.
-    Majority rules, fail-closed:
-    - 2+ contradicted -> contradicted (the claim fails).
-    - exactly 1 contradicted and no majority (2+) supporting ->
-      contradicted (the claim fails: an unrebutted contradiction
-      never ships).
-    - 2+ supported -> supported (the claim passes; a lone
-      not_addressed or a lone contradicted outvoted 2-to-1 does
-      not sink it).
-    - otherwise (fewer than 2 supports, no contradiction) ->
-      not_addressed (the claim is unverified: redraft fodder).
-    - one of EACH verdict (a genuine 3-way split) -> None: the
-      caller routes it to Flash arbitration under the usual
-      conditions, else fails it closed with the worst verdict.
-    """
-    s = verdicts.count("supported")
-    c = verdicts.count("contradicted")
-    if s == 1 and c == 1:
-        return None  # 1 supported + 1 contradicted + 1 not_addressed
-    if c >= 2 or (c == 1 and s < 2):
-        return "contradicted"
-    if s >= 2:
-        return "supported"
-    return "not_addressed"
 
 
 # --- v15: citations at birth (item 3) -----------------------------------------
@@ -7914,121 +7228,6 @@ def _strip_uncited_asides(draft, parsed, claims, lead_sentence=None):
     return new_draft, eligible
 
 
-# --- v15: refutation retrieval (item 1, parallel per S1) ----------------------
-def _refutation_queries(claim, mechanisms):
-    """Search queries designed to DISPROVE one claim: its own
-    figures and key terms restated as a hunt for those numbers
-    in other rules, plus the matched mechanisms' forbidden
-    substitutes and confusables where the registry names them."""
-    text = claim.get("text") or ""
-    queries = []
-    figs = re.findall(r"\$\s?[\d,]+(?:\.\d+)?", text)
-    terms = [w for w in re.findall(r"[a-z]{4,}", text.lower())
-             if w not in STOP][:6]
-    if figs and terms:
-        queries.append(" ".join(terms[:4] + figs[:1]))
-    if terms:
-        queries.append(" ".join(terms[:6]))
-    for m in mechanisms or ():
-        for bad in m.get("forbidden", ()):
-            queries.append(bad)
-        period = m.get("period") or {}
-        for conf in period.get("confusables", ()):
-            queries.append(conf)
-    seen, out = set(), []
-    for q in queries:
-        if q and q not in seen:
-            seen.add(q)
-            out.append(q)
-    return out[:3]
-
-
-def _refutation_retrieve(corp, hits, claims, mechanisms):
-    """For each LOAD-BEARING claim, run its refutation queries
-    against the corpus and attach any NEW excerpt (not already
-    in the ask's set) that bears on the claim as a refutation
-    candidate (claim['refutations'], capped at 2). Retrieval is
-    keyword search (fast, local); judges rule on the candidates,
-    code never auto-fails a claim on one. Returns total ms."""
-    t0 = time.monotonic()
-    if corp is None:
-        return 0
-    seen_keys = {(h.get("url"), (h.get("excerpt") or "")[:60])
-                 for h in hits or ()}
-    for claim in claims:
-        if not claim.get("load_bearing"):
-            continue
-        found = []
-        for q in _refutation_queries(claim, mechanisms):
-            try:
-                res = search(q, corpus=corp, n=4)
-            except Exception:
-                res = []
-            for h in res:
-                key = (h.get("url"), (h.get("excerpt") or "")[:60])
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                found.append(h)
-                if len(found) >= 2:
-                    break
-            if len(found) >= 2:
-                break
-        if found:
-            claim["refutations"] = found
-    return int((time.monotonic() - t0) * 1000)
-
-
-def _hunt_evidence(corp, hits, claim, mechanisms):
-    """v15 (item 1, regression fix b): a claim judged
-    not_addressed gets ONE targeted evidence hunt before it is
-    abandoned — the failure mode where the right DOCUMENT was
-    retrieved but the chunk carrying the specific passage was
-    not (the operator's manual test, 2026-10-13: the Spousal
-    Impoverishment document was in the sources without its
-    name-on-the-check passage). Queries come from the claim
-    itself plus the matched mechanisms' own retry searches.
-    Returns up to 2 NEW excerpts (other chunks of a retrieved
-    document count as new)."""
-    if corp is None:
-        return []
-    seen_keys = {(h.get("url"), (h.get("excerpt") or "")[:60])
-                 for h in hits or ()}
-    queries = _refutation_queries(claim, ())
-    for m in mechanisms or ():
-        if m.get("retry_query"):
-            queries.append(m["retry_query"])
-    found = []
-    for q in queries[:4]:
-        try:
-            res = search(q, corpus=corp, n=5)
-        except Exception:
-            res = []
-        for h in res:
-            key = (h.get("url"), (h.get("excerpt") or "")[:60])
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            found.append(h)
-            if len(found) >= 2:
-                return found
-    return found
-
-
-# --- v15: claim-verdict cache (speedup S2) ------------------------------------
-# A resolved verdict is reusable when the CLAIM and the EVIDENCE
-# it rests on are both unchanged: keyed by (normalized claim
-# text, hash of the claim's scoped evidence). Only trustworthy
-# resolutions are written (finals decided by two agreeing
-# judges, a majority, or a Flash ruling — never a lone
-# fail-closed guess). A cached claim whose parallel refutation
-# returns new material loses the cached verdict at the join
-# (its evidence changed, so the key no longer describes it).
-_VERDICT_CACHE = {}
-_VERDICT_CACHE_MAX = 500
-_VERDICT_LOCK = threading.Lock()
-
-
 def _norm_claim_text(text):
     return re.sub(r"\s+", " ", (text or "").strip().lower())[:300]
 
@@ -8148,245 +7347,286 @@ def _claim_dupe_score(a_text, b_text):
     return containment
 
 
-def _registry_block_hash():
-    """A fingerprint of the verified-figures registry in force,
-    so a registry edit invalidates verdicts cached under the
-    old facts (F12 defect a)."""
-    try:
-        raw = json.dumps(
-            [[e.get("id"), e.get("statement"), e.get("figures"),
-              e.get("conflict_numbers"), e.get("valid_from"),
-              e.get("valid_to"), e.get("history"),
-              e.get("successor")] for e in VERIFIED_FIGURES],
-            sort_keys=True, default=str)
-    except Exception:
-        raw = ""
-    except Exception:
-        raw = ""
-    return hashlib.sha256(
-        raw.encode("utf-8", "replace")).hexdigest()[:12]
+def _judge_leg_timeout(deadline, base):
+    """One judge leg's timeout under the ask's deadline (v23.1
+    WS-A): the leg's own bound, clamped to the budget left.
+    0.0 when the budget is spent — the caller must not start
+    the leg. None deadline (outside an ask) = the base bound."""
+    if deadline is None:
+        return float(base)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return 0.0
+    return min(float(base), remaining)
 
 
-_REGISTRY_HASH = _registry_block_hash()
+def _empty_checks_block():
+    """The checks record's zero shape (rounds that never ran,
+    early-IDK records): deterministic figure + citation
+    outcomes, who judged, and the engaged registry entries
+    with their validity windows (registry freshness is part
+    of the record, per the v23.1 plan addendum)."""
+    return {"figures": {"checked": 0, "failed": []},
+            "citations": {"failed": []},
+            "judge": {"served_by": None, "model": None,
+                      "backup_used": False,
+                      "verdicts": {"supported": 0,
+                                   "contradicted": 0,
+                                   "not_addressed": 0}},
+            "registry": [], "registry_windows": {}}
 
 
-def _verdict_cache_key(question, hits, claim, mech_block=""):
-    """v18 (F12, pass 2 item A1): THE cache key, one function
-    used for both the get and the put (through v17.3 the two
-    sides were computed at different pipeline points over
-    different claim states). The key binds the claim text, the
-    QUESTION, the mechanism block in force, the registry
-    fingerprint, and the scoped evidence. Refutations are
-    deliberately NOT in the key: a refutation hit invalidates
-    the cached verdict at the join instead."""
-    parts = ["Q|" + _norm_claim_text(question),
-             "M|" + hashlib.sha256(
-                 (mech_block or "").encode("utf-8", "replace")
-                 ).hexdigest()[:12],
-             "R|" + _REGISTRY_HASH]
-    src = [j for j in (claim.get("sources") or [])
-           if 0 <= j < len(hits or ())]
-    use = src if src else list(range(len(hits or ())))
-    for j in use:
-        h = hits[j]
-        parts.append((h.get("url") or "") + "|" +
-                     (h.get("excerpt") or "")[:200])
-    return (_norm_claim_text(claim.get("text")),
-            hashlib.sha256(
-                "\n".join(parts).encode("utf-8", "replace")
-            ).hexdigest()[:24])
+def _set_check_line(text):
+    """v23.1 (WS-F): the stepper's ONE fact-check line — who is
+    checking the draft right now (or who served). Replaces the
+    panel era's per-seat widgets (BUG-3: seat states the page
+    rendered but nothing reliably wrote)."""
+    rec = getattr(_STAGE_TLS, "job", None)
+    if rec is not None:
+        ph = rec.setdefault("phase", {"name": "retrieving",
+                                      "round": None,
+                                      "check": None})
+        ph["check"] = text
 
 
-def _verdict_cache_get(key):
-    with _VERDICT_LOCK:
-        return _VERDICT_CACHE.get(key)
+# The per-claim deterministic figure check (v23.1 WS-B,
+# addendum-hardened). Money figures only — counts, years, and
+# durations are the quantity checker's and the judge's ground;
+# the answer-level _check_figures provides the strict
+# per-sentence scoping over the shipped text, and this check
+# scopes each CLAIM to its own cited excerpts.
+_CLAIM_MONEY_RE = re.compile(r"\$\s?(\d[\d,]*(?:\.\d{1,2})?)")
+_CLAIM_BARE_RE = re.compile(
+    r"\b(\d[\d,]*(?:\.\d{1,2})?)\s*(?:dollars?\b|per month\b|"
+    r"a month\b|monthly\b|per year\b|a year\b|annually\b|"
+    r"per week\b|a week\b|weekly\b)")
 
 
-def _verdict_cache_put(key, value):
-    with _VERDICT_LOCK:
-        if len(_VERDICT_CACHE) >= _VERDICT_CACHE_MAX:
-            _VERDICT_CACHE.pop(next(iter(_VERDICT_CACHE)))
-        _VERDICT_CACHE[key] = value
+def _claim_money(text):
+    vals = set()
+    for rx in (_CLAIM_MONEY_RE, _CLAIM_BARE_RE):
+        for m in rx.finditer(text or ""):
+            try:
+                vals.add(round(float(
+                    m.group(1).replace(",", "")), 2))
+            except ValueError:
+                pass
+    return vals
 
 
-def _panel_state(judges, served):
-    """v23 (WS2): the round's panel state for the TWO-seat
-    panel. FULL only when both seats served by their free
-    primaries — seat 1 by Gemini Lite itself (the GEMINI_CHAIN
-    head) and seat 2 by Qwen3.8-27B on Groq (the seat chain's
-    head) — from their two distinct families, with no local
-    seat on the panel and no seat missing. Anything less (a
-    relief model served either seat, a seat missing or
-    unavailable, a local fallback seat) is DEGRADED. A
-    top-class badge earned on a degraded panel is renamed
-    (verified_reduced / partial_reduced) where badges are
-    assigned in _run_unit, so the degradation is visible in
-    the badge itself and not only in the panel annotation."""
-    if "local" in (judges or ()):
-        return "degraded"
-    served = served or {}
-    lite_model = served.get("lite") or (
-        GEMINI_CHAIN[0] if "lite" in judges else None)
-    if "relief" in judges:
-        # the relief bench extracted for seat 1: recorded
-        # as-served, never a stand-in for the Lite primary.
-        lite_model = served.get("relief") or lite_model
-    seat2_model = served.get("judge_seat2")
-    if lite_model is None or seat2_model is None:
-        return "degraded"
-    if "lite" not in judges and "relief" not in judges:
-        return "degraded"
-    if "seat2" not in judges:
-        return "degraded"
-    if lite_model != GEMINI_CHAIN[0]:
-        return "degraded"
-    if seat2_model != SEATS["judge_seat2"]["candidates"][0][0]:
-        return "degraded"
-    if len({_model_family(lite_model),
-            _model_family(seat2_model)}) < 2:
-        return "degraded"
-    return "full"
+def _det_claim_check(claim, hits, question, mech_block, admitted):
+    """Deterministic checks for ONE claim. Returns
+    (figure_failures, cited_ok).
+
+    Figure scope: the claim's OWN cited excerpts (its sources
+    indices), the verified-figures / mechanism block text
+    (which carries the registry block), the question, and the
+    registry values admitted for the question's date. A figure
+    also passes when it is a simple derivation of scoped
+    figures — half, double, sum, or difference of two of them
+    (the addendum's derivation whitelist; a CSRA allowance is
+    legitimately half the couple's assets). A claim with no
+    mapped sources cannot be scoped tighter, so it scopes to
+    every excerpt; the answer-level _check_figures still
+    enforces the strict per-sentence rule on the shipped text.
+
+    cited_ok: the claim maps to at least one cited excerpt, or
+    rests on the registry ([registry] in its text), or is a
+    meta claim about the documents."""
+    text = claim.get("text") or ""
+    figs = _claim_money(text)
+    srcs = [j for j in (claim.get("sources") or [])
+            if isinstance(j, int)]
+    if srcs:
+        scope_texts = [hits[j].get("excerpt", "")
+                       for j in srcs if 0 <= j < len(hits or ())]
+    else:
+        scope_texts = [h.get("excerpt", "") for h in (hits or ())]
+    scope = set(admitted or ())
+    for t in scope_texts:
+        scope |= _claim_money(t)
+    if mech_block:
+        scope |= _claim_money(mech_block)
+    scope |= _claim_money(question)
+    allowed = set(scope)
+    for v in list(scope):
+        allowed.add(round(v / 2, 2))
+        allowed.add(round(v * 2, 2))
+    _sl = sorted(scope)
+    for _a in _sl:
+        for _b in _sl:
+            allowed.add(round(_a + _b, 2))
+            allowed.add(round(abs(_a - _b), 2))
+    bad = [v for v in sorted(figs)
+           if not any(abs(v - a) <= 0.011 for a in allowed)]
+    cited_ok = bool(srcs) or "[registry]" in text.lower() \
+        or bool(claim.get("meta"))
+    return bad, cited_ok
 
 
+_JUDGE_LABELS = {"lite": "Gemini Lite",
+                 "backup": "DeepSeek V3.1 backup",
+                 "local": "local model"}
 
-def _judge_round(question, hits, answer, hard, mech_block="",
+
+def _check_round(question, hits, answer, hard, mech_block="",
                  corp=None, mechanisms=None, extra_claims=None,
                  local_only=False, use_cache=True, deadline=None):
-    """One full judging round over a draft. v23 composition
-    (WS2, the judge switch): the panel is TWO seats. Seat 1
-    (Gemini 3.5 Flash Lite) extracts claims and verdicts them;
-    when Lite is down the paid relief bench extracts instead
-    (the OpenRouter relief model, then Grok 4.7), recorded
-    as-served under the round's "relief" voice. Seat 2
-    (judge_seat2: Qwen3.8-27B on Groq, the relief bench on
-    failover) verdicts the same claim list concurrently with
-    refutation retrieval (S1). The local 14B judges only when
-    every remote path is down, or on an explicit local ask;
-    a local-primary round stays local-only. Claims whose
-    refutation surfaced new material are re-verdicted against
-    the union evidence, and a re-verdict that does not affirm
-    them sends them to the disputed pool. Cached claims (S2)
-    resolve from the verdict cache unless the join's
-    refutation invalidates them. Disputes go to Flash
-    (load-bearing, or any claim on hard questions); whatever
-    Flash does not rule on fails closed on the worst verdict.
-    Returns {mode, claims, flash_used, pass, errors, panel,
-    refute_ms} where each claim carries lite/relief/seat2/
-    local/flash/final verdicts (plus the v14.2-era 'third'
-    alias of seat2). mode is 'panel' (both seats), 'gemini-
-    only', 'relief-only', 'local-only', 'arbitrated', or
-    'none'."""
+    """One checking round over a draft (v23.1 WS-B). ONE judge
+    pass — Gemini 3.5 Flash Lite extracts the claims and
+    verdicts them in a single call — with deterministic figure
+    and citation checks UNDER the judge: a claim whose figures
+    do not trace to its own cited excerpts (or the verified
+    figures, or a simple derivation of them) is contradicted
+    no matter what the judge said, and a claim with no citation
+    and no judge verdict is not_addressed. When Lite cannot
+    serve, the round falls back ONCE PER ASK to the DeepSeek
+    V3.1 backup (the claim on the ask context is atomic); when
+    no judge can serve, the round runs on the deterministic
+    checks alone (mode "det") over whatever citation-derived
+    claims exist. use_cache is accepted for signature
+    compatibility with the retired panel round and ignored:
+    the verdict cache died with the two-family rule that fed
+    it. Returns {mode, claims, pass, errors, checks,
+    judge_complete, refute_ms, flash_used} — refute_ms and
+    flash_used are always 0/False now (record continuity for
+    consumers written against the panel round's shape).
+    mode: "judge" (Lite served), "judge_backup" (V3.1 served),
+    "local" (local-only ask), "det" (no judge served), or
+    "none" (no judge AND no claims to check)."""
     errors = []
-    panel_ms = {"primary": None, "seat2": None,
-                "cached_claims": 0, "refuted_claims": 0,
-                "repaired_claims": 0}
-    seat2_status = "ok" if _seat_pick("judge_seat2")[0] \
-        is not None else "no-key"
-    seat2_error = None
-    # v23 (WS1): the stepper's extracting phase + seat states.
+    checks = _empty_checks_block()
+    ctx = _ask_ctx()
     _set_phase("extracting")
-    _set_seat_phase("seat1", "checking")
-    _set_seat_phase("seat2", "waiting")
+    _set_check_line("Fact check: starting")
+    # The engaged registry entries + their validity windows
+    # ride the record (freshness), and their admitted values
+    # scope the deterministic figure check.
+    try:
+        _matches = _registry_matches(question)
+    except Exception:
+        _matches = []
+    checks["registry"] = [m.get("id") for m in _matches
+                          if m.get("id")]
+    checks["registry_windows"] = {
+        m["id"]: [m.get("valid_from"), m.get("valid_to")]
+        for m in _matches if m.get("id")
+        and (m.get("valid_from") or m.get("valid_to"))}
+    try:
+        admitted = _registry_values(
+            _matches, on_date=_question_date(question))
+    except Exception:
+        admitted = []
 
-    # --- Stage 1: primary extraction + verdicts. Lite first,
-    # then the relief bench (OpenRouter relief model, then
-    # Grok 4.7), then (every remote path down) the demoted
-    # local 14B. The local GPU warm-up runs alongside ONLY
-    # when a local seat is likely to be needed, which is
-    # known only after a remote failure — so there is no
-    # speculative warm-up on the default path.
-    pt0 = time.monotonic()
+    def _spent():
+        return deadline is not None \
+            and time.monotonic() >= deadline
+
+    def _claim_backup():
+        """Atomically claim this ask's single backup-judge use."""
+        with ctx.lock:
+            if ctx.judge_backup_used:
+                return False
+            ctx.judge_backup_used = True
+            return True
+
+    # --- Stage 1: extraction + verdicts, one judge pass. ----
+    engine = None
+    served_model = None
+    backup_used = False
+    engines_used = []
+    primary = {"available": False, "claims": [],
+               "model": None, "error": "not run"}
     if local_only:
-        # v18 (F19 widened): a "Run locally" ask is judged by
-        # the local model only; no hosted seat is consulted
-        # at any stage of the round.
         _note_local_load("local-ask-judge")
-        primary = _primary_judgment("local", question, hits,
-                                    answer, mech_block)
-        primary_engine = "local"
+        _set_check_line("Fact check: local model")
+        if not _spent():
+            primary = _primary_judgment("local", question, hits,
+                                        answer, mech_block,
+                                        deadline=deadline)
+        if primary["available"]:
+            engine = "local"
+            served_model = primary.get("model") or LOCAL_MODEL
+            engines_used.append("local")
+        else:
+            errors.append("local judge: "
+                          + str(primary.get("error")))
     else:
-        primary = _primary_judgment("lite", question, hits,
-                                    answer, mech_block)
-        primary_engine = "lite"
-    if not primary["available"] and not local_only:
-        errors.append("lite judge: " + str(primary["error"]))
-        # v23 (WS2): seat 1's relief bench extracts, in
-        # bench order. The serving model is recorded on the
-        # ask context (served_models["relief"]) and its
-        # family joins the verdict families, so seat 2's
-        # plan can never seat the same family twice.
-        for _reng, _rmodel, _rlabel in (
-                ("orelief", OR_RELIEF_MODEL, "openrouter"),
-                ("xairelief", XAI_HARD_MODEL, "xai")):
-            _rp = _primary_judgment(_reng, question, hits,
-                                    answer, mech_block)
-            if _rp["available"]:
-                primary = _rp
-                primary_engine = "relief"
-                _rctx = _ask_ctx()
-                _rctx.served_models["relief"] = _rmodel
-                _rctx.verdict_families.setdefault(
-                    "primary", set()).add(_model_family(_rmodel))
-                break
-            errors.append(f"relief ({_rlabel}) judge: "
-                          + str(_rp["error"]))
-        if not primary["available"]:
-            if LOCAL_FALLBACK_JUDGE:
-                # Every remote extraction path is down: the
-                # one sanctioned local judging load (item 5);
-                # the model loads cold, on demand.
-                _note_local_load("fallback-judge")
-                primary = _primary_judgment("local", question,
-                                            hits, answer,
-                                            mech_block)
-                primary_engine = "local"
-    panel_ms["primary"] = int((time.monotonic() - pt0) * 1000)
-    if not primary["available"]:
-        _set_seat_phase("seat1", "down")
-        if primary_engine == "local":
-            errors.append("local judge: " + str(primary["error"]))
-        return {"mode": "none", "claims": [], "flash_used": False,
-                "pass": False, "errors": errors, "refute_ms": 0,
-                # no panel sat at all: degraded by definition
-                "panel_state": "degraded",
-                "panel": _panel_info([], panel_ms, seat2_status,
-                                     seat2_error)}
-    _set_seat_phase("seat1", "done")
-    _set_phase("judging")
-    _set_seat_phase("seat2", "checking")
-    claims = [{"text": c["text"], "load_bearing": c["load_bearing"],
-               "lite": None, "relief": None, "seat2": None,
-               "third": None, "local": None, "flash": None,
-               "final": None, "notes": [], "origin": "extracted",
-               "meta": _is_meta_claim(c["text"]),
-               "sources": list(c.get("sources") or []),
-               "refutations": []}
-              for c in primary["claims"]]
-    for i, c in enumerate(primary["claims"]):
-        claims[i][primary_engine] = c["verdict"]
-        if c["note"]:
-            claims[i]["notes"].append(c["note"])
-    # Extra claims (v15): citation-derived claims the
-    # extractor did not list and conflict claims. They carry
-    # no primary verdict; the verdict stage and the
-    # arbitrator rule on them like any other claim. (The
-    # v16-v22 divergence completeness claims died with the
-    # divergence oracle in v23.)
+        _set_check_line("Fact check: Gemini Lite")
+        if not _spent():
+            primary = _primary_judgment("lite", question, hits,
+                                        answer, mech_block,
+                                        deadline=deadline)
+        if primary["available"]:
+            engine = "lite"
+            served_model = primary.get("model") or GEMINI_CHAIN[0]
+            engines_used.append("lite")
+        else:
+            if primary.get("error"):
+                errors.append("lite judge: "
+                              + str(primary["error"]))
+            if _claim_backup() and not _spent():
+                backup_used = True
+                _set_check_line(
+                    "Fact check: backup judge (DeepSeek V3.1)")
+                primary = _primary_judgment(
+                    "backup", question, hits, answer, mech_block,
+                    deadline=deadline)
+                if primary["available"]:
+                    engine = "backup"
+                    served_model = JUDGE_BACKUP_MODEL
+                    engines_used.append("backup")
+                else:
+                    errors.append("backup judge: "
+                                  + str(primary.get("error")))
+    if engine is None and not extra_claims:
+        # No judge could serve and there are no citation-derived
+        # claims to check deterministically: nothing can be
+        # verified this round.
+        _set_check_line("Fact check: unavailable")
+        return {"mode": "none", "claims": [], "pass": False,
+                "errors": errors, "checks": checks,
+                "judge_complete": False, "refute_ms": 0,
+                "flash_used": False}
+    if served_model:
+        ctx.served_models["judge"] = served_model
+
+    # --- Claim assembly (ported from the panel round): the
+    # primary's claims, the v22.3 raw-form dedupe merge for
+    # citation-derived extras, then registry-carrying claims
+    # first (v22.3 fix 2) so a round that degrades mid-way has
+    # already covered the server's own verified figures.
+    def _new_claim(text, load_bearing, origin, sources):
+        return {"text": text, "load_bearing": bool(load_bearing),
+                "lite": None, "backup": None, "local": None,
+                "judge": None, "judge_model": None,
+                "final": None, "notes": [], "origin": origin,
+                "meta": _is_meta_claim(text),
+                "sources": list(sources or []),
+                "refutations": [],
+                "det_figure_fail": [], "det_cited": True,
+                "coverage": [], "models": {}}
+
+    claims = []
+    if engine is not None:
+        claims = [_new_claim(c["text"], c["load_bearing"],
+                             "extracted", c.get("sources"))
+                  for c in primary["claims"]]
+        for i, c in enumerate(primary["claims"]):
+            claims[i][engine] = c["verdict"]
+            claims[i]["judge"] = c["verdict"]
+            claims[i]["judge_model"] = served_model
+            if c["note"]:
+                claims[i]["notes"].append(c["note"])
     seen_norm = {_norm_claim_text(c["text"]) for c in claims}
     for ec in extra_claims or ():
         if _norm_claim_text(ec["text"]) in seen_norm:
             continue
-        # v22.3 (fix 1, rebased into v23): a raw-form
-        # duplicate of a claim already on the list (the same
-        # draft sentence in its citation-carrying form: bold
-        # label, ** emphasis, [n]/[registry] markers) merges
-        # into that claim instead of sitting beside it as a
-        # second load-bearing claim with no verdict path. The
-        # survivor keeps the verdict; the duplicate
-        # contributes its sources and its load-bearing flag.
-        # Matching is the conservative _claim_dupe_score
-        # rule — when in doubt the extra is appended like any
-        # other claim.
+        # v22.3 (fix 1): a raw-form duplicate of a claim
+        # already on the list (the same draft sentence in its
+        # citation-carrying form) merges into that claim
+        # instead of sitting beside it as a second claim with
+        # no verdict path.
         _survivor, _best = None, 0.0
         for _c in claims:
             if _c.get("meta"):
@@ -8405,405 +7645,178 @@ def _judge_round(question, hits, answer, hard, mech_block="",
                 "into this claim")
             continue
         seen_norm.add(_norm_claim_text(ec["text"]))
-        claims.append({"text": ec["text"],
-                       "load_bearing": bool(ec.get("load_bearing")),
-                       "lite": None, "relief": None, "seat2": None,
-                       "third": None, "local": None, "flash": None,
-                       "final": None, "notes": [],
-                       "origin": ec.get("origin", "extra"),
-                       "meta": _is_meta_claim(ec["text"]),
-                       "sources": list(ec.get("sources") or []),
-                       "refutations": []})
-    # --- v22.3 (fix 2, rebased into v23): registry-carrying
-    # claims are judged FIRST, while the round's budget is
-    # fresh. A claim is registry-carrying when it cites the
-    # registry ([registry] in its text) or states a figure
-    # the engaged registry entries admit for the question's
-    # date. Judging itself is unchanged — every claim still
-    # needs its verdicts, and the two-family rule for the
-    # full verified badge is untouched; only the queue order
-    # changes, so a panel that degrades mid-round has already
-    # covered the claims the server's own verified figures
-    # anchor. The sort is stable: relative order inside each
-    # class is preserved.
-    try:
-        _admitted = _registry_values(
-            _registry_matches(question),
-            on_date=_question_date(question))
-    except Exception:
-        _admitted = []
+        claims.append(_new_claim(ec["text"],
+                                 ec.get("load_bearing"),
+                                 ec.get("origin", "extra"),
+                                 ec.get("sources")))
 
     def _registry_priority(c):
         if "[registry]" in (c.get("text") or "").lower():
             return 0
         for _f in _claim_numbers(c.get("text")):
-            if any(abs(_f - _v) <= 0.011 for _v in _admitted):
+            if any(abs(_f - _v) <= 0.011 for _v in admitted):
                 return 0
         return 1
 
     claims = sorted(claims, key=_registry_priority)
-    # --- S2: verdict cache. Resolved claims (identical claim
-    # + identical scoped evidence) resolve without new judge
-    # calls; the join below can still invalidate a cached
-    # claim whose refutation returns new material. v18
-    # (F12): the key is computed ONCE per claim here and
-    # reused for the put; a claim the fresh primary just
-    # contradicted never resolves from the cache; a
-    # fresh/nocache ask skips the cache entirely.
-    def _claim_vkey(c):
-        if "_vkey" not in c:
-            c["_vkey"] = _verdict_cache_key(question, hits, c,
-                                            mech_block)
-        return c["_vkey"]
 
-    cached_idx = set()
-    if use_cache:
-        for i, c in enumerate(claims):
-            _claim_vkey(c)
-            if c.get(primary_engine) == "contradicted":
-                continue
-            hit_v = _verdict_cache_get(c["_vkey"])
-            if hit_v:
-                c["cached"] = hit_v
-                cached_idx.add(i)
-    panel_ms["cached_claims"] = len(cached_idx)
-    live_idx = [i for i in range(len(claims)) if i not in cached_idx]
-    # --- Stage 2 (S1): seat 2's verdicts and the refutation
-    # retrieval run CONCURRENTLY. Seat 2 runs on every remote
-    # round, simple and hard alike: with a two-seat panel it
-    # is the only second voice, and without it every answer
-    # would cap at one family (the v19 §G5 fast lane skipped
-    # a THIRD seat; v23 has no third seat to skip).
-    seat2 = {"available": False, "verdicts": {}, "missed": [],
-             "error": "not run"}
-    refute_ms = 0
+    # --- Stage 2: the deterministic checks, under the judge.
+    _set_phase("checking")
+    for c in claims:
+        bad, cited_ok = _det_claim_check(
+            c, hits, question, mech_block, admitted)
+        c["det_figure_fail"] = bad
+        c["det_cited"] = cited_ok
+        if _claim_money(c["text"]):
+            checks["figures"]["checked"] += 1
+        if bad:
+            checks["figures"]["failed"].append(
+                {"claim": c["text"][:160], "figures": bad})
 
-    def _run_refutation():
-        # v18 (F12 defect c): cached load-bearing claims are
-        # refutation-checked too.
-        return _refutation_retrieve(
-            corp, hits,
-            [c for c in claims if c["load_bearing"]],
-            mechanisms)
-
-    st0 = time.monotonic()
-    # v18 (§C): plan the stage-2 seat ATOMICALLY before
-    # dispatch (distinct families; the drafting family and
-    # seat 1's family excluded). A local-only round plans
-    # nothing: no remote seat runs at all (F19).
-    _jr_ctx = _ask_ctx()
-    _jr_ctx.panel_plan = {}
-    if not local_only:
-        _plan_panel()
-    run_seat2 = primary_engine != "local" and not local_only
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        fut_seat2 = _submit(pool, _second_verdicts, "seat2",
-                            question, hits,
-                            [claims[i] for i in live_idx],
-                            mech_block) if run_seat2 else None
-        fut_refute = _submit(pool, _run_refutation)
-        if fut_seat2 is not None:
-            seat2 = fut_seat2.result()
-        refute_ms = fut_refute.result()
-    panel_ms["seat2"] = int((time.monotonic() - st0) * 1000)
-    judges = [primary_engine]
-
-    def _absorb(res, engine):
-        for sub_idx, v in res["verdicts"].items():
-            claims[live_idx[sub_idx]][engine] = v["verdict"]
-            if v["note"]:
-                claims[live_idx[sub_idx]]["notes"].append(v["note"])
-        known = {_norm_claim_text(c["text"]) for c in claims}
-        for m in res["missed"]:
-            if _norm_claim_text(m["text"]) in known:
-                continue
-            known.add(_norm_claim_text(m["text"]))
-            claims.append({"text": m["text"],
-                           "load_bearing": m["load_bearing"],
-                           "lite": None, "relief": None,
-                           "seat2": None, "third": None,
-                           "local": None, "flash": None,
-                           "final": None,
-                           "notes": [m["note"]] if m["note"] else [],
-                           "origin": "missed",
-                           "meta": _is_meta_claim(m["text"]),
-                           "sources": [], "refutations": []})
-            claims[-1][engine] = m["verdict"]
-            live_idx.append(len(claims) - 1)
-
-    if seat2["available"]:
-        judges.append("seat2")
-        _absorb(seat2, "seat2")
-        _set_seat_phase("seat2", "done")
-    elif run_seat2:
-        errors.append("seat2 judge: " + str(seat2["error"]))
-        seat2_status = "unavailable"
-        seat2_error = str(seat2["error"])
-        _set_seat_phase("seat2", "down")
-    # --- v19 (§G1): completeness repair. A verdict seat's
-    # batched reply can parse cleanly yet silently OMIT
-    # claims (the seat counts as available; the omitted
-    # claims end up covered by one family only). Seat 2 gets
-    # ONE follow-up call naming only the claims it skipped;
-    # a claim the seat already verdicted is never re-asked,
-    # and the repair is skipped when the round's deadline is
-    # nearly spent.
-    if seat2["available"]:
-        _missing = [i for i in live_idx
-                    if claims[i].get("seat2") is None
-                    and not claims[i].get("meta")]
-        if _missing and not (
-                deadline is not None
-                and deadline - time.monotonic() < 45):
-            _rv = _second_verdicts(
-                "seat2", question, hits,
-                [claims[i] for i in _missing], mech_block)
-            if _rv["available"]:
-                for _sub, _v in _rv["verdicts"].items():
-                    _ci = _missing[_sub]
-                    claims[_ci]["seat2"] = _v["verdict"]
-                    if _v["note"]:
-                        claims[_ci]["notes"].append(
-                            "completeness repair: " + _v["note"])
-                panel_ms["repaired_claims"] += len(_rv["verdicts"])
-    # --- v15.1 (operator ruling, 2026-10-13): NO local second
-    # seat. A failed seat 2 degrades the round to seat 1
-    # alone (mode gemini-only / relief-only, the *_single
-    # badges); the seat's error is already recorded above.
-    # --- The join (S1): cached claims whose refutation
-    # returned NEW material lose their cached verdict (their
-    # evidence changed); every claim carrying refutation
-    # candidates is re-verdicted against the union evidence
-    # by seat 2. A re-verdict that does not affirm the claim
-    # sends it to the disputed pool below.
-    refuted = [i for i in range(len(claims))
-               if claims[i].get("refutations")]
-    panel_ms["refuted_claims"] = len(refuted)
-    for i in refuted:
-        if i in cached_idx:
-            cached_idx.discard(i)
-            claims[i].pop("cached", None)
-            panel_ms["cached_claims"] -= 1
-            if i not in live_idx:
-                live_idx.append(i)
-    rejudge_engine = "seat2" if seat2["available"] else None
-    if refuted and rejudge_engine:
-        subset = [claims[i] for i in refuted]
-        rv = _second_verdicts(rejudge_engine, question, hits,
-                              subset, mech_block)
-        if rv["available"]:
-            for sub_idx, v in rv["verdicts"].items():
-                ci = refuted[sub_idx]
-                claims[ci]["refute_verdict"] = v["verdict"]
+    # --- Stage 3: verdicts for the claims the primary pass
+    # did not cover (citation-derived extras, and any claims a
+    # verdict call flags as missed). Batched: at most two
+    # verdict calls per round — the anti-413 rule learned from
+    # the panel era's Groq failures. When the serving engine
+    # fails mid-round, the ask's one backup use (if unclaimed)
+    # covers the verdict stage instead.
+    targets = [c for c in claims if c["judge"] is None
+               and not c.get("meta")]
+    if engine is not None and targets and not _spent():
+        verd_engine = engine
+        batches = [targets[i:i + 14]
+                   for i in range(0, len(targets), 14)][:2]
+        for batch in batches:
+            if _spent():
+                break
+            res = _second_verdicts(verd_engine, question, hits,
+                                   batch, mech_block,
+                                   deadline=deadline)
+            if not res["available"] and verd_engine == "lite" \
+                    and not local_only and _claim_backup():
+                backup_used = True
+                if "backup" not in engines_used:
+                    engines_used.append("backup")
+                _set_check_line(
+                    "Fact check: backup judge (DeepSeek V3.1)")
+                verd_engine = "backup"
+                res = _second_verdicts(
+                    "backup", question, hits, batch, mech_block,
+                    deadline=deadline)
+            if not res["available"]:
+                errors.append("verdicts: "
+                              + str(res.get("error")))
+                break
+            vmodel = {"lite": GEMINI_CHAIN[0],
+                      "backup": JUDGE_BACKUP_MODEL}.get(
+                          verd_engine) or served_model
+            for sub_idx, v in res["verdicts"].items():
+                c = batch[sub_idx]
+                c[verd_engine] = v["verdict"]
+                c["judge"] = v["verdict"]
+                c["judge_model"] = vmodel
                 if v["note"]:
-                    claims[ci]["notes"].append(
-                        "refutation check: " + v["note"])
-    # --- Mode + resolution. Code resolves verdicts, never
-    # averages (v14's rule, unchanged).
-    remote = [j for j in judges if j in ("lite", "relief", "seat2")]
-    if len(remote) >= 2:
-        mode = "panel"
-    elif judges == ["lite"]:
-        mode = "gemini-only"
-    elif judges == ["relief"]:
-        mode = "relief-only"
-    elif judges == ["seat2"]:
-        mode = "seat2-only"
-    else:
-        mode = "local-only"
-    disputed = []
-    for i, c in enumerate(claims):
-        if i in cached_idx and c.get("cached"):
-            _cv = c["cached"]
-            c["final"] = _cv["verdict"] if isinstance(_cv, dict) \
-                else _cv
-            continue
-        vs = [c[k] for k in ("lite", "relief", "seat2", "local")
-              if c.get(k)]
-        if c.get("refute_verdict") \
-                and c["refute_verdict"] != "supported":
-            disputed.append(i)
-            continue
-        if len(vs) >= 3:
-            f = _majority_final(vs)
-            if f is None:
-                disputed.append(i)
-            else:
-                c["final"] = f
-        elif len(vs) == 2:
-            if vs[0] == vs[1]:
-                c["final"] = vs[0]
-            else:
-                disputed.append(i)
-        elif len(vs) == 1:
-            c["final"] = vs[0]
-        else:
+                    c["notes"].append(v["note"])
+            known = {_norm_claim_text(c["text"]) for c in claims}
+            for m in res["missed"]:
+                if _norm_claim_text(m["text"]) in known:
+                    continue
+                known.add(_norm_claim_text(m["text"]))
+                nc = _new_claim(m["text"], m["load_bearing"],
+                                "missed", [])
+                nc[verd_engine] = m["verdict"]
+                nc["judge"] = m["verdict"]
+                nc["judge_model"] = vmodel
+                if m["note"]:
+                    nc["notes"].append(m["note"])
+                bad, cited_ok = _det_claim_check(
+                    nc, hits, question, mech_block, admitted)
+                nc["det_figure_fail"] = bad
+                nc["det_cited"] = cited_ok
+                if bad:
+                    checks["figures"]["failed"].append(
+                        {"claim": nc["text"][:160],
+                         "figures": bad})
+                claims.append(nc)
+
+    # --- Stage 4: finals. Deterministic failures are final;
+    # the judge rules the rest; a claim nobody ruled on ships
+    # only when the deterministic checks pass it.
+    for c in claims:
+        if c["det_figure_fail"]:
+            c["final"] = "contradicted"
+            c["notes"].append(
+                "deterministic figure check: figure(s) "
+                + ", ".join(f"${v:,.2f}" if v % 1
+                            else f"${v:,.0f}"
+                            for v in c["det_figure_fail"])
+                + " do not trace to this claim's cited "
+                  "excerpts, the verified figures, or a simple "
+                  "derivation of them")
+        elif c["judge"] is not None:
+            c["final"] = c["judge"]
+        elif not c["det_cited"] and not c.get("meta"):
             c["final"] = "not_addressed"
-    for c in claims:  # keep the arbitration evidence's alias fresh
-        c["third"] = c.get("seat2")
-    flash_used = False
-    if disputed:
-        _set_stage("arbitrating")
-        _set_seat_phase("arbitrator", "ruling")
-        to_rule = [i for i in disputed
-                   if claims[i]["load_bearing"] or hard]
-        if to_rule:
-            # v18 (F19): no Flash in a local-only round; the
-            # disputed claims fail closed below instead.
-            rulings = None if local_only else _flash_arbitrate(
-                question, hits, claims, to_rule)
-            if rulings:
-                flash_used = True
-                mode = "arbitrated"
-                for idx, verdict in rulings.items():
-                    claims[idx]["flash"] = verdict
-                    claims[idx]["final"] = verdict
-        # v15.1 (operator ruling, 2026-10-13): NO local
-        # tiebreak. A disputed claim with no Flash ruling
-        # FAILS CLOSED in the loop below (worst verdict on
-        # record, or not_addressed). The local model is
-        # never seated on a remote ask.
-        for i in disputed:
-            if claims[i]["final"] is None:
-                vs = [claims[i][k]
-                      for k in ("lite", "relief", "seat2", "local")
-                      if claims[i].get(k)]
-                if claims[i].get("refute_verdict") \
-                        and claims[i]["refute_verdict"] != "supported":
-                    # v18 (F1, pass 2 item A3): Flash was
-                    # asked and did not rule, so the
-                    # refutation verdict STANDS as the final.
-                    claims[i]["final"] = claims[i]["refute_verdict"]
-                elif vs:
-                    w = vs[0]
-                    for v in vs[1:]:
-                        w = _worse_verdict(w, v)
-                    claims[i]["final"] = w
-                else:
-                    claims[i]["final"] = "not_addressed"
-    # --- Targeted evidence hunt (item 1, regression fix b):
-    # claims still not_addressed get one hunt for the
-    # specific passage before they are abandoned. Promotion
-    # is strict: at least two judges must re-verdict
-    # supported against the enlarged evidence; the hunt
-    # never demotes.
-    if corp is not None \
-            and not (deadline is not None
-                     and deadline - time.monotonic() < 90):
-        # v18 (F18): the hunt is discretionary work; it is
-        # skipped when the ask's deadline is nearly spent.
-        hunt_idx = [i for i, c in enumerate(claims)
-                    if c["final"] == "not_addressed"
-                    and not c.get("meta")][:2]
-        for i in hunt_idx:
-            new = _hunt_evidence(corp, hits, claims[i], mechanisms)
-            if not new:
-                continue
-            claims[i]["hunt"] = new
-            verdicts = []
-            for eng in dict.fromkeys(
-                    [primary_engine]
-                    + (["seat2"] if seat2["available"] else [])):
-                rv = _second_verdicts(eng, question, hits,
-                                      [claims[i]], mech_block)
-                if rv["available"] and 0 in rv["verdicts"]:
-                    claims[i][eng] = rv["verdicts"][0]["verdict"]
-                    _mdl = {"lite": GEMINI_CHAIN[0],
-                            "relief": _ask_ctx().served_models.get(
-                                "relief"),
-                            "local": ROUTED_MODEL,
-                            "seat2": _ask_ctx().served_models.get(
-                                "judge_seat2")}.get(eng)
-                    verdicts.append(
-                        (rv["verdicts"][0]["verdict"],
-                         _model_family(_mdl) if _mdl else eng))
-                    if rv["verdicts"][0]["note"]:
-                        claims[i]["notes"].append(
-                            rv["verdicts"][0]["note"])
-            # v18 (pass 2 item E): promotion needs two
-            # distinct FAMILIES affirming, not two verdicts
-            # that may be one model serving two seats.
-            _sup_fams = {fam for v, fam in verdicts
-                         if v == "supported"}
-            if verdicts and all(v == "supported"
-                                for v, _f in verdicts) \
-                    and len(_sup_fams) >= 2:
-                claims[i]["final"] = "supported"
-                claims[i]["notes"].append(
-                    "targeted retrieval found the passage; "
-                    "re-judged supported")
-    # --- v18 (§C): per-claim coverage + serving models. A
-    # claim's coverage is the set of DISTINCT MODEL FAMILIES
-    # among its SUPPORTING verdicts (a seat and its own
-    # failover are one family and can never make a claim
-    # panel-verified; two seats served by one model are one
-    # voice). Badges derive from coverage in _run_unit; §E
-    # persists both maps per claim. Cached claims carry the
-    # coverage recorded when their verdict was stored.
-    _served = dict(_ask_ctx().served_models)
-    _engine_model = {"lite": _served.get("lite")
-                     or GEMINI_CHAIN[0],
-                     "relief": _served.get("relief"),
-                     "local": ROUTED_MODEL,
-                     "flash": FLASH_MODEL,
-                     "seat2": _served.get("judge_seat2")}
-    for c in claims:
-        if isinstance(c.get("cached"), dict):
-            c["coverage"] = list(c["cached"].get("coverage") or [])
-            c["models"] = dict(c["cached"].get("models") or {})
-            continue
-        _models, _fams = {}, set()
-        for _eng in ("lite", "relief", "seat2", "local", "flash"):
-            if c.get(_eng):
-                _mdl = _engine_model.get(_eng)
-                if _mdl:
-                    _models[_eng] = _mdl
-                if c[_eng] == "supported":
-                    _fams.add(_model_family(_mdl) if _mdl else _eng)
-        c["models"] = _models
-        c["coverage"] = sorted(_fams)
-    # Cache the trustworthy resolutions (S2 + v18 F12): a
-    # verdict is stored only when at least two DISTINCT
-    # FAMILIES produced verdicts on the claim, or Flash
-    # ruled. Hunt-promoted verdicts are not stored: they
-    # were earned on evidence outside the key's scope.
-    if use_cache:
-        for i, c in enumerate(claims):
-            if i in cached_idx or c.get("origin") == "conflict" \
-                    or c.get("hunt") or not c.get("final"):
-                continue
-            _all_fams = {_model_family(mdl) for mdl in
-                         (c.get("models") or {}).values()}
-            if c.get("flash") or len(_all_fams) >= 2:
-                _verdict_cache_put(
-                    _claim_vkey(c),
-                    {"verdict": c["final"],
-                     "coverage": c.get("coverage") or [],
-                     "models": c.get("models") or {}})
-    # Keep the v14.2-era 'third' alias pointing at seat 2.
-    for c in claims:
-        c["third"] = c.get("seat2")
-    # Meta claims (about the documents themselves) never sink
-    # an answer: the pass is computed over substantive claims.
+            c["notes"].append(
+                "deterministic citation check: no cited "
+                "excerpt or registry source, and no judge "
+                "verdict")
+            checks["citations"]["failed"].append(c["text"][:160])
+        else:
+            c["final"] = "supported"
+        if c["judge_model"]:
+            c["models"] = {"judge": c["judge_model"]}
+        if c["final"] == "supported" \
+                and c["judge"] == "supported":
+            c["coverage"] = [_model_family(c["judge_model"])]
+        elif c["final"] == "supported":
+            c["coverage"] = ["deterministic"]
+        if c["judge"] is not None:
+            checks["judge"]["verdicts"][c["judge"]] = \
+                checks["judge"]["verdicts"].get(c["judge"], 0) + 1
     substantive = [c for c in claims if not c.get("meta")]
+    judge_complete = bool(engine) and all(
+        c["judge"] is not None for c in substantive)
     passed = bool(substantive) and all(
         c["final"] == "supported" for c in substantive)
-    return {"mode": mode, "claims": claims, "flash_used": flash_used,
-            "pass": passed, "errors": errors, "refute_ms": refute_ms,
-            # §C (operator ruling 2026-10-14): the panel state
-            # rides the round so _run_unit can rename a
-            # top-class badge earned on a degraded panel.
-            "panel_state": _panel_state(judges, _served),
-            "panel": _panel_info(judges, panel_ms, seat2_status,
-                                 seat2_error, served=_served)}
+    mode = {"lite": "judge", "backup": "judge_backup",
+            "local": "local"}.get(engine, "det")
+    label = " + ".join(_JUDGE_LABELS[e] for e in engines_used) \
+        if engines_used else None
+    checks["judge"]["served_by"] = label
+    checks["judge"]["model"] = served_model
+    checks["judge"]["backup_used"] = backup_used
+    _set_check_line("Fact check: " + (label or
+                                      "deterministic checks only"))
+    return {"mode": mode, "claims": claims, "pass": passed,
+            "errors": errors, "checks": checks,
+            "judge_complete": judge_complete, "refute_ms": 0,
+            "flash_used": False}
+
+
+def _checks_annotation(jr):
+    """The answer page's verification line (v23.1): which
+    checks ran and who judged, from the round's checks record.
+    Replaces _panel_annotation (the panel is gone)."""
+    chk = (jr or {}).get("checks") or {}
+    j = chk.get("judge") or {}
+    if (jr or {}).get("mode") == "local":
+        return "Checks: figures + citations + local judge"
+    if j.get("served_by"):
+        return "Checks: figures + citations + " \
+            + j["served_by"] + " judge"
+    return "Checks: figures + citations only (judge unavailable)"
+
 
 # --- v14: the escalation ladder ----------------------------------------------
 # Per answering unit (the whole question, or one part of a bundled
-# question): draft, then up to TWO redrafts with the judges'
-# objections attached (operator decision, 2026-10-13), then a final
-# Flash ruling on the last draft's failed claims, then IDK. Code
-# gates (figures, mechanisms, arithmetic) run alongside the judges:
-# a draft ships only when every gate passes.
+# question): draft, then up to TWO redrafts with the checking
+# round's objections attached (operator decision, 2026-10-13),
+# then the supported-core assembly (Partial) or IDK. Code
+# gates (figures, mechanisms, arithmetic) run alongside the
+# judge: a draft ships only when every gate passes. (v23.1:
+# the panel era's final Flash ruling is deleted with the
+# panel; the ladder's end state is assembly-or-IDK.)
 
 
 def _generate(engine, model, question, hits, instructions):
@@ -8817,57 +7830,28 @@ def _generate(engine, model, question, hits, instructions):
             label += " (downgraded: best Gemini unavailable)"
         return answer, prompt, label, dg, False
     if engine in ("nim", "nimfast"):
-        # v23 (WS3.1): the drafting ladder is THREE TIERS.
-        # Tier 1 (free): the Groq primary (hard: GPT-OSS-120B;
-        # simple: GPT-OSS-20B). Tier 2 (paid): xAI Grok 4.7
-        # (hard only), then OpenRouter (hard: GPT-OSS-120B;
-        # simple: GPT-OSS-20B). Tier 3 (local qwen3.5:9b /
-        # the routed local model) is the caller's
+        # v23.1 (WS-A roster): the drafting ladder is TWO
+        # hosted tiers + the caller's local fallback. Tier 1:
+        # xAI Grok 4.7 drafts EVERYTHING (hard and simple) —
+        # the v23 first live test showed the free Groq primary
+        # 429/413-ing under its own organization token cap
+        # while the paid Grok draft was the leg that worked.
+        # Tier 2 (free): Groq GPT-OSS 120B. Tier 3 (local
+        # qwen3.5:9b / the routed local model) is the caller's
         # genuine-unavailability fallback in _try_generate,
-        # reached only when this raises. The v16-v22 NIM
-        # bench tier is DELETED, as is the divergence
-        # oracle's nimx engine. (The engine names "nim" /
+        # reached only when this raises. The v23 OpenRouter
+        # drafting tier is DELETED (OpenRouter now serves only
+        # the backup judge). (The engine names "nim" /
         # "nimfast" are v15-era labels for this hosted ladder,
         # kept so callers and records stay comparable; no NIM
         # model is in it.) The model argument is the nominal
         # pick and is ignored: the ladder owns model choice.
-        # Seat-style events record every call.
+        # Seat-style events record every call, and every leg's
+        # timeout clamps to the unit's remaining budget via
+        # _leg_timeout (WS-A).
         job = "hard_draft" if engine == "nim" else "simple_draft"
-        _gt = _leg_timeout(GROQ_DRAFTER_TIMEOUT)
-        if _groq_available() and _gt > 0:
-            _gmodel = (GROQ_HARD_MODEL if engine == "nim"
-                       else GROQ_SIMPLE_MODEL)
-            _gt0 = time.monotonic()
-            try:
-                answer, prompt = groq_ask(
-                    _gmodel,
-                    question, hits, instructions=instructions,
-                    timeout=_gt, deadline=_gt0 + _gt)
-                _note_seat(job, _gmodel, False)
-                return (answer, prompt,
-                        _gmodel + " (Groq API)",
-                        False, False)
-            except Exception as e:
-                # v21 (WS4b): the primary's failure lands in
-                # the ask record, not only the server log.
-                _glat = time.monotonic() - _gt0
-                _note_seat_fail(
-                    job, _gmodel, 5, _glat,
-                    _glat >= GROQ_DRAFTER_TIMEOUT * 0.9
-                    or "timed out" in str(e)
-                    or "timeout" in str(e).lower(),
-                    f"{type(e).__name__}: {e}")
-                print(f"[groq] {job} primary failed: "
-                      f"{str(e)[:150]}; the chain falls over",
-                      flush=True)
-        elif _groq_key() is not None and _groq_guard_tripped():
-            _note_groq_shed(job)
-        # Tier 2 (paid): xAI Grok 4.7 first on hard
-        # questions (reservation-gated like OpenRouter), then
-        # the v17 OpenRouter seat (hard: GPT-OSS-120B;
-        # simple: GPT-OSS-20B).
         _xt = _leg_timeout(XAI_DRAFTER_TIMEOUT)
-        if engine == "nim" and _xai_available() and _xt > 0:
+        if _xai_available() and _xt > 0:
             _xt0 = time.monotonic()
             try:
                 answer, prompt = xai_ask(
@@ -8879,6 +7863,8 @@ def _generate(engine, model, question, hits, instructions):
                         XAI_HARD_MODEL + " (xAI API)",
                         False, False)
             except Exception as e:
+                # The primary's failure lands in the ask
+                # record, not only the server log.
                 _xlat = time.monotonic() - _xt0
                 _note_seat_fail(
                     job, XAI_HARD_MODEL, 4, _xlat,
@@ -8886,33 +7872,34 @@ def _generate(engine, model, question, hits, instructions):
                     or "timed out" in str(e)
                     or "timeout" in str(e).lower(),
                     f"{type(e).__name__}: {e}")
-                print(f"[xai] {job} seat failed: "
+                print(f"[xai] {job} primary failed: "
                       f"{str(e)[:150]}; the chain falls over",
                       flush=True)
-        _ot = _leg_timeout(OPENROUTER_DRAFTER_TIMEOUT)
-        if _or_available() and _ot > 0:
-            or_model = (OPENROUTER_HARD_MODEL if engine == "nim"
-                        else OPENROUTER_SIMPLE_MODEL)
-            _ot0 = time.monotonic()
+        _gt = _leg_timeout(GROQ_DRAFTER_TIMEOUT)
+        if _groq_available() and _gt > 0:
+            _gt0 = time.monotonic()
             try:
-                answer, prompt = or_ask(
-                    or_model, question, hits,
-                    instructions=instructions, timeout=_ot,
-                    deadline=_ot0 + _ot)
-                _note_seat(job, or_model, False)
+                answer, prompt = groq_ask(
+                    GROQ_HARD_MODEL,
+                    question, hits, instructions=instructions,
+                    timeout=_gt, deadline=_gt0 + _gt)
+                _note_seat(job, GROQ_HARD_MODEL, True)
                 return (answer, prompt,
-                        or_model + " (OpenRouter API)", False, False)
+                        GROQ_HARD_MODEL + " (Groq API)",
+                        False, False)
             except Exception as e:
-                _olat = time.monotonic() - _ot0
+                _glat = time.monotonic() - _gt0
                 _note_seat_fail(
-                    job, or_model, 0, _olat,
-                    _olat >= OPENROUTER_DRAFTER_TIMEOUT * 0.9
+                    job, GROQ_HARD_MODEL, 5, _glat,
+                    _glat >= GROQ_DRAFTER_TIMEOUT * 0.9
                     or "timed out" in str(e)
                     or "timeout" in str(e).lower(),
                     f"{type(e).__name__}: {e}")
-                print(f"[openrouter] {job} seat failed: "
+                print(f"[groq] {job} backup failed: "
                       f"{str(e)[:150]}; the chain falls over",
                       flush=True)
+        elif _groq_key() is not None and _groq_guard_tripped():
+            _note_groq_shed(job)
         _note_seat_down(
             job, "every drafting tier down")
         raise RuntimeError(
@@ -9135,41 +8122,16 @@ def _repair_lead(ctx, draft, lead, eng, mdl, instr):
     return text
 
 
-def _panel_annotation(jr):
-    """§C (pass 2 item D): the annotation naming the panel that
-    actually SAT, built from the claims' serving-model records:
-    the distinct judge models in seat order, plus a count of
-    claims covered by one judge family only when any exist.
-    Shown by the webapp under the badge; persisted in §E
-    records. Empty when no judge served (mode none)."""
-    claims = (jr or {}).get("claims") or []
-    sat = []
-    for eng in ("lite", "relief", "seat2", "local", "flash"):
-        for c in claims:
-            mdl = (c.get("models") or {}).get(eng)
-            if mdl and mdl not in sat:
-                sat.append(mdl)
-    if not sat:
-        return ""
-    text = "Judges: " + " + ".join(sat)
-    single = sum(1 for c in claims if not c.get("meta")
-                 and len(c.get("coverage") or []) < 2)
-    if single:
-        text += (f" — {single} claim(s) checked by one judge "
-                 "family only")
-    return text
-
-
 def _run_unit(ctx):
     """Run the ladder for one answering unit. ctx keys: question
     (full question, for figure provenance), unit_q (what this unit
     answers), hits, engine ('local'|'gemini'), draft_model,
     instructions (base prompt additions), mechanisms, allowed_extra
     (figure-checker allowed values), csra_comp, hard (bool).
-    v15 ctx additions: corp (for refutation/hunt retrieval),
+    v15 ctx additions: corp (the corpus handle),
     deadline (monotonic cap), diverge (item 4 eligibility),
     explicit_model (an API caller's own model pick, never
-    overridden by NIM drafting).
+    overridden by the hosted drafting ladder).
     Returns the unit record: {answer (None when IDK), badge, served,
     fallback, downgraded, judging, claims, figure_check, rungs,
     judge_ms, refute_ms, cap_hit, missing, gate, prompt}."""
@@ -9204,8 +8166,7 @@ def _run_unit(ctx):
         budget_s = 285 if hard else 150
         deadline = min(deadline, time.monotonic() + budget_s)
         _ask_ctx().unit_deadline = deadline
-    # v18 (F13): judging (and its verdict-cache keys, the
-    # arbitration, and the divergence check) sees the FULL
+    # v18 (F13): the checking round sees the FULL
     # question for a bundled part, with the part scope stated;
     # through v17.3 a part was drafted and judged as if it were
     # the whole question, so anaphora and shared conditions in
@@ -9236,6 +8197,7 @@ def _run_unit(ctx):
     objections = ""
     gen_error = None
     cap_hit = False
+    cut_phase = None
     cost_capped = False
     conflict_fail = False
     judged_draft = None       # last draft that went through judging
@@ -9247,21 +8209,21 @@ def _run_unit(ctx):
         """(engine, model) for one generation attempt. The
         hosted ladder (engines "nim"/"nimfast", v15-era names)
         owns its model choice in _generate; the model named
-        here is the ladder's free primary, for the record.
-        Gemini units are unchanged."""
+        here is the ladder's primary (v23.1: xAI Grok 4.7),
+        for the record. Gemini units are unchanged."""
         if ctx["engine"] == "gemini" or ctx.get("explicit_model"):
             if rung > 0 and ctx["engine"] == "local":
                 return "local", ROUTED_MODEL  # v14 redraft rule
             return ctx["engine"], ctx["draft_model"]
         if rung == 0 and not hard:
-            return "nimfast", GROQ_SIMPLE_MODEL
-        return "nim", GROQ_HARD_MODEL
+            return "nimfast", XAI_HARD_MODEL
+        return "nim", XAI_HARD_MODEL
 
     def _try_generate(engine, model, instr):
-        """Generate with the fallback chains. v23: _generate's
-        hosted ladder already walked its tiers (free Groq,
-        then paid xAI/OpenRouter), so reaching the local
-        branch means the remote drafting path is genuinely
+        """Generate with the fallback chains. v23.1: _generate's
+        hosted ladder already walked its tiers (xAI Grok 4.7,
+        then the Groq backup), so reaching the local branch
+        means the remote drafting path is genuinely
         unavailable (item 5's one sanctioned drafting load);
         the load is recorded."""
         try:
@@ -9292,9 +8254,17 @@ def _run_unit(ctx):
                        "label": note.lstrip("- ")})
         return qs
 
+    def _mark_cap():
+        """v23.1 (WS-A): record a budget cut + the phase the
+        unit was in when the budget ran out."""
+        nonlocal cap_hit, cut_phase
+        cap_hit = True
+        _open = _ask_ctx().phase_open
+        cut_phase = _open[0] if _open else None
+
     for rung in range(3):  # draft + two redrafts (operator decision)
         if deadline and time.monotonic() > deadline:
-            cap_hit = True
+            _mark_cap()
             break
         if rung > 0 and _or_ask_cost() >= PER_ASK_CEILING_USD:
             # v18 (§B remainder): past the per-ask cost line the
@@ -9376,10 +8346,10 @@ def _run_unit(ctx):
             # A resident 9B draft is done; free its VRAM before
             # judging in case a local fallback seat is needed.
             _unload_others(ROUTED_MODEL)
-        _set_stage(f"judging round {rung + 1}")
-        _set_phase("judging", round=rung + 1)
+        _set_stage(f"checking round {rung + 1}")
+        _set_phase("checking", round=rung + 1)
         jt0 = time.monotonic()
-        jr = _judge_round(judge_q, ctx["hits"], draft,
+        jr = _check_round(judge_q, ctx["hits"], draft,
                           hard, judge_block, corp=ctx.get("corp"),
                           mechanisms=ctx["mechanisms"],
                           extra_claims=extra_claims,
@@ -9389,6 +8359,13 @@ def _run_unit(ctx):
         judge_ms += int((time.monotonic() - jt0) * 1000)
         refute_ms += jr.get("refute_ms", 0)
         judged_draft = draft
+        if deadline and time.monotonic() > deadline:
+            # v23.1 (WS-A): the checking round consumed the
+            # rest of the budget. The cap is marked; the
+            # normal flow below still ships a passing draft,
+            # and the next rung's top check stops the ladder
+            # otherwise.
+            _mark_cap()
         if lead_uncited:
             # Item 4 micro-repair: ONE per rung. The drafter
             # rewrites only the lead, with the exact citation it
@@ -9403,10 +8380,10 @@ def _run_unit(ctx):
                 draft2 = draft.replace(lead_sentence, new_lead, 1)
                 parsed2 = _parse_citations(draft2, ctx["hits"])
                 if new_lead not in parsed2["uncited_lb"]:
-                    _set_stage(f"judging round {rung + 1} "
+                    _set_stage(f"checking round {rung + 1} "
                                "(lead repair)")
                     jt1 = time.monotonic()
-                    jr2 = _judge_round(
+                    jr2 = _check_round(
                         judge_q, ctx["hits"], draft2, hard,
                         judge_block, corp=ctx.get("corp"),
                         mechanisms=ctx["mechanisms"],
@@ -9432,7 +8409,8 @@ def _run_unit(ctx):
                     lead_uncited = bool(
                         lead_sentence and lead_sentence in uncited_lb)
         if jr["mode"] == "none":
-            break  # no judge can run: redrafting blind helps nothing
+            break  # nothing could be checked: redrafting blind
+            # helps nothing
         if jr["pass"] and not ungrounded and not mech_failures \
                 and not quantities and not uncited_lb \
                 and not conflict_fail:
@@ -9458,11 +8436,11 @@ def _run_unit(ctx):
     # load-bearing sentences, cut the ones that map to no
     # extracted claim (asides) and let the stripped draft
     # re-enter the normal final disposition below (ship test,
-    # Flash arbitration, capped assembly) with every
-    # deterministic gate re-run on the stripped text. The cuts
-    # are recorded in stripped_sentences. Claim-bearing
-    # uncited sentences are untouched: they fail closed below
-    # exactly as before.
+    # capped assembly) with every deterministic gate re-run on
+    # the stripped text. The cuts are recorded in
+    # stripped_sentences (the v23.1 checks record's strip log).
+    # Claim-bearing uncited sentences are untouched: they fail
+    # closed below exactly as before.
     if uncited_lb and judged_draft is not None and jr is not None \
             and jr["mode"] != "none" and jr["claims"] \
             and not cap_hit and not gen_error and not cost_capped:
@@ -9491,14 +8469,14 @@ def _run_unit(ctx):
                 stripped_draft, ctx["mechanisms"],
                 ctx.get("csra_comp"))
             quantities = _quantities_for(stripped_draft)
-            # v18 (F7): the stripped draft is RE-JUDGED before
+            # v18 (F7): the stripped draft is RE-CHECKED before
             # it can ship. Through v17.3 only the deterministic
             # gates re-ran and the ship test below read the
             # PRE-strip round's pass, so a strip could carry a
-            # panel-failed draft into a verified ship.
-            _set_stage("judging (stripped draft)")
+            # check-failed draft into a verified ship.
+            _set_stage("checking (stripped draft)")
             _jt2 = time.monotonic()
-            jr = _judge_round(
+            jr = _check_round(
                 judge_q, ctx["hits"], stripped_draft, hard,
                 judge_block, corp=ctx.get("corp"),
                 mechanisms=ctx["mechanisms"],
@@ -9509,12 +8487,14 @@ def _run_unit(ctx):
             judge_ms += int((time.monotonic() - _jt2) * 1000)
             refute_ms += jr.get("refute_ms", 0)
             judged_draft = stripped_draft
+            if deadline and time.monotonic() > deadline:
+                _mark_cap()
             _cc3, _cf3 = _conflict_claims(conflicts,
                                           stripped_draft)
             conflict_fail = bool(_cf3)
-    # v23 (WS1): the ladder is done; what remains (the final
-    # Flash ruling, capped assembly, IDK assembly) is the
-    # final-checks phase on the page's stepper.
+    # v23 (WS1): the ladder is done; what remains (capped
+    # assembly, IDK assembly) is the final-checks phase on the
+    # page's stepper.
     _set_phase("final checks")
     shipped = False
     if draft is not None and jr is not None and jr["mode"] != "none":
@@ -9523,42 +8503,16 @@ def _run_unit(ctx):
                 and not conflict_fail:
             shipped = True
         elif deadline and time.monotonic() > deadline:
-            cap_hit = True  # no budget left for the final ruling
-        else:
-            # Final rung (plan section 5): Flash rules once on the
-            # last draft's failed claims; its ruling is final.
-            # v18 (F3, pass 2 item A4): claims a MAJORITY of
-            # seats contradicted are excluded — Flash was being
-            # handed settled contradictions framed as splits,
-            # and its ruling overwrote the panel's. Conflict
-            # claims never reach Flash either (code-resolved).
-            failed = [i for i, c in enumerate(jr["claims"])
-                      if c["final"] != "supported"
-                      and c["flash"] is None and not c.get("meta")
-                      and c.get("origin") != "conflict"
-                      and sum(1 for k in ("lite", "relief",
-                                          "seat2", "local")
-                              if c.get(k) == "contradicted") < 2]
-            if failed and not ungrounded and not mech_failures \
-                    and not quantities and not uncited_lb \
-                    and not conflict_fail:
-                rulings = _flash_arbitrate(judge_q, ctx["hits"],
-                                           jr["claims"], failed)
-                if rulings:
-                    jr["flash_used"] = True
-                    jr["mode"] = "arbitrated"
-                    for idx, verdict in rulings.items():
-                        jr["claims"][idx]["flash"] = verdict
-                        jr["claims"][idx]["final"] = verdict
-                    jr["pass"] = all(
-                        c["final"] == "supported" for c in jr["claims"]
-                        if not c.get("meta"))
-                    shipped = jr["pass"]
+            _mark_cap()
     base = {"served": ctx.get("_served"), "fallback": ctx.get("_fb", False),
             "downgraded": ctx.get("_dg", False),
             "prompt": ctx.get("_prompt", ""), "rungs": rungs,
             "judge_ms": judge_ms, "refute_ms": refute_ms,
             "cap_hit": cap_hit,
+            # v23.1 (WS-A/BUG-10): the budget cut + the phase
+            # it landed in ride the unit record.
+            "budget_cut": cap_hit,
+            "cut_phase": cut_phase,
             "cost_capped": cost_capped,
             "draft_text": judged_draft,
             "figure_check": {"ungrounded": list(ungrounded),
@@ -9571,74 +8525,66 @@ def _run_unit(ctx):
             "stripped_sentences": stripped_sentences}
     if shipped:
         answer, _fixes = _check_arithmetic(draft)
-        # v18 (F2/§C): the badge follows PER-CLAIM FAMILY
-        # COVERAGE, not the round's mode: "verified" only when
-        # every substantive claim carries supporting verdicts
-        # from at least two distinct model families. A claim
-        # resolved by one family alone (whatever the round's
-        # mode string says) degrades the answer to
-        # verified_single.
-        _subs = [c for c in jr["claims"] if not c.get("meta")]
-        badge = "verified" if _subs and all(
-            len(c.get("coverage") or []) >= 2 for c in _subs) \
-            else "verified_single"
-        # v18 (§C, operator ruling 2026-10-14): a top-class badge
-        # earned on a DEGRADED panel (see _panel_state) is
-        # renamed so the degradation shows in the badge itself.
-        # verified_single keeps its name: it is already visibly
-        # different and more specific.
-        if badge == "verified" \
-                and jr.get("panel_state") == "degraded":
-            badge = "verified_reduced"
+        # v23.1 (WS-C): the badge names WHAT checked the
+        # answer. "checked" = the deterministic checks passed
+        # AND the judge pass covered every substantive claim.
+        # "checked_det" = the deterministic checks passed but
+        # the judge was unavailable or covered only part of
+        # the claim list (the round's judge_complete flag).
+        badge = "checked" if jr.get("judge_complete") \
+            else "checked_det"
         return dict(base, answer=answer, badge=badge,
                     judging={"mode": jr["mode"],
-                             "flash_used": jr["flash_used"],
                              "errors": jr["errors"],
-                             "annotation": _panel_annotation(jr),
-                             "panel_state": jr.get("panel_state"),
-                             "panel": jr.get("panel")},
+                             "annotation": _checks_annotation(jr),
+                             "checks": jr.get("checks")},
                     claims=jr["claims"], missing=[], gate=None)
-    if (cap_hit or cost_capped) and judged_draft is not None \
-            and jr is not None and jr["mode"] != "none":
-        # The cap stopped the ladder: ship ONLY the claims the
-        # panel already verified, as a Partial.
+    if judged_draft is not None \
+            and jr is not None and jr["mode"] != "none" \
+            and jr["claims"]:
+        # v23.1 (WS-C): the supported-core assembly is the
+        # general end-of-ladder disposition, not only the
+        # cap/cost path: when the ladder ends without a full
+        # pass — budget cut, cost ceiling, or claims the
+        # checks could not clear — ship ONLY the sentences
+        # whose claims passed, as a Partial (one badge name;
+        # the panel era's partial_single / partial_reduced
+        # split is gone). When nothing supported survives,
+        # the assembly returns None and the unit IDKs below:
+        # fail-closed is preserved.
         assembled = _assemble_capped_partial(
             judged_draft, jr, ctx["question"], ctx["hits"],
             ctx["allowed_extra"])
         if assembled:
             _atext, _min_cov = assembled
-            badge = "partial" if _min_cov >= 2 \
-                else "partial_single"
-            # v18 (§C, operator ruling 2026-10-14): same rename
-            # as the verified top class; partial_single keeps
-            # its name (already visibly different, more
-            # specific).
-            if badge == "partial" \
-                    and jr.get("panel_state") == "degraded":
-                badge = "partial_reduced"
-            _why = ("the ask reached its per-ask cost ceiling "
-                    f"(${PER_ASK_CEILING_USD:.2f}); only "
-                    "panel-verified claims are shown") \
-                if cost_capped and not cap_hit else \
-                ("the ask reached its time budget "
-                 f"({budget_s} seconds); only "
-                 "panel-verified claims are shown")
+            if cost_capped and not cap_hit:
+                _why = ("the ask reached its per-ask cost "
+                        f"ceiling (${PER_ASK_CEILING_USD:.2f}); "
+                        "only claims that passed the checks "
+                        "are shown")
+            elif cap_hit:
+                _why = ("the ask reached its time budget "
+                        f"({budget_s} seconds); only claims "
+                        "that passed the checks are shown")
+            else:
+                _why = ("verification left some claims "
+                        "unverified; only claims that passed "
+                        "the checks are shown")
             cut = [c["text"] for c in jr["claims"]
                    if c["final"] != "supported" and not c.get("meta")]
-            return dict(base, answer=_atext, badge=badge,
+            return dict(base, answer=_atext, badge="partial",
                         judging={"mode": jr["mode"],
-                                 "flash_used": jr["flash_used"],
                                  "errors": jr["errors"],
-                                 "annotation": _panel_annotation(jr),
-                                 "panel_state": jr.get("panel_state"),
-                                 "panel": jr.get("panel")},
+                                 "annotation":
+                                     _checks_annotation(jr),
+                                 "checks": jr.get("checks")},
                         claims=jr["claims"],
                         missing=[_why,
-                                 *[f"not verified in time: \"{t}\""
+                                 *[f"not verified: \"{t}\""
                                    for t in cut[:4]]],
                         gate=None)
     # IDK: assemble what is missing from the failed gates.
-    missing, gate = [], "judging"
+    missing, gate = [], "checking"
     if cap_hit:
         gate = "time"
         missing.append("the ask reached its time budget "
@@ -9652,7 +8598,8 @@ def _run_unit(ctx):
                        f"(${PER_ASK_CEILING_USD:.2f}) before a "
                        "verified answer could be assembled")
     if jr is not None and jr["mode"] == "none":
-        missing.append("no verification judge could run "
+        missing.append("no judge could run and no claims "
+                       "could be checked "
                        "(" + "; ".join(jr["errors"]) + ")")
     for f in mech_failures:
         missing.append("the answer did not establish: " + f["label"])
@@ -9673,17 +8620,14 @@ def _run_unit(ctx):
                                f"(judged {c['final']})")
                 if c["final"] == "not_addressed":
                     gate = "grounding"
-                if c["flash"] is not None:
-                    gate = "arbitration"
     if cap_hit:
         gate = "time"
     return dict(base, answer=None, badge="idk",
                 judging={"mode": (jr or {}).get("mode", "none"),
-                         "flash_used": (jr or {}).get("flash_used", False),
                          "errors": (jr or {}).get("errors", []),
-                         "annotation": _panel_annotation(jr),
-                         "panel_state": (jr or {}).get("panel_state"),
-                         "panel": (jr or {}).get("panel")},
+                         "annotation": _checks_annotation(jr)
+                         if jr else "",
+                         "checks": (jr or {}).get("checks")},
                 claims=(jr or {}).get("claims", []),
                 missing=missing[:8], gate=gate)
 def _idk_answer(missing, hits, lead):
@@ -9772,7 +8716,7 @@ button:disabled{background:var(--ink-disabled); cursor:default;}
 .steps li{font-size:13px; padding:5px 11px; border-radius:999px; border:1px solid var(--surface-3); color:var(--ink-disabled); background:var(--surface-2);}
 .steps li.done{color:var(--ink-secondary); border-color:var(--ink-disabled);}
 .steps li.now{color:var(--ink); border-color:var(--ink-secondary); font-weight:600;}
-.steps .seats{margin-top:8px; font-size:13px; color:var(--ink-tertiary);}
+.steps .checkline{margin-top:8px; font-size:13px; color:var(--ink-tertiary);}
 .steps .elapsed{margin-top:4px; font-size:12px; color:var(--ink-disabled);}
 footer{margin-top:48px; font-size:12px; color:var(--ink-disabled); text-align:center; max-width:65ch;}
 </style>
@@ -9807,7 +8751,7 @@ footer{margin-top:48px; font-size:12px; color:var(--ink-disabled); text-align:ce
     <label style="display:inline-block; text-transform:none; letter-spacing:0; font-size:14px; margin:0 0 0 12px;"><input type="checkbox" id="fresh"> Fresh answer (skip cache)</label>
     <button id="copyBtn" onclick="copyPrompt()" style="display:none; margin-left:8px; background:var(--surface-3); color:var(--ink);">Copy full prompt</button>
     <div class="spinner" id="spin">Searching documents and asking the model...</div>
-    <div class="steps" id="steps"><ol id="stepList"></ol><div class="seats" id="seatLine"></div><div class="elapsed" id="elapsedLine"></div></div>
+    <div class="steps" id="steps"><ol id="stepList"></ol><div class="checkline" id="checkLine"></div><div class="elapsed" id="elapsedLine"></div></div>
   </div>
   <div id="answer">
     <div class="card">
@@ -9825,10 +8769,12 @@ function toggleLocal(){
   document.getElementById('localPick').style.display = on ? 'block' : 'none';
 }
 // v23 (WS1): the progress stepper, rendered from the job's
-// structured phase field. Step states + per-seat judge states
-// + elapsed seconds only: no percentage and no ETA (an ask's
-// length is not predictable, so the page never guesses).
-const STEP_DEFS = [['retrieving','Retrieving'],['drafting','Drafting'],['extracting','Extracting claims'],['judging','Judging'],['final checks','Final checks']];
+// structured phase field. Step states + ONE fact-check line
+// naming who is checking (v23.1 WS-F; the panel era's per-seat
+// widgets are gone) + elapsed seconds only: no percentage and
+// no ETA (an ask's length is not predictable, so the page
+// never guesses).
+const STEP_DEFS = [['retrieving','Retrieving'],['drafting','Drafting'],['extracting','Extracting claims'],['checking','Checking'],['final checks','Final checks']];
 function renderPhase(jp){
   const box = document.getElementById('steps');
   if(!jp || !jp.phase){ box.style.display = 'none'; return; }
@@ -9840,20 +8786,14 @@ function renderPhase(jp){
   STEP_DEFS.forEach(function(s, i){
     const li = document.createElement('li');
     let label = s[1];
-    if(s[0] === name && jp.phase.round && (s[0] === 'drafting' || s[0] === 'judging')) label += ' · round ' + jp.phase.round;
+    if(s[0] === name && jp.phase.round && (s[0] === 'drafting' || s[0] === 'checking')) label += ' · round ' + jp.phase.round;
     const isDone = (name === 'done' || i < cur);
     li.textContent = isDone ? '✓ ' + label : label;
     li.className = isDone ? 'done' : (i === cur ? 'now' : '');
     ol.appendChild(li);
   });
-  const seats = jp.phase.seats || {};
-  const seatNames = {seat1: 'Seat 1 (Gemini)', seat2: 'Seat 2 (Qwen)', arbitrator: 'Tiebreak (Flash)'};
-  const parts = [];
-  Object.keys(seatNames).forEach(function(k){
-    if(seats[k]) parts.push(seatNames[k] + ': ' + seats[k]);
-  });
-  document.getElementById('seatLine').textContent =
-    (name === 'judging' || name === 'extracting') ? parts.join(' · ') : '';
+  document.getElementById('checkLine').textContent =
+    (name === 'checking' || name === 'extracting') ? (jp.phase.check || '') : '';
   document.getElementById('elapsedLine').textContent =
     (typeof jp.elapsed_s === 'number') ? ('Elapsed: ' + Math.round(jp.elapsed_s) + 's') : '';
 }
@@ -9928,14 +8868,11 @@ async function ask(){
     }
     document.getElementById('answerText').textContent = d.answer || ('Error: ' + (d.error||'unknown'));
     const badgeMap = {
-      verified: ['ok', 'Verified'],
-      verified_web: ['ok', 'Verified · web sources'],
-      verified_reduced: ['no', 'Verified (reduced panel)'],
-      verified_web_reduced: ['no', 'Verified web (reduced panel)'],
-      verified_single: ['no', 'Verified · one judge only'],
+      checked: ['ok', 'Checked'],
+      verified_web: ['ok', 'Checked · web sources'],
+      checked_det: ['no', 'Checked · deterministic checks only'],
+      verified_web_reduced: ['no', 'Checked web · deterministic only'],
       partial: ['no', 'Partial · some parts could not be verified'],
-      partial_reduced: ['no', 'Partial (reduced panel)'],
-      partial_single: ['no', 'Partial · one judge only'],
       idk: ['err', 'IDK · not verified']
     };
     const bm = badgeMap[d.badge];
@@ -9943,11 +8880,11 @@ async function ask(){
       ? '<span class="badge ' + bm[0] + '">' + bm[1] + '</span>' : '';
     const vn = document.getElementById('verifyNote');
     if(d.judging){
-      // v18 (§C): the annotation names the panel that actually
-      // sat ("Judges: ..."), built server-side from the claims'
-      // serving models; the mode line is the fallback.
+      // v23.1: the annotation names the checks that ran and
+      // who judged ("Checks: figures + citations + ..."),
+      // built server-side from the round's checks record; the
+      // mode line is the fallback.
       let note = d.judging.annotation || ('Verification: ' + d.judging.mode);
-      if(d.judging.flash_used) note += ' · Flash arbitration used';
       if(d.timing && d.timing.rungs) note += ' · ' + d.timing.rungs + ' ladder rung(s)';
       vn.textContent = note;
     } else { vn.textContent = ''; }
@@ -10060,8 +8997,13 @@ def _run_job(rec, raw_body, headers):
     first), so a completed job's payload is EXACTLY the
     synchronous /ask response; the stage thread-local points at
     this job's record so the pipeline's stage updates land
-    here."""
-    _STAGE_TLS.job = rec
+    here. v23.1 (WS-A/BUG-10): the pipeline runs on a daemon
+    child thread under a hard join of ASK_TIME_CAP_S + 60s —
+    the 600s cap is enforced HERE, inside the job, not only by
+    the deadlines threaded through the pipeline. A job that
+    outlives the join is abandoned: the record finalizes as an
+    error naming the budget backstop, and the child (a daemon)
+    is fenced off from overwriting the record afterwards."""
     try:
         payload = json.loads(raw_body)
         if isinstance(payload, dict):
@@ -10097,18 +9039,37 @@ def _run_job(rec, raw_body, headers):
     shim.send_header = lambda *a, **k: None
     shim.end_headers = lambda *a, **k: None
     shim.log_message = lambda *a: None
-    try:
-        Handler.do_POST(shim)
-        rec["result"] = captured.get("obj")
-        code = captured.get("code", 200)
-        rec["status"] = "done" if code < 400 else "error"
-        if rec["status"] == "error":
-            rec["error"] = str(captured.get("obj"))[:300]
-    except Exception as e:
+
+    def _work():
+        _STAGE_TLS.job = rec
+        try:
+            Handler.do_POST(shim)
+            if not rec.get("_abandoned"):
+                rec["result"] = captured.get("obj")
+                code = captured.get("code", 200)
+                rec["status"] = "done" if code < 400 else "error"
+                if rec["status"] == "error":
+                    rec["error"] = str(captured.get("obj"))[:300]
+        except Exception as e:
+            if not rec.get("_abandoned"):
+                rec["status"] = "error"
+                rec["error"] = str(e)[:300]
+        rec["stage"] = "done"
+        try:
+            _set_phase("done")
+        except Exception:
+            pass
+
+    _t = threading.Thread(target=_work, daemon=True)
+    _t.start()
+    _t.join(ASK_TIME_CAP_S + JOB_BACKSTOP_SLACK_S)
+    if _t.is_alive():
+        rec["_abandoned"] = True
         rec["status"] = "error"
-        rec["error"] = str(e)[:300]
-    rec["stage"] = "done"
-    _set_phase("done")
+        rec["error"] = ("the ask exceeded the "
+                        f"{ASK_TIME_CAP_S}s cap and was stopped "
+                        "by the job-thread budget backstop")
+        rec["stage"] = "done"
     # v18 (§E): the job layer's own timestamps persist too (pass
     # 1 item P1's correction: total_ms is honest; what was
     # missing is exactly this job record).
@@ -10149,9 +9110,10 @@ class Handler(BaseHTTPRequestHandler):
                         # generation being served, vector state
                         # and the embedding-drift canary).
                         "retrieval": _v2_health(),
-                        # v16: seat health (item 1) and the
-                        # branch-out budget state (item 7).
-                        "seats": _seat_health_block(),
+                        # v23.1: the ask path's roster (who
+                        # drafts, who judges, what backs each
+                        # up) + the branch-out budget state.
+                        "roster": _roster_health_block(),
                         "tavily": {
                             "branch_out_enabled": bool(
                                 BRANCH_OUT_ENABLED
@@ -10186,7 +9148,7 @@ class Handler(BaseHTTPRequestHandler):
                        # seconds (elapsed only; never an ETA).
                        "phase": job.get("phase") or
                                 {"name": job["stage"], "round": None,
-                                 "seats": {}},
+                                 "check": None},
                        "elapsed_s": round(time.time()
                                           - job["ts"], 1)}
                 if job["status"] == "done":
@@ -10295,17 +9257,24 @@ class Handler(BaseHTTPRequestHandler):
                 use_rewrite = False
                 use_rerank = False
             t_start = time.monotonic()
+            # v16: per-ask records (seat events + local loads,
+            # retrieval sub-timings, branch-out accounting).
+            # v23.1 (BUG-1): the resets install the fresh ask
+            # context FIRST. Through v23 the retrieving phase
+            # opened on the PREVIOUS ask's context (the two
+            # calls below ran before _events_reset), so the
+            # reset discarded it and phase_ms never contained
+            # "retrieving" — the phase the budget math most
+            # needs, since retrieval is inside the cap.
+            _events_reset()
+            _retr_reset()
+            _or_reset_ask()
             _set_stage("retrieving")
             _set_phase("retrieving")
             # v15: the per-ask wall-clock cap (config
             # ASK_TIME_CAP_S); the ladder and the units loop
             # consult this deadline and never ship unverified.
             deadline = t_start + ASK_TIME_CAP_S
-            # v16: per-ask records (seat events + local loads,
-            # retrieval sub-timings, branch-out accounting).
-            _events_reset()
-            _retr_reset()
-            _or_reset_ask()
             retr_split = None
             ask_web = {"attempted": False, "queries": [],
                        "urls": [], "credits": 0, "fetched": None}
@@ -10346,14 +9315,14 @@ class Handler(BaseHTTPRequestHandler):
 
             def _apply_web_badge(unit_rec, unit_hits):
                 """Badge translation for branch evidence (item
-                7): a verified unit whose supported load-bearing
+                7): a checked unit whose supported load-bearing
                 claims rest on web excerpts ships verified_web;
                 its cited web hits are marked verified for the
                 source list. Partial keeps its badge; the web
-                sourcing is stated in the record. The web flag is
-                orthogonal to the panel state (§C, operator ruling
-                2026-10-14): a verified unit from a degraded panel
-                ships verified_web_reduced."""
+                sourcing is stated in the record. v23.1: a
+                deterministically-checked unit (checked_det)
+                ships verified_web_reduced — the web variant of
+                the reduced check."""
                 web_idx = {i for i, h in enumerate(unit_hits)
                            if h.get("web")}
                 if not web_idx:
@@ -10369,9 +9338,9 @@ class Handler(BaseHTTPRequestHandler):
                             unit_hits[j]["verified"] = True
                 if cited_web:
                     unit_rec["web_used"] = True
-                    if unit_rec["badge"] == "verified":
+                    if unit_rec["badge"] == "checked":
                         unit_rec["badge"] = "verified_web"
-                    elif unit_rec["badge"] == "verified_reduced":
+                    elif unit_rec["badge"] == "checked_det":
                         unit_rec["badge"] = "verified_web_reduced"
             # Determine if using Gemini or local Ollama
             use_gemini = model.startswith("gemini")
@@ -10557,16 +9526,15 @@ class Handler(BaseHTTPRequestHandler):
                           else None,
                           "cost_usd": _or_ask_cost(),
                           "mechanisms": [m["id"] for m in mechanisms_all]}
-                # v18 (F17): only verified-tier answers enter the
+                # v18 (F17): only top-tier answers enter the
                 # replay cache. Through v17.3 partials and IDKs
                 # cached too, so a transient failure froze into
-                # the answer every later re-ask replayed. (The
-                # _reduced names are the same verified tier under
-                # the operator's 2026-10-14 badge ruling and cache the
-                # same way.)
-                if badge in ("verified", "verified_web",
-                             "verified_reduced",
-                             "verified_web_reduced"):
+                # the answer every later re-ask replayed.
+                # v23.1: the top tier is checked / verified_web.
+                # checked_det does NOT cache — an answer the
+                # judge never saw must not freeze into the
+                # replay every later re-ask returns.
+                if badge in ("checked", "verified_web"):
                     _cache_put(_ASK_CACHE, ask_key, result)
                 # v18 (§E): persist the ask record (see
                 # _record_ask). Per-unit detail comes from the
@@ -10580,14 +9548,24 @@ class Handler(BaseHTTPRequestHandler):
                     "kind": "ask", "ask_id": _ask_ctx().ask_id,
                     "ts": time.time(),
                     "wall_s": round(t_end - t_start, 3),
-                    # v23 (WS1): per-phase wall seconds (the
-                    # held budget test's measurement).
+                    # v23 (WS1): per-phase wall time — the
+                    # values are SECONDS (millisecond
+                    # precision) despite the field name
+                    # (BUG-7); the held budget test's
+                    # measurement.
                     "phase_ms": _phase_ms_snapshot(),
                     "question": question, "corpus": corpus_name,
                     "local": local_mode, "badge": badge,
                     "cost_usd": result["cost_usd"],
                     "served": served,
-                    "panel": (judging or {}).get("panel"),
+                    # v23.1 (WS-A/BUG-10): whether the ask was
+                    # finalized by a budget cut, and the unit +
+                    # phase it landed in.
+                    "budget_cut": bool(cap_hit),
+                    "cut_phase": next(
+                        (u.get("cut_phase") for u in _units_now
+                         if u.get("budget_cut")), None),
+                    "checks": (judging or {}).get("checks"),
                     "annotation": (judging or {}).get("annotation"),
                     # v20.2 (observability): the ask's full
                     # event stream (seat successes AND the new
@@ -10601,15 +9579,19 @@ class Handler(BaseHTTPRequestHandler):
                         "part": u.get("part"),
                         "unit_q": u.get("unit_q") or None,
                         "badge": u.get("badge"),
+                        "budget_cut": bool(u.get("budget_cut")),
+                        "cut_phase": u.get("cut_phase"),
                         "draft_text": (u.get("draft_text")
                                        or "")[:8000],
                         "claims": [{
                             "text": c.get("text"),
                             "final": c.get("final"),
                             "verdicts": {k: c.get(k) for k in
-                                         ("lite", "relief", "seat2",
-                                          "local", "flash",
-                                          "refute_verdict")},
+                                         ("lite", "backup",
+                                          "local", "judge")},
+                            "det_figure_fail": c.get(
+                                "det_figure_fail"),
+                            "det_cited": c.get("det_cited"),
                             "coverage": c.get("coverage"),
                             "models": c.get("models"),
                             "origin": c.get("origin"),
@@ -10643,12 +9625,10 @@ class Handler(BaseHTTPRequestHandler):
                     _inflight_release(_inf_key)
                 self._json(result)
 
-            no_judging = {"mode": "none", "flash_used": False,
-                          "flash_calls_today": _flash_calls_today(),
-                          "panel": _panel_info(
-                              [], {"primary": None, "seat2": None},
-                              "no-key" if _seat_pick("judge_seat2")[0]
-                              is None else "not-run")}
+            no_judging = {"mode": "none",
+                          "errors": [],
+                          "annotation": "",
+                          "checks": _empty_checks_block()}
             if not hits:
                 # v16 item 7: zero corpus hits is an honest IDK
                 # disposition: branch out to the official web
@@ -10827,9 +9807,9 @@ class Handler(BaseHTTPRequestHandler):
                            model and not use_gemini
                            and model != LOCAL_MODEL),
                        # v18: the honest local mode (F19), the
-                       # cache-bypass flag (F12: fresh asks never
-                       # read the verdict cache), and the full
-                       # question for part judging (F13).
+                       # cache-bypass flag (fresh asks never
+                       # read the answer cache), and the full
+                       # question for part checking (F13).
                        "local_mode": local_mode,
                        "fresh": fresh,
                        "full_question": question
@@ -10851,12 +9831,13 @@ class Handler(BaseHTTPRequestHandler):
                         "figure_check": {"ungrounded": [],
                                          "regenerated": False},
                         "judging": {"mode": "none",
-                                    "flash_used": False,
                                     "annotation": "",
                                     "errors": ["ask time cap "
                                                "reached before "
                                                "this part ran"],
-                                    "panel": no_judging["panel"]},
+                                    "checks": no_judging["checks"]},
+                        "budget_cut": True,
+                        "cut_phase": "between parts",
                         "claims": [],
                         "missing": ["the ask reached its time "
                                     f"budget ({ASK_TIME_CAP_S} "
@@ -10934,12 +9915,10 @@ class Handler(BaseHTTPRequestHandler):
                             "urls": [h["url"]
                                      for h in _rescue_r]}
                         _BADGE_RANK_R = {
-                            "idk": 0, "partial_single": 1,
-                            "partial_reduced": 2, "partial": 3,
-                            "verified_single": 4,
-                            "verified_reduced": 5,
-                            "verified_web_reduced": 5,
-                            "verified": 6, "verified_web": 6}
+                            "idk": 0, "partial": 1,
+                            "checked_det": 4,
+                            "verified_web_reduced": 4,
+                            "checked": 6, "verified_web": 6}
                         if _BADGE_RANK_R.get(
                                 _unit_r["badge"], 0) \
                                 > _BADGE_RANK_R.get(
@@ -10972,18 +9951,19 @@ class Handler(BaseHTTPRequestHandler):
                 unit["hits"] = unit_hits
                 units.append(unit)
                 if unit["badge"] == "idk":
-                    log_gap(question, "idk", unit["gate"] or "judging",
+                    log_gap(question, "idk", unit["gate"] or "checking",
                             unit["missing"], part=spec["part"])
                     n_gaps += 1
-                # v15 (item 1): claims killed by retrieved
-                # contradictions feed the growth loop too.
+                # v23.1: claims the deterministic checks killed
+                # feed the growth loop too (the panel era fed it
+                # refutation-killed claims; the refutation
+                # machinery is deleted).
                 for c in unit.get("claims", ()):
-                    if c.get("refutations") \
+                    if c.get("det_figure_fail") \
                             and c["final"] != "supported":
-                        log_gap(question, unit["badge"], "refutation",
-                                [f"claim judged {c['final']} after "
-                                 f"refutation retrieval: "
-                                 f"\"{c['text']}\""],
+                        log_gap(question, unit["badge"], "figure_check",
+                                [f"claim failed the deterministic "
+                                 f"figure check: \"{c['text']}\""],
                                 part=spec["part"])
                         n_gaps += 1
             # --- assembly + badges ----------------------------------
@@ -11010,40 +9990,20 @@ class Handler(BaseHTTPRequestHandler):
                 badges = [u["badge"] for u in units]
                 # v18 (§C): the assembly badge is the MINIMUM
                 # over units by explicit rank (verified_web sits
-                # at the verified rank and surfaces only when
-                # every unit is top-rank and at least one unit
-                # is web-sourced). Any IDK unit caps the
-                # assembly at the partial tier, graded by the
-                # weakest ANSWERED unit. (Through v17.3 the
-                # comparisons were ad-hoc string tests; a unit
-                # mix of verified + partial_single, for example,
-                # fell through to partial_single by accident of
-                # ordering rather than by rule.) The _reduced
-                # names (operator ruling 2026-10-14) rank just
-                # below their full counterparts and above the
-                # matching _single class, so a degraded panel
-                # stays visible in the assembled badge too.
-                _BADGE_RANK = {"idk": 0, "partial_single": 1,
-                               "partial_reduced": 2, "partial": 3,
-                               "verified_single": 4,
-                               "verified_reduced": 5,
-                               "verified_web_reduced": 5,
-                               "verified": 6, "verified_web": 6}
-                # How a weakest-answered unit's badge reads when
-                # an IDK unit caps the assembly at the partial
-                # tier: full top classes drop to "partial", the
-                # reduced ones to "partial_reduced" (the
-                # pre-ruling mapping for the old names is
-                # unchanged).
-                _CAPPED_BY_WORST = {
-                    "partial_single": "partial_single",
-                    "partial_reduced": "partial_reduced",
-                    "partial": "partial",
-                    "verified_single": "partial",
-                    "verified_reduced": "partial_reduced",
-                    "verified_web_reduced": "partial_reduced",
-                    "verified": "partial",
-                    "verified_web": "partial"}
+                # at the top rank and surfaces only when every
+                # unit is top-rank and at least one unit is
+                # web-sourced). Any IDK unit caps the assembly
+                # at the partial tier. v23.1 (WS-C): the rank
+                # table carries the new badge names — checked
+                # at the top with verified_web, checked_det at
+                # the reduced tier with verified_web_reduced,
+                # and ONE partial name (the panel era's
+                # partial_single / partial_reduced split is
+                # gone, so a capped assembly is just "partial").
+                _BADGE_RANK = {"idk": 0, "partial": 1,
+                               "checked_det": 4,
+                               "verified_web_reduced": 4,
+                               "checked": 6, "verified_web": 6}
                 _answered = [b for b in badges if b != "idk"]
                 if not _answered:
                     overall_badge = "idk"
@@ -11051,12 +10011,11 @@ class Handler(BaseHTTPRequestHandler):
                     _worst = min(_answered,
                                  key=lambda b: _BADGE_RANK.get(b, 0))
                     if len(_answered) < len(badges):
-                        overall_badge = _CAPPED_BY_WORST.get(
-                            _worst, "partial_single")
+                        overall_badge = "partial"
                     elif _BADGE_RANK.get(_worst, 0) >= 6:
                         overall_badge = "verified_web" \
                             if "verified_web" in badges \
-                            else "verified"
+                            else "checked"
                     else:
                         overall_badge = _worst
                 if global_mechs:
@@ -11068,76 +10027,59 @@ class Handler(BaseHTTPRequestHandler):
                             "\n\nNote: the retrieved documents do not "
                             "fully settle every part of this question "
                             f"(missing: {labels}).")
-                        if overall_badge in ("verified",
-                                             "verified_web"):
+                        if overall_badge != "idk":
                             overall_badge = "partial"
-                        elif overall_badge in (
-                                "verified_reduced",
-                                "verified_web_reduced"):
-                            overall_badge = "partial_reduced"
-                        elif overall_badge == "verified_single":
-                            overall_badge = "partial_single"
                         log_gap(question, overall_badge, "mechanism",
                                 [f["label"] for f in g_fail])
                         n_gaps += 1
             modes = {u["judging"]["mode"] for u in units}
-            # v14.2: aggregate the units' panel records (bundled
-            # parts share the same seat configuration): the union
-            # of judges that ran, and the third seat's status —
-            # 'ok' if it judged any unit, else the dormant/failed
-            # status every unit reported.
-            panel_judges = []
-            seat2_status = "no-key" if _seat_pick("judge_seat2")[0] \
-                is None else "not-run"
-            _seat1_model = GEMINI_CHAIN[0]
-            _seat2_model = None
+            # v23.1: aggregate the units' checks records: who
+            # judged (the union of serving labels), whether the
+            # backup fired anywhere, and the deterministic
+            # failure totals across units.
+            _served_by = []
+            _fig_failed = []
+            _cit_failed = []
+            _backup_any = False
+            _verdict_totals = {"supported": 0, "contradicted": 0,
+                               "not_addressed": 0}
             for u in units:
-                p = u["judging"].get("panel") or {}
-                for j in p.get("judges") or ():
-                    if j not in panel_judges:
-                        panel_judges.append(j)
-                st = (p.get("seat2") or {}).get("status")
-                if st == "ok":
-                    seat2_status = "ok"
-                elif st == "unavailable" \
-                        and seat2_status != "ok":
-                    seat2_status = "unavailable"
-                if (p.get("seat2") or {}).get("model"):
-                    _seat2_model = p["seat2"]["model"]
-                if (p.get("seat1") or {}).get("status") == "relief":
-                    _seat1_model = p["seat1"]["model"]
+                _uc = (u["judging"].get("checks") or {})
+                _uj = _uc.get("judge") or {}
+                if _uj.get("served_by") \
+                        and _uj["served_by"] not in _served_by:
+                    _served_by.append(_uj["served_by"])
+                _backup_any = _backup_any \
+                    or bool(_uj.get("backup_used"))
+                for _k, _v in (_uj.get("verdicts") or {}).items():
+                    _verdict_totals[_k] = \
+                        _verdict_totals.get(_k, 0) + _v
+                _fig_failed.extend(
+                    (_uc.get("figures") or {}).get("failed") or [])
+                _cit_failed.extend(
+                    (_uc.get("citations") or {}).get("failed")
+                    or [])
             judging = {"mode": modes.pop() if len(modes) == 1
                        else "mixed",
-                       "flash_used": any(u["judging"]["flash_used"]
-                                         for u in units),
-                       "flash_calls_today": _flash_calls_today(),
-                       "panel": {
-                           "judges": panel_judges,
-                           "seat1": {
-                               "provider": "google"
-                               if _seat1_model == GEMINI_CHAIN[0]
-                               else _model_family(_seat1_model),
-                               "model": _seat1_model,
-                               "status": "ok" if (
-                                   "lite" in panel_judges
-                                   or "relief" in panel_judges)
-                               else "not-run"},
-                           "seat2": {
-                               "provider": _slot_provider_name(
-                                   _seat_pick("judge_seat2")[1]),
-                               "model": _seat2_model
-                               or _seat_pick("judge_seat2")[0],
-                               "key_slot": _seat_pick(
-                                   "judge_seat2")[1],
-                               "status": seat2_status},
-                           "cached_claims": sum(
-                               (u["judging"].get("panel") or {})
-                               .get("cached_claims", 0)
-                               for u in units),
-                           "refuted_claims": sum(
-                               (u["judging"].get("panel") or {})
-                               .get("refuted_claims", 0)
-                               for u in units)}}
+                       "checks": {
+                           "figures": {
+                               "checked": sum(
+                                   ((u["judging"].get("checks")
+                                     or {}).get("figures") or {})
+                                   .get("checked", 0)
+                                   for u in units),
+                               "failed": _fig_failed},
+                           "citations": {"failed": _cit_failed},
+                           "judge": {
+                               "served_by": " + ".join(_served_by)
+                               or None,
+                               "backup_used": _backup_any,
+                               "verdicts": _verdict_totals},
+                           "registry": list(dict.fromkeys(
+                               e for u in units
+                               for e in (((u["judging"].get(
+                                   "checks") or {}).get("registry"))
+                                   or [])))}}
 
             _annots = []
             for u in units:

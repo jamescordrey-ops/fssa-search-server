@@ -1,36 +1,42 @@
 #!/usr/bin/env python3
-"""v23 offline checks: no network, no live models, no PC.
+"""v23 offline checks, carried into v23.1: no network, no
+live models, no PC.
 
  WS1  phase transitions against a stubbed ask run: a real
       _run_unit driven with stubbed transports moves the job
-      phase retrieving -> drafting -> extracting -> judging
+      phase retrieving -> drafting -> extracting -> checking
       -> final checks -> done, in order, with round numbers
-      and per-seat judge states; per-phase timing lands on
-      the ask context (phase_ms).
- WS2  the judge switch, proven by replaying the v22.2 CSRA
+      and the ONE fact-check line naming who served (v23.1
+      WS-F; the panel era's per-seat states are gone);
+      per-phase timing lands on the ask context (phase_ms).
+ WS2  the checks stack, proven by replaying the v22.2 CSRA
       ask's claim set (verbatim from ask 07d907a1fc52, via
-      the v22.3 checks fixture) against the new two-seat
-      panel with stubbed seat transports:
-        A both seats serve -> panel mode, FULL panel state,
-          every claim covered by google + qwen (two families)
-        B seat 2's free primary down -> the relief bench
-          serves (Grok 4.7), coverage google + xai, panel
-          DEGRADED (relief is not the primary)
-        C seat 2 + the whole relief bench down -> gemini-
-          only mode, every claim capped at one family (the
-          verified_single cap)
-        D seat 1 down -> the relief bench extracts (the
-          round's "relief" voice), seat 2 serves, coverage
-          deepseek + qwen, panel DEGRADED
-        E the drafting family owns seat 2's primary family
-          (qwen) -> the seat skips it and relief serves
-      plus static panel-shape asserts: SEATS is exactly the
-      two-seat configuration, every candidate family
-      distinct, no NIM slot anywhere.
+      the v22.3 checks fixture) against _check_round with
+      stubbed judge transports (this replay REPLACES the
+      v22.3-era refutation replay, per BUG-5(c)):
+        A Lite serves -> judge mode, judge_complete, every
+          claim's coverage is the google family, badge
+          outcome checked
+        B Lite down -> the DeepSeek V3.1 backup serves
+          (judge_backup mode, backup_used recorded), badge
+          outcome checked
+        C Lite + backup down -> det mode: finals from the
+          deterministic checks alone, judge_complete False,
+          badge outcome checked_det
+        D a figure-swapped claim the judge calls supported
+          is contradicted by the deterministic figure check
+          (checks sit UNDER the judge)
+        E the backup fires at most once per ask: a second
+          round in the same ask context never re-calls it
+      plus static asserts: JUDGE_BACKUP_MODEL is the V3.1
+      slug, the panel machinery (SEATS, _judge_round,
+      _panel_state) is absent, and no V4 slug appears in
+      the server source.
  WS3  deletion asserts: no _diverge_model / nim_ask /
       _TOPIC_BRIDGES; hybrid_search is the v2 engine only;
-      the drafting ladder walks Groq -> xAI -> OpenRouter
-      and then raises into the caller's local tier.
+      the drafting ladder walks xAI Grok -> Groq GPT-OSS
+      and then raises into the caller's local tier (the
+      OpenRouter drafting tier is deleted).
 
 Run: python3 tools/offline_checks_v23.py
 Exit 0 only when every check passes.
@@ -130,162 +136,179 @@ VERDICTS_JSON = json.dumps({
                   "note": ""} for i in range(14)],
     "missed": []})
 
+# The draft's citation-derived claims, exactly as _run_unit
+# builds them (they are the det mode's claim source when no
+# judge can serve).
+EXTRA_CLAIMS = [dict(cc, span=cc["text"]) for cc in
+                mod._parse_citations(DRAFT, HITS)["cited_claims"]]
+
+OR_CALLS = {"n": 0}
+
 
 def _down(*a, **k):
     raise RuntimeError("stubbed down")
 
 
-def install_stubs(gemini="ok", groq="ok", xai="ok", orr="ok"):
-    """Script the four transports. Each is 'ok' (answers per
-    its role) or 'down' (raises). Extraction calls are told
+def install_stubs(gemini="ok", orr="ok"):
+    """Script the judge transports. gemini = Lite (extraction
+    + verdicts); orr = the OpenRouter backup (extraction when
+    it serves, verdicts likewise). Extraction calls are told
     apart from verdict calls by the prompt's own words."""
     def gemini_text(model, system, user, **kw):
         if gemini == "down":
             raise RuntimeError("stubbed down")
-        return EXTRACT_JSON
+        if "Extract the draft" in user:
+            return EXTRACT_JSON
+        return VERDICTS_JSON
 
-    def verdict_text(tag):
-        def _f(model, system, user, **kw):
-            if tag == "down":
-                raise RuntimeError("stubbed down")
-            if "Extract the draft" in user:
-                return EXTRACT_JSON
-            return VERDICTS_JSON
-        return _f
+    def or_text(model, system, user, **kw):
+        OR_CALLS["n"] += 1
+        if orr == "down":
+            raise RuntimeError("stubbed down")
+        if "Extract the draft" in user:
+            return EXTRACT_JSON
+        return VERDICTS_JSON
 
     mod._gemini_text = gemini_text
-    mod._groq_text = verdict_text(groq)
-    mod._xai_text = verdict_text(xai)
-    mod._or_text = verdict_text(orr)
-    mod._refutation_retrieve = lambda *a, **k: 0
+    mod._or_text = or_text
     mod._groq_available = lambda: True
     mod._xai_available = lambda: True
     mod._or_available = lambda: True
 
 
-def run_round():
-    mod._events_reset()
-    return mod._judge_round(QUESTION, HITS, DRAFT, True, "",
+def run_round(reset=True):
+    if reset:
+        mod._events_reset()
+        OR_CALLS["n"] = 0
+    return mod._check_round(QUESTION, HITS, DRAFT, True, "",
                             corp=None, mechanisms=None,
-                            extra_claims=None, local_only=False,
+                            extra_claims=EXTRA_CLAIMS,
+                            local_only=False,
                             use_cache=False, deadline=None)
 
 
 def badge_for(jr):
-    """_run_unit's badge math, restated: verified only when
-    every substantive claim carries >= 2 coverage families."""
-    subs = [c for c in jr["claims"] if not c.get("meta")]
-    b = "verified" if subs and all(
-        len(c.get("coverage") or []) >= 2 for c in subs) \
-        else "verified_single"
-    if b == "verified" and jr.get("panel_state") == "degraded":
-        b = "verified_reduced"
-    return b
+    """_run_unit's shipped-badge math, restated (v23.1 WS-C):
+    checked when the judge pass covered every substantive
+    claim, else checked_det."""
+    return "checked" if jr.get("judge_complete") \
+        else "checked_det"
 
 
 # ---------------------------------------------------------------
-# WS2 static panel shape
-check("WS2 SEATS is exactly the judge_seat2 job",
-      set(mod.SEATS) == {"judge_seat2"}, str(set(mod.SEATS)))
-_cands = mod.SEATS["judge_seat2"]["candidates"]
-check("WS2 seat 2 chain is Qwen/Groq -> Grok/xAI -> relief/OR",
-      _cands == [(mod.GROQ_QWEN_MODEL, 5),
-                 (mod.XAI_HARD_MODEL, 4),
-                 (mod.OR_RELIEF_MODEL, 0)], str(_cands))
-_fams = [mod._model_family(m) for m, _s in _cands]
-check("WS2 every seat-2 candidate a distinct family, none "
-      "google", len(set(_fams)) == 3 and "google" not in _fams,
-      str(_fams))
-check("WS2 no NIM slot on any candidate",
-      all(s in (0, 4, 5) for _m, s in _cands))
-check("WS2 seat 1 primary is Gemini Lite",
-      mod.GEMINI_CHAIN[0] == "gemini-3.5-flash-lite",
-      mod.GEMINI_CHAIN[0])
+# WS2 statics: the roster is code, the panel is gone.
+check("WS2 backup judge is DeepSeek Chat V3.1",
+      mod.JUDGE_BACKUP_MODEL == "deepseek/deepseek-chat-v3.1",
+      mod.JUDGE_BACKUP_MODEL)
+check("WS2 panel machinery absent (SEATS / _judge_round / "
+      "_panel_state / _seat_pick)",
+      not hasattr(mod, "SEATS")
+      and not hasattr(mod, "_judge_round")
+      and not hasattr(mod, "_panel_state")
+      and not hasattr(mod, "_seat_pick"))
+with open(os.path.join(ROOT, "fssa_search_server.py"),
+          encoding="utf-8") as _f:
+    _SRC = _f.read()
+check("WS2 no V4 slug anywhere in the server source",
+      "deepseek-v4" not in _SRC and "deepseek/deepseek-v4"
+      not in _SRC)
 
 # ---------------------------------------------------------------
-# WS2 replay, shape A: both seats serve
-install_stubs()
+# WS2 replay, shape A: Lite serves.
+install_stubs(gemini="ok", orr="ok")
 jr = run_round()
-check("WS2-A mode is panel", jr["mode"] == "panel", jr["mode"])
-check("WS2-A panel state FULL", jr["panel_state"] == "full",
-      jr["panel_state"])
+check("WS2-A mode is judge", jr["mode"] == "judge", jr["mode"])
 check("WS2-A round passes", jr["pass"] is True)
-check("WS2-A every claim covered by google + qwen",
-      all(c.get("coverage") == ["google", "qwen"]
-          for c in jr["claims"] if not c.get("meta")),
-      str([c.get("coverage") for c in jr["claims"]]))
-check("WS2-A badge outcome: verified",
-      badge_for(jr) == "verified", badge_for(jr))
-
-# ---------------------------------------------------------------
-# WS2 replay, shape B: seat 2's free primary down -> relief
-install_stubs(groq="down")
-jr = run_round()
-served2 = mod._ask_ctx().served_models.get("judge_seat2")
-check("WS2-B relief bench served seat 2 (Grok 4.7)",
-      served2 == mod.XAI_HARD_MODEL, str(served2))
-check("WS2-B coverage is google + xai",
-      all(c.get("coverage") == ["google", "xai"]
-          for c in jr["claims"] if not c.get("meta")),
-      str([c.get("coverage") for c in jr["claims"]]))
-check("WS2-B panel state DEGRADED (relief served)",
-      jr["panel_state"] == "degraded", jr["panel_state"])
-check("WS2-B badge outcome: verified_reduced",
-      badge_for(jr) == "verified_reduced", badge_for(jr))
-
-# ---------------------------------------------------------------
-# WS2 replay, shape C: seat 2 + relief all down -> cap
-install_stubs(groq="down", xai="down", orr="down")
-jr = run_round()
-check("WS2-C mode is gemini-only", jr["mode"] == "gemini-only",
-      jr["mode"])
-check("WS2-C every claim capped at the google family alone",
+check("WS2-A judge covered every substantive claim",
+      jr["judge_complete"] is True)
+check("WS2-A every claim's coverage is the google family",
       all(c.get("coverage") == ["google"]
           for c in jr["claims"] if not c.get("meta")),
       str([c.get("coverage") for c in jr["claims"]]))
-check("WS2-C badge outcome: verified_single (the cap)",
-      badge_for(jr) == "verified_single", badge_for(jr))
+check("WS2-A checks record names Lite as the judge",
+      jr["checks"]["judge"]["served_by"] == "Gemini Lite"
+      and jr["checks"]["judge"]["model"] == mod.GEMINI_CHAIN[0],
+      str(jr["checks"]["judge"]))
+check("WS2-A badge outcome: checked",
+      badge_for(jr) == "checked", badge_for(jr))
 
-# ---------------------------------------------------------------
-# WS2 replay, shape D: seat 1 down -> relief extracts
-install_stubs(gemini="down")
+# WS2 replay, shape B: Lite down -> the V3.1 backup serves.
+install_stubs(gemini="down", orr="ok")
 jr = run_round()
-check("WS2-D relief voice carried the extraction verdicts",
-      all(c.get("relief") == "supported"
-          for c in jr["claims"] if not c.get("meta")))
-check("WS2-D relief model recorded as-served",
-      mod._ask_ctx().served_models.get("relief")
-      == mod.OR_RELIEF_MODEL,
-      str(mod._ask_ctx().served_models.get("relief")))
-check("WS2-D coverage is deepseek + qwen",
-      all(c.get("coverage") == ["deepseek", "qwen"]
-          for c in jr["claims"] if not c.get("meta")),
-      str([c.get("coverage") for c in jr["claims"]]))
-check("WS2-D panel state DEGRADED", jr["panel_state"] == "degraded",
-      jr["panel_state"])
-check("WS2-D badge outcome: verified_reduced",
-      badge_for(jr) == "verified_reduced", badge_for(jr))
+check("WS2-B mode is judge_backup",
+      jr["mode"] == "judge_backup", jr["mode"])
+check("WS2-B backup use recorded",
+      jr["checks"]["judge"]["backup_used"] is True)
+check("WS2-B checks record names the backup",
+      "DeepSeek V3.1" in (jr["checks"]["judge"]["served_by"]
+                          or ""),
+      str(jr["checks"]["judge"]))
+check("WS2-B round passes, badge outcome: checked",
+      jr["pass"] is True and badge_for(jr) == "checked",
+      f"pass={jr['pass']} badge={badge_for(jr)}")
+
+# WS2 replay, shape E: the backup fires at most once per ask.
+# (Same ask context as shape B — no reset: round 2 with Lite
+# still down must NOT call OpenRouter again and lands in det
+# mode on the citation-derived claims.)
+jr2 = run_round(reset=False)
+check("WS2-E second round never re-calls the backup",
+      OR_CALLS["n"] == 1, f"or calls={OR_CALLS['n']}")
+check("WS2-E second round degrades to det mode",
+      jr2["mode"] == "det", jr2["mode"])
+
+# WS2 replay, shape C: Lite + backup both down -> det mode.
+install_stubs(gemini="down", orr="down")
+jr = run_round()
+check("WS2-C mode is det", jr["mode"] == "det", jr["mode"])
+check("WS2-C det finals pass on the traced figures",
+      jr["pass"] is True
+      and all(c["final"] == "supported" for c in jr["claims"]),
+      str([(c["text"][:40], c["final"]) for c in jr["claims"]]))
+check("WS2-C judge_complete False, badge outcome: checked_det",
+      jr["judge_complete"] is False
+      and badge_for(jr) == "checked_det")
+check("WS2-C checks record: no judge served",
+      jr["checks"]["judge"]["served_by"] is None)
+
+# WS2 replay, shape D: the deterministic figure check sits
+# UNDER the judge — a swapped figure the judge waves through
+# is contradicted anyway.
+SWAPPED = ("Your wife is guaranteed to keep at least "
+           "$99,999 of the couple's countable assets.")
+SWAP_JSON = json.dumps({"claims": [
+    {"text": SWAPPED, "load_bearing": True,
+     "verdict": "supported", "note": "", "sources": [1]}]})
+
+
+def swap_gemini(model, system, user, **kw):
+    if "Extract the draft" in user:
+        return SWAP_JSON
+    return VERDICTS_JSON
+
+
+install_stubs(gemini="ok", orr="ok")
+mod._gemini_text = swap_gemini
+jr = run_round()
+_sw = [c for c in jr["claims"] if "99,999" in c["text"]]
+check("WS2-D swapped figure contradicted despite the judge",
+      len(_sw) == 1 and _sw[0]["final"] == "contradicted"
+      and _sw[0]["judge"] == "supported",
+      str([(c["final"], c.get("judge")) for c in _sw]))
+check("WS2-D figure failure lands in the checks record",
+      any("99,999" in f["claim"]
+          for f in jr["checks"]["figures"]["failed"]),
+      str(jr["checks"]["figures"]))
+check("WS2-D round fails on the swapped claim",
+      jr["pass"] is False)
 
 # ---------------------------------------------------------------
-# WS2 replay, shape E: drafting family = qwen -> seat skips it
+# WS3: deletions + the drafting ladder's new order.
 install_stubs()
-mod._events_reset()
-mod._ask_ctx().draft_family = "qwen"
-jr = mod._judge_round(QUESTION, HITS, DRAFT, True, "",
-                      corp=None, mechanisms=None,
-                      extra_claims=None, local_only=False,
-                      use_cache=False, deadline=None)
-served2 = mod._ask_ctx().served_models.get("judge_seat2")
-check("WS2-E qwen never judged its own family's draft",
-      served2 == mod.XAI_HARD_MODEL, str(served2))
-
-# ---------------------------------------------------------------
-# WS3 deletion + ladder asserts
-check("WS3 oracle deleted (no _diverge_model, no nim_ask)",
+check("WS3 oracle + NIM ask + topic bridges deleted",
       not hasattr(mod, "_diverge_model")
-      and not hasattr(mod, "nim_ask"))
-check("WS3 topic bridges deleted",
-      not hasattr(mod, "_TOPIC_BRIDGES"))
+      and not hasattr(mod, "nim_ask")
+      and not hasattr(mod, "_TOPIC_BRIDGES"))
 _hs = inspect.getsource(mod.hybrid_search)
 check("WS3 hybrid_search is the v2 engine only",
       "return _hybrid_search_v2" in _hs
@@ -306,25 +329,29 @@ def _draft_stub(name, behavior):
     return _f
 
 
-install_stubs()
-mod._generate.__globals__["groq_ask"] = _draft_stub("groq", "down")
 mod._generate.__globals__["xai_ask"] = _draft_stub("xai", "ok")
+mod._generate.__globals__["groq_ask"] = \
+    _draft_stub("groq", "ok")
 mod._generate.__globals__["or_ask"] = _draft_stub("or", "ok")
-_ans = mod._generate("nim", mod.GROQ_HARD_MODEL, "q?", HITS, "")
-check("WS3 ladder: Groq down -> xAI serves tier 2",
+_ans = mod._generate("nim", mod.XAI_HARD_MODEL, "q?", HITS, "")
+check("WS3 ladder: xAI Grok serves tier 1",
       _ans[2].startswith(mod.XAI_HARD_MODEL), _ans[2])
-mod._generate.__globals__["xai_ask"] = _draft_stub("xai", "down")
-_ans = mod._generate("nim", mod.GROQ_HARD_MODEL, "q?", HITS, "")
-check("WS3 ladder: xAI down -> OpenRouter serves tier 2",
-      "(OpenRouter API)" in _ans[2], _ans[2])
-mod._generate.__globals__["or_ask"] = _draft_stub("or", "down")
+mod._generate.__globals__["xai_ask"] = \
+    _draft_stub("xai", "down")
+_ans = mod._generate("nim", mod.XAI_HARD_MODEL, "q?", HITS, "")
+check("WS3 ladder: xAI down -> Groq GPT-OSS serves tier 2",
+      _ans[2].startswith(mod.GROQ_HARD_MODEL)
+      and "(Groq API)" in _ans[2], _ans[2])
+mod._generate.__globals__["groq_ask"] = \
+    _draft_stub("groq", "down")
 _raised = False
 try:
-    mod._generate("nim", mod.GROQ_HARD_MODEL, "q?", HITS, "")
+    mod._generate("nim", mod.XAI_HARD_MODEL, "q?", HITS, "")
 except RuntimeError:
     _raised = True
-check("WS3 ladder: all hosted tiers down -> raises into "
-      "the caller's local tier", _raised)
+check("WS3 ladder: both hosted tiers down -> raises into "
+      "the caller's local tier (no OpenRouter drafting)",
+      _raised)
 
 # ---------------------------------------------------------------
 # WS1: phase transitions on a stubbed ask run (a real
@@ -333,24 +360,34 @@ check("WS3 ladder: all hosted tiers down -> raises into "
 install_stubs()
 
 
+# WS1's extractor returns only 3 of the 4 claims on purpose
+# (it omits the $2,000 claim): that claim's cited bullet then
+# stays an unmerged extra (its figure matches no extracted
+# claim, so the dedupe cannot merge it), the checking
+# round's verdict stage runs (slowly, below), and the poller
+# can observe the "checking" phase — with all 4 extracted,
+# the deterministic stages finish inside one poller tick
+# and the phase is real but unobservable.
+EXTRACT_JSON_3 = json.dumps({"claims": [
+    {"text": t, "load_bearing": True, "verdict": "supported",
+     "note": "", "sources": [1]}
+    for t in (CLAIMS[0], CLAIMS[1], CLAIMS[3])]})
+
+
 def slow_gemini(model, system, user, **kw):
     time.sleep(0.15)
-    return EXTRACT_JSON
-
-
-def slow_groq(model, system, user, **kw):
-    time.sleep(0.15)
+    if "Extract the draft" in user:
+        return EXTRACT_JSON_3
     return VERDICTS_JSON
 
 
 mod._gemini_text = slow_gemini
-mod._groq_text = slow_groq
 _real_generate = mod._generate
 
 
 def slow_generate(*a, **k):
     time.sleep(0.06)  # drafting stays observable to the poller
-    return (DRAFT, "prompt", "openai/gpt-oss-120b (Groq API)",
+    return (DRAFT, "prompt", "grok-4.7 (xAI API)",
             False, False)
 
 
@@ -369,6 +406,7 @@ def poll():
 
 pt = threading.Thread(target=poll, daemon=True)
 pt.start()
+mod._events_reset()
 mod._set_phase("retrieving")
 unit = mod._run_unit({
     "question": QUESTION, "unit_q": QUESTION, "hits": HITS,
@@ -390,33 +428,31 @@ seq = [p for i, p in enumerate(seen)
 order = list(mod._PHASE_ORDER)
 check("WS1 phases observed in canonical order",
       seq == sorted(seq, key=order.index), " -> ".join(seq))
-check("WS1 drafting/extracting/judging/final checks all "
+check("WS1 drafting/extracting/checking/final checks all "
       "observed", all(p in seq for p in
-                      ("drafting", "extracting", "judging",
+                      ("drafting", "extracting", "checking",
                        "final checks")), " -> ".join(seq))
-check("WS1 phase carries the judging round number",
+check("WS1 phase carries the checking round number",
       rec["phase"]["round"] == 1, str(rec["phase"]))
-check("WS1 seat states end done/done",
-      rec["phase"]["seats"].get("seat1") == "done"
-      and rec["phase"]["seats"].get("seat2") == "done",
-      str(rec["phase"]["seats"]))
+check("WS1 fact-check line names who served (Lite)",
+      rec["phase"]["check"] == "Fact check: Gemini Lite",
+      str(rec["phase"].get("check")))
 _pms = mod._phase_ms_snapshot()
 check("WS1 phase_ms accumulated the run's phases",
       all(k in _pms for k in ("retrieving", "drafting",
-                              "extracting", "judging")),
+                              "extracting", "checking")),
       str(sorted(_pms)))
-# The unit's badge is NOT asserted here: the CSRA draft's
-# raw cited sentences ride as extra claims covered by seat
-# 2 alone until the v22.3 claim-dedupe fix is rebased in
-# (the pure-round badge outcomes are asserted in WS2-A..D).
-check("WS1 stubbed unit ran the panel and did not IDK",
-      unit.get("judging", {}).get("mode") == "panel"
+check("WS1 stubbed unit ran the checks and did not IDK",
+      unit.get("judging", {}).get("mode") == "judge"
       and unit.get("badge") != "idk",
       str(unit.get("badge")))
 check("WS1 page renders the stepper (elapsed, never an ETA)",
       "renderPhase" in mod.PAGE and "stepList" in mod.PAGE
       and "Elapsed: " in mod.PAGE
       and "% complete" not in mod.PAGE)
+check("WS1 page stepper has a Checking step, no Judging step",
+      "'checking','Checking'" in mod.PAGE
+      and "'judging'" not in mod.PAGE)
 
 print()
 if FAILS:

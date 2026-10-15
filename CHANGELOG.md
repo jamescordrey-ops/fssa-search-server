@@ -5,6 +5,37 @@ each version are in `docs/`. Corpus updates are manual: new documents
 are collected, verified against their sources, and merged alongside a
 version bump rather than synced automatically.
 
+## v23.1 — 2026-10-15
+
+Checks stack + budget enforcement. The two-seat judge
+panel, its relief bench, seat machinery, the refutation
+loop, Flash arbitration, and the verdict cache are
+deleted. Judging is now one pass: Gemini 3.5 Flash Lite
+primary, DeepSeek Chat V3.1 via OpenRouter as backup
+(at most once per ask, only when Lite cannot serve),
+with deterministic figure + citation checks under the
+judge (figure matches scoped to each claim's own cited
+excerpts, with a half/double/sum/difference derivation
+whitelist; a deterministic figure failure overrides
+the judge). No V4 models anywhere. Drafting: Grok 4.7
+primary for both classes, Groq GPT-OSS 120B backup,
+local 9B last resort. Badges are checked / checked_det
+/ partial. Budgets are enforced, not advisory: one
+deadline per ask threads through every provider call,
+units finalize at the cap with budget_cut + cut_phase
+recorded, and a 600s + 60s job-thread backstop abandons
+over-cap jobs. The stepper's judging step is now
+"checking", with one fact-check line naming who served.
+Bug fixes: phase_ms now includes the retrieving phase
+(BUG-1), phase-completeness proven by a full stub ask
+(BUG-5a), stale-comment scrub (BUG-6), phase_ms values
+documented as seconds (BUG-7). Generation stays g0003:
+the WS-E carrier enrichment reached the full 14/14 +
+5/5 generated-vocabulary bar and is staged as
+g0004_delta/, but the g0004 finalize waits on PC disk
+space (a 765 MB generation copy against 0.79 GB free);
+details in docs/STATUS-v23.1.md.
+
 ## v23 — 2026-10-15
 
 GUI progress + judge switch + consolidation. The ask page
