@@ -399,6 +399,22 @@ the IDK result instead. Quick answers do not enter the
 replay cache (the v23.1 checked_det precedent), and the
 mode rides the answer-cache key so the lanes never replay
 or dedupe into each other. Ask records carry the mode.
+
+v25.1 (2026-10-15): the Quick lane redesign (see
+v25.1/PLAN.md). The first live Quick ask failed closed on
+a CORRECT draft: the citation parse stranded trailing
+citation blocks on the wrong sentences, the arithmetic
+checker read the date "(7/2026)" as an equation, and the
+sentence's figure scope never saw its own excerpt. Fixes:
+block citation attribution in _parse_citations (a citation
+block credits the sentences since the previous block),
+date masking in _arithmetic_errors, and a pooled figure
+scope for the Quick gate call only (_check_figures
+pool_all; Deep's per-sentence scoping is untouched). The
+Quick draft now carries a self-audit contract, and a draft
+that still fails the floor gets ONE repair call (same
+seat, failures listed) before the unit IDKs — the Quick
+draft cap is 2. Deep is behavior-identical to v25.
 """
 
 import datetime
@@ -1152,12 +1168,34 @@ def _eval_money(a, op, b):
     return a / b if b else None
 
 
+# v25.1: date-like tokens are masked before equation
+# extraction. A standards citation like "$162,660 (7/2026)"
+# otherwise parses as the equation $162,660 = ($7 / $2,026)
+# and fails a correct draft (live Quick ask c3b7a02ec2c5).
+_DATE_MASK_RX = re.compile(
+    r"\b\d{1,2}/\d{1,2}/\d{2,4}\b"
+    r"|\b\d{1,2}/\d{4}\b"
+    r"|\b(?:january|february|march|april|may|june|july|"
+    r"august|september|october|november|december|jan|feb|"
+    r"mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\.?\s+"
+    r"\d{4}\b", re.IGNORECASE)
+
+
+def _mask_dates(text):
+    """Replace date-like spans with spaces (length-preserving,
+    so match offsets in the masked text stay the answer's)."""
+    return _DATE_MASK_RX.sub(
+        lambda m: " " * len(m.group(0)), text or "")
+
+
 def _arithmetic_errors(answer):
     """v18 (F6): the pure check behind _check_arithmetic: the
     correction notes for the answer's explicit dollar equations,
     WITHOUT appending anything. _run_unit gates shipping on
     this (through v17.3 the only call ran after the ship
-    decision and merely appended a note to a shipped answer)."""
+    decision and merely appended a note to a shipped answer).
+    v25.1: the scan runs on date-masked text (see _DATE_MASK_RX)."""
+    answer = _mask_dates(answer)
     notes, seen = [], set()
 
     def consider(a, op, b, c, raw):
@@ -3106,7 +3144,8 @@ def _drop_payee_admin(question, hits):
     return [h for h in hits if "/payee/" not in (h.get("url") or "")]
 
 
-def _check_figures(answer, question, hits, extra_allowed=()):
+def _check_figures(answer, question, hits, extra_allowed=(),
+                   pool_all=False):
     """v11 figure provenance: every dollar figure in the answer must
     trace to an excerpt, the question itself, or a shown equation
     (operand or computed result). Ungrounded figures are listed in a
@@ -3122,7 +3161,14 @@ def _check_figures(answer, question, hits, extra_allowed=()):
     figure appearing only in an uncited excerpt is ungrounded for
     that sentence. (3) The match tolerance tightens from ±$0.51 to
     ±$0.011. (4) Unprefixed amounts in money contexts ("910.80 per
-    month", "910 dollars") are checked too, not only $-figures."""
+    month", "910 dollars") are checked too, not only $-figures.
+    v25.1: pool_all (the Quick lane's gate call ONLY; Deep never
+    passes it, so the F5 scoping above is untouched there) pools
+    EVERY excerpt the drafter saw into the allowed set: the Quick
+    floor is presence in the retrieved evidence, with per-sentence
+    support carried by the citation gate instead. Pool extraction
+    mirrors the answer scan (money_re + bare_re) so normalization
+    ($, commas, decimals) matches on both sides."""
     money_re = re.compile(r"\$\s?(\d[\d,]*(?:\.\d{1,2})?)")
     bare_re = re.compile(
         r"\b(\d[\d,]*(?:\.\d{1,2})?)\s*(?:dollars?\b|per month\b|"
@@ -3146,6 +3192,16 @@ def _check_figures(answer, question, hits, extra_allowed=()):
         except (TypeError, ValueError):
             pass
     base |= _grab(question)
+    if pool_all:
+        for _h in hits or ():
+            _ex = (_h or {}).get("excerpt", "")
+            base |= _grab(_ex)
+            for m in bare_re.finditer(_ex):
+                try:
+                    base.add(round(float(
+                        m.group(1).replace(",", "")), 2))
+                except ValueError:
+                    pass
 
     parsed = _parse_citations(answer or "", hits or [])
     derived = set()
@@ -7465,7 +7521,16 @@ def _parse_citations(answer, hits):
     Load-bearing heuristic for cited/uncited classification: the
     sentence states a figure, a duration, or a rule (the
     _FACTUAL_RX signals) — connective prose is neither cited
-    nor factual and passes through untouched."""
+    nor factual and passes through untouched.
+    v25.1: BLOCK attribution. Drafters place a citation block
+    at the end of a sentence GROUP ("... (2026). [1][registry]"),
+    and the sentence splitter strands those markers as their
+    own segment or glues them onto the next sentence — through
+    v25 every sentence in the group then read as uncited (the
+    c3b7a02ec2c5 live Quick failure). A citation block now
+    credits every sentence since the previous citation block,
+    which is the span its markers were written to cover. A
+    sentence after the LAST citation block gains nothing."""
     urls = {}
     for j, h in enumerate(hits or ()):
         if h.get("url"):
@@ -7473,11 +7538,11 @@ def _parse_citations(answer, hits):
             # from it (search keeps several per document);
             # through v17.3 the last chunk silently won.
             urls.setdefault(h["url"], []).append(j)
-    sentences, cited_claims, uncited_lb = [], [], []
+    rows = []
     for s in _split_sentences(answer):
         if s.lower().startswith("confidence:"):
-            sentences.append({"text": s, "sources": [],
-                              "cited": True, "factual": False})
+            rows.append({"text": s, "sources": [], "cited": True,
+                         "factual": False, "_conf": True})
             continue
         srcs = []
         m = _CITE_TAIL.search(s)
@@ -7498,13 +7563,37 @@ def _parse_citations(answer, hits):
                     srcs.append(j)
         factual = bool(_FACTUAL_RX.search(s))
         cited = bool(srcs) or "[registry]" in s.lower()
-        sentences.append({"text": s, "sources": srcs,
-                          "cited": cited, "factual": factual})
-        if factual and cited:
-            cited_claims.append({"text": s, "load_bearing": True,
-                                 "sources": srcs})
-        elif factual and not cited:
-            uncited_lb.append(s)
+        rows.append({"text": s, "sources": srcs, "cited": cited,
+                     "factual": factual, "_conf": False})
+    # v25.1 block attribution: walk the rows; each row that
+    # carries a citation flushes the pending run — the run's
+    # rows gain that row's sources and its cited flag. The
+    # confidence row is transparent: it neither receives
+    # credit nor breaks a run.
+    _run = []
+    for _row in rows:
+        if _row["_conf"]:
+            continue
+        _run.append(_row)
+        if _row["cited"]:
+            for _r in _run:
+                for _j in _row["sources"]:
+                    if _j not in _r["sources"]:
+                        _r["sources"].append(_j)
+                _r["cited"] = True
+            _run = []
+    sentences, cited_claims, uncited_lb = [], [], []
+    for _row in rows:
+        sentences.append({"text": _row["text"],
+                          "sources": _row["sources"],
+                          "cited": _row["cited"],
+                          "factual": _row["factual"]})
+        if _row["factual"] and _row["cited"]:
+            cited_claims.append({"text": _row["text"],
+                                 "load_bearing": True,
+                                 "sources": _row["sources"]})
+        elif _row["factual"] and not _row["cited"]:
+            uncited_lb.append(_row["text"])
     return {"sentences": sentences, "cited_claims": cited_claims,
             "uncited_lb": uncited_lb}
 
@@ -9535,6 +9624,60 @@ def _run_unit(ctx):
                 missing=missing[:8], gate=gate)
 
 
+# --- v25.1: Quick self-audit contract + repair ----------------
+# The Quick lane has no judge, so its ONE draft call carries a
+# self-audit contract: cite every factual sentence as written,
+# then audit the draft against the excerpts (every figure
+# findable, every factual sentence cited) and CUT what cannot
+# be supported. The deterministic final checks remain the floor
+# beneath it; when the floor still fails, ONE repair draft —
+# the failures listed verbatim — gets the lane's second and
+# last draft call.
+QUICK_SELF_AUDIT_CONTRACT = (
+    "SELF-AUDIT (this lane has no judge; the server checks "
+    "your answer with code): before you finish, audit your "
+    "own draft against the excerpts above. Every factual "
+    "sentence must end with its citation, as required above. "
+    "Every dollar figure in your answer must appear in an "
+    "excerpt you cite for that sentence, in the question, or "
+    "in the VERIFIED FIGURES block. Cut any sentence you "
+    "cannot support this way — do not soften it, remove it. "
+    "Check any arithmetic you state. Output ONLY the audited "
+    "answer, with no notes about the audit.")
+
+
+def _quick_failure_list(ungrounded, mech_failures, quantities,
+                        uncited_lb, conflict_fail):
+    """A Quick draft's deterministic failures, phrased for the
+    repair prompt (and kept on the unit record)."""
+    out = []
+    for s in uncited_lb[:6]:
+        out.append("factual sentence with no citation: \""
+                   + s[:160] + "\"")
+    for v in ungrounded[:6]:
+        out.append("figure not found in the excerpts: "
+                   + _fmt_money(v))
+    for f in quantities[:4]:
+        out.append("quantity/arithmetic check failed: "
+                   + f["label"])
+    for f in mech_failures[:4]:
+        out.append("the answer did not establish: " + f["label"])
+    if conflict_fail:
+        out.append("a source conflict's two values were not "
+                   "both surfaced")
+    return out
+
+
+def _quick_repair_block(failures):
+    lines = ["REPAIR PASS: your previous draft failed the "
+             "server's deterministic checks. Write the "
+             "complete answer again, fixing exactly these "
+             "problems and keeping everything that was "
+             "supported:"]
+    lines += ["- " + f for f in failures]
+    return "\n".join(lines)
+
+
 def _quick_strip_asides(draft, parsed, lead_sentence=None):
     """v25: the v17.3 strip in code-only form, for the Quick
     lane. Quick runs no claim extraction, so there are no
@@ -9599,6 +9742,12 @@ def _run_unit_quick(ctx):
     Quick answer the code checks cannot clear is never
     shipped unchecked. Same clock discipline as _run_unit:
     the ask's ONE anchored deadline governs.
+    v25.1: the draft carries the SELF-AUDIT contract (cite
+    as written; audit against the excerpts; cut what cannot
+    be supported), the figure gate pools every excerpt the
+    drafter saw, and a draft that still fails the floor gets
+    ONE repair call (same seat, the failures listed) before
+    the unit IDKs — the lane's draft cap is 2.
     Returns the same unit-record shape as _run_unit."""
     reg_block = _registry_block(ctx.get("registry_entries") or ())
     mech_only = _mechanism_block(ctx["mechanisms"])
@@ -9666,6 +9815,11 @@ def _run_unit_quick(ctx):
         if draft_extra:
             instr = (instr + "\n\n" + draft_extra).strip()
         instr = (instr + "\n\n" + CITATION_CONTRACT).strip()
+        # v25.1: the Quick draft also carries the self-audit
+        # contract (the lane has no judge to catch what the
+        # drafter can catch itself against the excerpts).
+        instr = (instr + "\n\n"
+                 + QUICK_SELF_AUDIT_CONTRACT).strip()
         _set_stage("drafting")
         _set_phase("drafting", round=1)
         if _trk is not None:
@@ -9713,7 +9867,7 @@ def _run_unit_quick(ctx):
         _p = _parse_citations(text, ctx["hits"])
         _a, _ung = _check_figures(
             text, ctx["question"], ctx["hits"],
-            extra_allowed=ctx["allowed_extra"])
+            extra_allowed=ctx["allowed_extra"], pool_all=True)
         _mf = _mech_required_failures(
             text, ctx["mechanisms"], ctx.get("csra_comp"))
         _qs = _check_quantities(
@@ -9724,24 +9878,93 @@ def _run_unit_quick(ctx):
         _cc, _cf = _conflict_claims(conflicts, text)
         return _p, _ung, _mf, _qs, bool(_cf)
 
-    if draft is not None:
-        parsed, ungrounded, mech_failures, quantities, \
-            conflict_fail = _det_gates(draft)
-        uncited_lb = parsed["uncited_lb"]
-        if uncited_lb:
-            lead_sentence = None
+    def _gates_with_strip(text):
+        _p, _ung, _mf, _qs, _cf = _det_gates(text)
+        _unc = _p["uncited_lb"]
+        _str = []
+        if _unc:
+            _lead = None
             if ctx["mechanisms"]:
-                for s in parsed["sentences"]:
-                    if s["factual"]:
-                        lead_sentence = s["text"]
+                for _s in _p["sentences"]:
+                    if _s["factual"]:
+                        _lead = _s["text"]
                         break
-            stripped_draft, stripped = _quick_strip_asides(
-                draft, parsed, lead_sentence)
-            if stripped_draft is not None:
-                draft = stripped_draft
-                parsed, ungrounded, mech_failures, quantities, \
-                    conflict_fail = _det_gates(draft)
-                uncited_lb = parsed["uncited_lb"]
+            _sd, _str = _quick_strip_asides(text, _p, _lead)
+            if _sd is not None:
+                text = _sd
+                _p, _ung, _mf, _qs, _cf = _det_gates(text)
+                _unc = _p["uncited_lb"]
+        return text, _p, _ung, _mf, _qs, _cf, _unc, _str
+
+    if draft is not None:
+        draft, parsed, ungrounded, mech_failures, quantities, \
+            conflict_fail, uncited_lb, stripped = \
+            _gates_with_strip(draft)
+    # --- v25.1: ONE repair draft when the floor still fails.
+    # Same seat, the failures listed verbatim; the repaired
+    # draft faces the same gates. The lane's draft cap is 2
+    # (initial + repair); the ask's shared cap still governs,
+    # and the anchored deadline still decides whether the
+    # repair may start at all.
+    quick_repair = False
+    quick_repair_failures = []
+    quick_repair_error = None
+    if draft is not None and (ungrounded or mech_failures
+                              or quantities or uncited_lb
+                              or conflict_fail) \
+            and not cap_hit and not draft_capped:
+        _fails = _quick_failure_list(
+            ungrounded, mech_failures, quantities, uncited_lb,
+            conflict_fail)
+        _may = True
+        if deadline and time.monotonic() > deadline:
+            _mark_cap()
+            _may = False
+        elif deadline and not _call_may_start(deadline):
+            _mark_cap()
+            _may = False
+        elif not _claim_draft_call():
+            draft_capped = True
+            _may = False
+        if _may:
+            quick_repair = True
+            quick_repair_failures = _fails
+            _set_stage("drafting")
+            _set_phase("drafting", round=2)
+            if _trk is not None:
+                _trk_set(_trk, "drafting", "active")
+            _rinstr = (instr + "\n\n"
+                       + _quick_repair_block(_fails)).strip()
+            _rdraft = None
+            try:
+                _rdraft, _rprompt, _rserved, _rdg, _rfb = \
+                    _generate(_eng, _mdl, ctx["unit_q"],
+                              ctx["hits"], _rinstr)
+            except Exception as e:
+                quick_repair_error = str(e)[:200]
+            if _rdraft is not None \
+                    and _is_memo_shaped_draft(_rdraft):
+                quick_repair_error = (
+                    "the repair draft was memo-shaped and "
+                    "was rejected by the draft shape guard")
+                _rdraft = None
+            if _rdraft is not None:
+                draft = _rdraft
+                prompt = _rprompt or prompt
+                ctx["_dg"], ctx["_fb"] = _rdg, _rfb
+                if _rserved:
+                    _srv = _rserved.split(" (")[0].strip()
+                    _actx0.draft_family = _model_family(_srv)
+                    _actx0.served_models["draft"] = _srv
+                    served = _rserved
+                draft, parsed, ungrounded, mech_failures, \
+                    quantities, conflict_fail, uncited_lb, \
+                    stripped = _gates_with_strip(draft)
+            if _trk is not None:
+                _trk_set(_trk, "drafting", "done")
+            _set_phase("final checks")
+            if _trk is not None:
+                _trk_set(_trk, "final_checks", "active")
     if _trk is not None:
         _trk_set(_trk, "final_checks", "done")
     _fig_checked = 0
@@ -9762,7 +9985,9 @@ def _run_unit_quick(ctx):
                              "only (figures, citations, "
                              "quantities, arithmetic, mechanism "
                              "coverage, conflicts). No judge "
-                             "pass ran.",
+                             "pass ran."
+                             + (" One repair draft ran."
+                                if quick_repair else ""),
                "checks": checks}
     base = {"served": served, "fallback": ctx.get("_fb", False),
             "downgraded": ctx.get("_dg", False),
@@ -9780,6 +10005,10 @@ def _run_unit_quick(ctx):
             "events": _events_since(ev0),
             "retr_pools": _retr_pools_since(rp0),
             "lead_repairs": 0,
+            "quick_self_audit": True,
+            "quick_repair": quick_repair,
+            "quick_repair_failures": quick_repair_failures,
+            "quick_repair_error": quick_repair_error,
             "stripped_sentences": stripped}
     _check_cancel()  # the Stop seam, again before shipping
     if draft is not None and not ungrounded \
@@ -11420,6 +11649,17 @@ class Handler(BaseHTTPRequestHandler):
                             u.get("draft_capped")),
                         "assembly_guard": u.get(
                             "assembly_guard"),
+                        # v25.1: the Quick lane's self-audit
+                        # flag and repair record (None/False
+                        # on Deep units, which run neither).
+                        "quick_self_audit": u.get(
+                            "quick_self_audit"),
+                        "quick_repair": bool(
+                            u.get("quick_repair")),
+                        "quick_repair_failures": u.get(
+                            "quick_repair_failures"),
+                        "quick_repair_error": u.get(
+                            "quick_repair_error"),
                         "events": u.get("events"),
                         "judge_errors": (u.get("judging")
                                           or {}).get("errors"),
