@@ -72,6 +72,11 @@ import tempfile
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# v22 retarget: the audit defaults to THIS tree's server (it was
+# the v21 tree when the tool was written; HERE is this tree's
+# tools/ dir, so the parent is the right default in either tree).
+# The engine audited follows the RETRIEVAL env var, which passes
+# through the import: RETRIEVAL=v2 audits the enriched v2 index.
 V21_DIR = os.path.dirname(HERE)
 
 

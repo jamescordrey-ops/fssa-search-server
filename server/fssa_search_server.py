@@ -1329,9 +1329,819 @@ def _registry_pin_hits(question, corpus, on_date=None):
     return out
 
 
+
+# ---------------------------------------------------------------------------
+# v22 retrieval: generation-backed, in-process (SQLite FTS5 weighted
+# BM25F + the existing nomic vectors + synthetic-question vectors),
+# behind the RETRIEVAL env flag (v2|legacy, default legacy = the
+# v21 path below, intact). Design: ~/workspace/fssa-qa/v22/PLAN.md
+# and CONSULT_RAW.md. Fail-soft throughout: if the flag is off, the
+# generation store is missing, or FTS5 is unavailable in this
+# Python's sqlite3, the effective engine is legacy and /health
+# says why. Channels: T (FTS5 BM25F over sections and chunks,
+# query rewrites included), V1 (chunk vectors), V2 (synthetic-
+# question vectors), R (registry entries resolved to their source
+# section BY DOC ID from the generation's registry_sources table),
+# X (exact: section numbers, module ids, quoted phrases, and the
+# v21 rescue scoring mapped to its document's best section).
+# Weighted RRF fusion (k from retrieval_profile.json), section
+# aggregation with a channel-agreement bonus, small priors
+# (authority tier, jurisdiction from content, intent features).
+# There are NO title-word demotions in this path.
+# ---------------------------------------------------------------------------
+import sqlite3 as _sqlite3
+
+_V2_LOCK = threading.Lock()
+_V2_QLOCK = threading.Lock()
+_V2_CACHE = {}
+_V2 = {"requested": None, "effective": "legacy", "fts5": None,
+       "generation": None, "vectors": "unknown", "canary": "n/a",
+       "drift": False, "fail_reason": None, "profile": None,
+       "conn": None, "sections": {}, "docs": {}, "enrich": {},
+       "vec_mat": None, "vec_rows": None, "synth_mat": None,
+       "synth_sections": None, "vocab": None, "pins": []}
+
+
+def _v2_fts5_ok():
+    try:
+        _c = _sqlite3.connect(":memory:")
+        _c.execute("CREATE VIRTUAL TABLE t USING fts5(x)")
+        _c.execute("CREATE VIRTUAL TABLE v USING fts5vocab(t, 'row')")
+        _c.close()
+        return True
+    except Exception:
+        return False
+
+
+def _v2_health():
+    """The /health retrieval block. Never raises."""
+    try:
+        return {"requested": _V2["requested"],
+                "effective": _V2["effective"],
+                "fts5": _V2["fts5"],
+                "generation": _V2["generation"],
+                "vectors": _V2["vectors"],
+                "embedding_canary": _V2["canary"],
+                "embedding_drift": bool(_V2["drift"]),
+                "fail_reason": _V2["fail_reason"],
+                "profile": (_V2["profile"] or {}).get("version")}
+    except Exception:
+        return {"effective": "legacy", "error": "state unavailable"}
+
+
+def _v2_canary_thread():
+    """Boot canary: re-embed 5 stored chunks and compare against
+    their stored rows. A measured cosine < 0.999 on any of them
+    sets embedding_drift and disables the vector channels (text
+    channels continue). If the embedder is unreachable the canary
+    is 'unrun', not a drift verdict."""
+    try:
+        conn = _V2["conn"]
+        with _V2_QLOCK:
+            picks = []
+            for off in (0, 1000, 30000, 60000):
+                r = conn.execute(
+                    "SELECT row FROM chunks ORDER BY row"
+                    " LIMIT 1 OFFSET ?", (off,)).fetchone()
+                if r:
+                    picks.append(r[0])
+            r = conn.execute(
+                "SELECT MAX(row) FROM chunks").fetchone()
+            if r and r[0] is not None:
+                picks.append(r[0])
+            picks = list(dict.fromkeys(picks))[:5]
+            texts = {}
+            for r in picks:
+                row = conn.execute(
+                    "SELECT text FROM chunks WHERE row=?",
+                    (r,)).fetchone()
+                if row:
+                    texts[r] = row[0]
+        mat, vrows = _V2["vec_mat"], _V2["vec_rows"]
+        measured = 0
+        for r, text in texts.items():
+            q = _embed_query(text)
+            if q is None:
+                continue
+            i = vrows.index(r) if r in vrows else None
+            if i is None:
+                continue
+            cos = _cosine(q, [float(x) for x in mat[i]])
+            measured += 1
+            if cos < 0.999:
+                _V2["drift"] = True
+                _V2["canary"] = "drift"
+                print(f"[v22] embedding canary: DRIFT (cosine "
+                      f"{cos:.4f} < 0.999 on chunk row {r}); "
+                      f"vector channels disabled", flush=True)
+                return
+        _V2["canary"] = "ok" if measured else "unrun"
+        print(f"[v22] embedding canary: {_V2['canary']} "
+              f"({measured} chunks measured)", flush=True)
+    except Exception as e:
+        _V2["canary"] = "unrun"
+        print(f"[v22] embedding canary failed to run: "
+              f"{type(e).__name__}: {e}", flush=True)
+
+
+def _v2_open():
+    """Open the generation store once. Returns True when the v2
+    path may serve. Any failure leaves effective=legacy."""
+    with _V2_LOCK:
+        if _V2["requested"] is not None:
+            return _V2["effective"] == "v2"
+        _V2["requested"] = os.environ.get(
+            "RETRIEVAL", "legacy").strip().lower()
+        _V2["fts5"] = _v2_fts5_ok()
+        if _V2["requested"] != "v2":
+            return False
+        if not _V2["fts5"]:
+            _V2["fail_reason"] = "FTS5 unavailable in this sqlite3"
+            print("[v22] RETRIEVAL=v2 requested but FTS5 is "
+                  "unavailable; serving legacy", flush=True)
+            return False
+        try:
+            base = os.environ.get("FSSA_GENERATIONS_DIR") or os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "generations")
+            gen = open(os.path.join(base, "CURRENT"),
+                       encoding="utf-8").read().strip()
+            db = os.path.join(base, gen, f"corpus_{gen}.db")
+            conn = _sqlite3.connect(f"file:{db}?mode=ro",
+                                    uri=True, check_same_thread=False)
+            conn.execute("SELECT COUNT(*) FROM sections").fetchone()
+            _V2["conn"] = conn
+            _V2["generation"] = gen
+            meta = {k: json.loads(v) for k, v in conn.execute(
+                "SELECT key, value FROM meta")}
+            _V2["vectors"] = meta.get("vectors_state", "unknown")
+            for (sid, did, skey, heading, title) in conn.execute(
+                    "SELECT section_id, doc_id, section_key, heading,"
+                    " title FROM sections"):
+                _V2["sections"][sid] = {
+                    "doc_id": did, "section_key": skey,
+                    "heading": heading, "title": title}
+            for (did, url, title, sf, jur, tier) in conn.execute(
+                    "SELECT doc_id, url, title, source_file,"
+                    " jurisdiction, authority_tier FROM docs"):
+                _V2["docs"][did] = {
+                    "url": url, "title": title, "source_file": sf,
+                    "jurisdiction": jur, "authority_tier": tier}
+            for sid, figs in conn.execute(
+                    "SELECT section_id, figures FROM enrich"):
+                try:
+                    _V2["enrich"][sid] = json.loads(figs or "[]")
+                except Exception:
+                    _V2["enrich"][sid] = []
+            sdir = os.path.dirname(os.path.abspath(__file__))
+            with open(os.path.join(sdir, "retrieval_profile.json"),
+                      encoding="utf-8") as f:
+                _V2["profile"] = json.load(f)
+            try:
+                with open(os.path.join(sdir, "pins.json"),
+                          encoding="utf-8") as f:
+                    _V2["pins"] = json.load(f).get("pins", [])
+            except FileNotFoundError:
+                _V2["pins"] = []
+            if _V2["vectors"] == "ready" and _HAS_NUMPY:
+                import numpy as _npy
+                gdir = os.path.join(base, gen)
+                _V2["vec_mat"] = _npy.load(
+                    os.path.join(gdir, f"vectors_{gen}.npy"),
+                    mmap_mode="r")
+                with open(os.path.join(gdir, "vectors_index.json"),
+                          encoding="utf-8") as f:
+                    _V2["vec_rows"] = json.load(f)["rows"]
+                sq = os.path.join(gdir, f"synthq_vectors_{gen}.npy")
+                if os.path.exists(sq):
+                    _V2["synth_mat"] = _npy.load(sq, mmap_mode="r")
+                    with open(os.path.join(
+                            gdir, "synthq_index.json"),
+                            encoding="utf-8") as f:
+                        _V2["synth_sections"] = json.load(f)
+                _V2["canary"] = "pending"
+                threading.Thread(target=_v2_canary_thread,
+                                 daemon=True).start()
+            _V2["effective"] = "v2"
+            print(f"[v22] retrieval v2 open: generation {gen}, "
+                  f"vectors {_V2['vectors']}, "
+                  f"{len(_V2['sections'])} sections", flush=True)
+            # Warm the typo vocabulary in the background so the
+            # first v2 ask does not pay the fts5vocab build.
+            threading.Thread(target=lambda: _v2_vocab(),
+                             daemon=True).start()
+            return True
+        except Exception as e:
+            _V2["fail_reason"] = f"{type(e).__name__}: {e}"
+            _V2["effective"] = "legacy"
+            print(f"[v22] generation store failed to open "
+                  f"({_V2['fail_reason']}); serving legacy",
+                  flush=True)
+            return False
+
+
+def _v2_effective():
+    return _v2_open()
+
+
+def _v2_scope(corpus):
+    if corpus is None or corpus is CORPUS_IN:
+        return "in"
+    if corpus is CORPUS_FED:
+        return "federal"
+    return "both"
+
+
+def _v2_match(terms):
+    parts = []
+    for t in terms:
+        t = (t or "").strip().lower().replace('"', " ")
+        if t and all(c.isalnum() or c in " .'-" for c in t):
+            parts.append(f'"{t}"')
+    return " OR ".join(parts)
+
+
+def _v2_vocab():
+    """Corpus vocabulary with chunk counts: the generation's vocab
+    table, materialized from fts5vocab at generation build time
+    (a runtime fts5vocab table cannot attach to the read-only
+    store). Loaded lazily, once."""
+    if _V2["vocab"] is not None:
+        return _V2["vocab"]
+    vocab = {}
+    with _V2_QLOCK:
+        for term, dc in _V2["conn"].execute(
+                "SELECT term, doc_count FROM vocab"):
+            vocab[term] = dc
+    _V2["vocab"] = vocab
+    return vocab
+
+
+def _v2_lev(a, b, cap=2):
+    if abs(len(a) - len(b)) > cap:
+        return cap + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        best = cur[0]
+        for j, cb in enumerate(b, 1):
+            v = min(prev[j] + 1, cur[j - 1] + 1,
+                    prev[j - 1] + (ca != cb))
+            cur.append(v)
+            best = min(best, v)
+        if best > cap:
+            return cap + 1
+        prev = cur
+    return prev[-1]
+
+
+def _v2_typo_expansions(terms):
+    """fts5vocab typo handling (consult design): a query term that
+    is out-of-vocabulary or rare (df <= 3) earns OR-expansion
+    candidates within edit distance 2 that are at least 20x more
+    frequent AND co-occur in some chunk with another query term.
+    Expansion only; the original term is never replaced."""
+    try:
+        vocab = _v2_vocab()
+    except Exception:
+        return []
+    out = []
+    others = [t for t in terms if " " not in t]
+    with _V2_QLOCK:
+        conn = _V2["conn"]
+        for t in others:
+            if len(t) < 4:
+                continue
+            df = vocab.get(t, 0)
+            if df > 3:
+                continue
+            cands = []
+            for cand, cdf in vocab.items():
+                if cand == t or abs(len(cand) - len(t)) > 2:
+                    continue
+                if cand[0] != t[0] or cdf < max(50, 20 * max(df, 1)):
+                    continue
+                if _v2_lev(t, cand) <= 2:
+                    cands.append((cdf, cand))
+            cands.sort(reverse=True)
+            for _cdf, cand in cands[:4]:
+                co = False
+                for o in others:
+                    if o == t:
+                        continue
+                    try:
+                        hit = conn.execute(
+                            "SELECT 1 FROM chunk_fts WHERE"
+                            " chunk_fts MATCH ? LIMIT 1",
+                            (f'"{cand}" AND "{o}"',)).fetchone()
+                    except Exception:
+                        hit = None
+                    if hit:
+                        co = True
+                        break
+                if co:
+                    out.append(cand)
+                    break
+            if len(out) >= 6:
+                break
+    return out
+
+
+def _v2_fts_sections(match, scope, limit, doc_id=None):
+    """Section ids by section_fts BM25F, best first."""
+    if not match:
+        return []
+    w = (_V2["profile"] or {}).get(
+        "fts_weights", {}).get("section", [5.0, 3.0, 1.0, 2.0, 3.0])
+    sql = ("SELECT s.section_id FROM section_fts f"
+           " JOIN sections s ON s.row = f.rowid"
+           " JOIN docs d ON d.doc_id = s.doc_id"
+           " WHERE section_fts MATCH ?")
+    args = [match]
+    if doc_id is not None:
+        sql += " AND s.doc_id = ?"
+        args.append(doc_id)
+    elif scope != "both":
+        sql += " AND d.source_file = ?"
+        args.append(scope)
+    sql += (f" ORDER BY bm25(section_fts, {w[0]}, {w[1]}, {w[2]},"
+            f" {w[3]}, {w[4]}) LIMIT ?")
+    args.append(limit)
+    with _V2_QLOCK:
+        return [r[0] for r in _V2["conn"].execute(sql, args)]
+
+
+def _v2_fts_chunk_sections(match, scope, limit):
+    """Section ids via the best chunks (chunk_fts BM25F)."""
+    if not match:
+        return []
+    w = (_V2["profile"] or {}).get(
+        "fts_weights", {}).get("chunk", [5.0, 3.0, 1.0])
+    sql = ("SELECT c.section_id FROM chunk_fts f"
+           " JOIN chunks c ON c.row = f.rowid"
+           " JOIN docs d ON d.doc_id = c.doc_id"
+           " WHERE chunk_fts MATCH ?")
+    args = [match]
+    if scope != "both":
+        sql += " AND d.source_file = ?"
+        args.append(scope)
+    sql += (f" ORDER BY bm25(chunk_fts, {w[0]}, {w[1]}, {w[2]})"
+            f" LIMIT ?")
+    args.append(limit * 3)
+    out, seen = [], set()
+    with _V2_QLOCK:
+        for (sid,) in _V2["conn"].execute(sql, args):
+            if sid not in seen:
+                seen.add(sid)
+                out.append(sid)
+                if len(out) >= limit:
+                    break
+    return out
+
+
+def _v2_vector_sections(mat, index_sections, query, scope, limit,
+                        chunk_level=False):
+    """Dense channel: query vector against a stored matrix. When
+    chunk_level, matrix rows are chunks (index maps row->chunk row)
+    and the result is (section ids, {section_id: chunk_row})."""
+    q = _embed_query(query)
+    if q is None or mat is None:
+        return [], {}
+    import numpy as _npy
+    qv = _npy.array(q, dtype=_npy.float32)
+    nrm = float(_npy.linalg.norm(qv))
+    if not nrm:
+        return [], {}
+    qv = qv / nrm
+    scores = mat @ qv
+    order = _npy.argsort(-scores)
+    out, seen, anchors = [], set(), {}
+    conn = _V2["conn"]
+    with _V2_QLOCK:
+        for i in order:
+            if chunk_level:
+                crow = _V2["vec_rows"][int(i)]
+                row = conn.execute(
+                    "SELECT section_id, doc_id FROM chunks"
+                    " WHERE row=?", (crow,)).fetchone()
+                if not row:
+                    continue
+                sid, did = row
+                anchors.setdefault(sid, crow)
+            else:
+                sid = index_sections[int(i)]
+                row = conn.execute(
+                    "SELECT doc_id FROM sections WHERE section_id=?",
+                    (sid,)).fetchone()
+                if not row:
+                    continue
+                did = row[0]
+            if scope != "both" and \
+                    _V2["docs"][did]["source_file"] != scope:
+                continue
+            if sid not in seen:
+                seen.add(sid)
+                out.append(sid)
+                if len(out) >= limit:
+                    break
+    return out, anchors
+
+
+def _v2_registry_sections(question, scope="both"):
+    """R channel: date-aware registry matches resolved to their
+    source section BY DOC ID (the generation's registry_sources
+    table), ranked inside the doc by the entry's topic phrases."""
+    out = []
+    try:
+        entries = _registry_matches(question)
+    except Exception:
+        return out
+    conn = _V2["conn"]
+    for e in entries[:2]:
+        with _V2_QLOCK:
+            row = conn.execute(
+                "SELECT doc_id FROM registry_sources"
+                " WHERE entry_id=?", (e["id"],)).fetchone()
+        if not row or row[0] is None:
+            continue
+        doc_id = row[0]
+        if scope != "both" and \
+                _V2["docs"][doc_id]["source_file"] != scope:
+            continue
+        topic = e.get("topic") or _V21_REGISTRY_META.get(
+            e["id"], {}).get("topic") or {}
+        phrases = [p for p, _t in topic.get("phrases", ())]
+        secs = _v2_fts_sections(_v2_match(phrases), "both", 2,
+                                doc_id=doc_id)
+        if not secs:
+            with _V2_QLOCK:
+                secs = [r[0] for r in conn.execute(
+                    "SELECT section_id FROM sections"
+                    " WHERE doc_id=? ORDER BY first_ordinal"
+                    " LIMIT 1", (doc_id,))]
+        for sid in secs:
+            if sid not in out:
+                out.append(sid)
+    return out
+
+
+def _v2_exact_sections(question):
+    """X channel: section numbers / module ids in the question,
+    quoted phrases, and the v21 rescue's best document."""
+    out = []
+    conn = _V2["conn"]
+    tokens = set(re.findall(
+        r"\b\d{4}\.\d{2}\.\d{2}(?:\.\d{2})?\b", question))
+    tokens |= {m.upper() for m in re.findall(
+        r"\bPROMOD\d+\b", question, re.IGNORECASE)}
+    with _V2_QLOCK:
+        for tok in tokens:
+            for (sid,) in conn.execute(
+                    "SELECT s.section_id FROM sections s"
+                    " JOIN docs d ON d.doc_id = s.doc_id"
+                    " WHERE s.section_key LIKE ? OR d.title LIKE ?"
+                    " LIMIT 4",
+                    (f"%{tok}%", f"%{tok}%")):
+                if sid not in out:
+                    out.append(sid)
+    for phrase in re.findall(r'"([^"]{3,})"', question):
+        for sid in _v2_fts_sections(f'"{phrase}"', "both", 3):
+            if sid not in out:
+                out.append(sid)
+    return out
+
+
+def _v2_section_hit(sid, match, anchors=None):
+    """Build a served hit for a section: the anchor chunk (the
+    vector hit chunk when known, else the section's best FTS
+    chunk, else its first chunk) plus its same-section neighbours,
+    as one evidence window. Returns None for an unknown section."""
+    meta = _V2["sections"].get(sid)
+    if not meta:
+        return None
+    conn = _V2["conn"]
+    with _V2_QLOCK:
+        chunks = conn.execute(
+            "SELECT row, ordinal, text FROM chunks"
+            " WHERE section_id=? ORDER BY ordinal", (sid,)).fetchall()
+    if not chunks:
+        return None
+    anchor_row = (anchors or {}).get(sid)
+    if anchor_row is None and match:
+        w = (_V2["profile"] or {}).get(
+            "fts_weights", {}).get("chunk", [5.0, 3.0, 1.0])
+        with _V2_QLOCK:
+            row = conn.execute(
+                "SELECT c.row FROM chunk_fts f"
+                " JOIN chunks c ON c.row = f.rowid"
+                " WHERE c.section_id=? AND chunk_fts MATCH ?"
+                f" ORDER BY bm25(chunk_fts, {w[0]}, {w[1]}, {w[2]})"
+                " LIMIT 1", (sid, match)).fetchone()
+        anchor_row = row[0] if row else None
+    idx = 0
+    if anchor_row is not None:
+        for i, (r, _o, _t) in enumerate(chunks):
+            if r == anchor_row:
+                idx = i
+                break
+    lo = max(0, idx - 1)
+    hi = min(len(chunks), idx + 2)
+    excerpt = "\n".join(t for _r, _o, t in chunks[lo:hi])[:2000]
+    doc = _V2["docs"][meta["doc_id"]]
+    hit = {"title": doc["title"], "url": doc["url"],
+           "source": "v2", "verified": True, "excerpt": excerpt,
+           "_section": sid}
+    return hit
+
+
+def _hybrid_search_v2(query, corpus, n, use_rewrite, use_rerank):
+    """The v22 ask-path retrieval. Same return contract as
+    hybrid_search: the top-n served hits."""
+    _t0 = time.monotonic()
+    scope = _v2_scope(corpus)
+    gen = _V2["generation"]
+    cache_key = (query, scope, n, use_rerank, gen)
+    cached = _cache_get(_V2_CACHE, cache_key)
+    if cached:
+        _retr_pool_note({"q": query[:80], "n": n, "cached": True,
+                         "engine": "v2", "gen": gen,
+                         "pool": [{"t": (h.get("title") or "")[:70],
+                                   "u": h.get("url"), "sel": i}
+                                  for i, h in enumerate(cached[:28])]})
+        return [dict(h) for h in cached]
+    profile = _V2["profile"] or {}
+    weights = profile.get("channel_weights",
+                          {"T": 1.0, "V1": 1.0, "V2": 1.1,
+                           "R": 1.2, "X": 1.2})
+    depths = profile.get("channel_depths", {})
+    rrf_k = profile.get("rrf_k", 60)
+
+    q_low = query.lower()
+    terms = keywords(query)
+    expansions = []
+    for t in list(terms):
+        for w in SYNONYMS.get(t, ()):  # acronym expansions, as legacy
+            if w not in terms and w not in expansions:
+                expansions.append(w)
+    for gt in _growth_expansions(q_low):
+        if gt not in terms and gt not in expansions:
+            expansions.append(gt)
+    typo_alts = _v2_typo_expansions(terms)
+    expansions += [t for t in typo_alts if t not in expansions]
+    all_terms = terms + expansions
+    match = _v2_match(all_terms)
+    rewrite_match = ""
+    if use_rewrite and REWRITE_ENABLED:
+        try:
+            rw = rewrite_query(query)
+        except Exception:
+            rw = []
+        rewrite_match = _v2_match(
+            [t for t in rw if t not in all_terms])
+
+    channels = {}   # name -> [section_id, best first]
+    anchors = {}
+    t_secs = _v2_fts_sections(match, scope,
+                              depths.get("T_sections", 60))
+    c_secs = _v2_fts_chunk_sections(match, scope,
+                                    depths.get("T_sections", 60))
+    merged_t, _seen = [], set()
+    for sid in t_secs + c_secs:
+        if sid not in _seen:
+            _seen.add(sid)
+            merged_t.append(sid)
+    if rewrite_match:
+        for sid in _v2_fts_sections(rewrite_match, scope,
+                                    depths.get("T_sections", 60) // 2):
+            if sid not in _seen:
+                _seen.add(sid)
+                merged_t.append(sid)
+    channels["T"] = merged_t
+    if not _V2["drift"] and _V2["vec_mat"] is not None:
+        v1, anchors = _v2_vector_sections(
+            _V2["vec_mat"], None, query, scope,
+            depths.get("V1_chunks", 60), chunk_level=True)
+        channels["V1"] = v1
+    if not _V2["drift"] and _V2["synth_mat"] is not None:
+        v2s, _a = _v2_vector_sections(
+            _V2["synth_mat"], _V2["synth_sections"], query, scope,
+            depths.get("V2_questions", 60))
+        channels["V2"] = v2s
+    channels["R"] = _v2_registry_sections(query, scope)
+    channels["X"] = _v2_exact_sections(query)
+
+    def fuse(channels):
+        scores, present = {}, {}
+        for name, lst in channels.items():
+            w = weights.get(name, 1.0)
+            for rank, sid in enumerate(lst):
+                scores[sid] = scores.get(sid, 0.0) \
+                    + w / (rank + rrf_k)
+                present[sid] = present.get(sid, 0) + 1
+        bonus = profile.get("agreement_bonus", 0.004)
+        for sid, cnt in present.items():
+            if cnt > 1:
+                scores[sid] += bonus * (cnt - 1)
+        return scores, present
+
+    scores, present = fuse(channels)
+    # Round 2 (the answerability loop): a flat, low fused band is
+    # the divisor pool's signature. Widen once with the v21 rescue
+    # (its best documents' best sections join channel X) and the
+    # concept-map terms, then re-fuse. Bounded to one round.
+    round2 = False
+    ordered = sorted(scores.values(), reverse=True)
+    flat = bool(ordered) and (
+        ordered[0] < 0.045
+        or (len(ordered) >= 4 and ordered[0] - ordered[3] < 0.003))
+    if flat:
+        try:
+            rescue_hits, _rt = _rescue_search(
+                query, corpus if corpus is not None else CORPUS_IN,
+                exclude_keys=(), limit=4)
+            extra = []
+            conn = _V2["conn"]
+            for h in rescue_hits:
+                with _V2_QLOCK:
+                    drow = conn.execute(
+                        "SELECT doc_id FROM docs WHERE url=?",
+                        (h["url"],)).fetchone()
+                if not drow:
+                    continue
+                for sid in _v2_fts_sections(match, scope, 1,
+                                            doc_id=drow[0]):
+                    if sid not in extra:
+                        extra.append(sid)
+            if extra:
+                channels["X"] = channels["X"] + [
+                    s for s in extra if s not in channels["X"]]
+                scores, present = fuse(channels)
+                round2 = True
+        except Exception:
+            pass
+
+    # Priors (small, multiplicative, from the profile).
+    pr = profile.get("priors", {})
+    indiana_scoped = "indiana" in q_low or "hoosier" in q_low
+    freq_q = any(w in q_low for w in
+                 ("how often", "how frequently", "how long",
+                  "every ", "expire", "lookback", "look-back"))
+    figure_q = any(w in q_low for w in
+                   ("limit", "cost", "amount", "much", "income",
+                    "pay", "rate", "dollar", "price", "fee",
+                    "premium", "allowance", "keep"))
+    for sid, sc in list(scores.items()):
+        meta = _V2["sections"].get(sid)
+        if not meta:
+            continue
+        doc = _V2["docs"][meta["doc_id"]]
+        m = 1.0 + pr.get("authority_per_tier_above_2", 0.05) * max(
+            0, doc["authority_tier"] - 2)
+        if indiana_scoped:
+            if doc["jurisdiction"] == "IN":
+                m *= pr.get("jurisdiction_match", 1.05)
+            elif doc["jurisdiction"] == "other-state":
+                m *= pr.get("other_state_when_indiana_scoped", 0.8)
+        figs = _V2["enrich"].get(sid) or []
+        if freq_q and any(f.get("kind") == "frequency"
+                           for f in figs):
+            m *= pr.get("frequency_intent_with_frequency_figure", 1.1)
+        if figure_q and figs:
+            m *= pr.get("figure_intent_with_figures", 1.05)
+        scores[sid] = sc * m
+
+    ranked = sorted(scores, key=lambda s: -scores[s])
+    window = ranked[:max(24, n * 3)]
+    hits, url_counts = [], {}
+    for sid in window:
+        meta = _V2["sections"][sid]
+        url = _V2["docs"][meta["doc_id"]]["url"]
+        if url_counts.get(url, 0) >= 2:
+            continue
+        h = _v2_section_hit(sid, match, anchors)
+        if h is None:
+            continue
+        url_counts[url] = url_counts.get(url, 0) + 1
+        hits.append(h)
+    result = hits[:max(12, n * 2)]
+    if use_rerank and RERANK_ENABLED and len(result) > n:
+        ranked_hits = rerank_with_llm(query, result)
+        if ranked_hits:
+            result = ranked_hits[:n]
+    if len(result) > n:
+        result = result[:n]
+
+    # Pins, in the legacy served order: pins.json (the converted
+    # bridges) first, then registry sections.
+    def _front(hits_in):
+        keys = {(h["url"], h["excerpt"][:60]) for h in hits_in}
+        rest = [h for h in result
+                if (h["url"], h["excerpt"][:60]) not in keys]
+        return (hits_in + rest)[:n]
+
+    q_tokens = set(re.findall(r"[a-z]+", q_low))
+    pin_hits = []
+    for pin in _V2["pins"]:
+        if len(pin_hits) >= 3:
+            break
+        if not ((q_tokens & set(pin.get("trigger_tokens", ())))
+                or any(t in q_low
+                       for t in pin.get("trigger_texts", ()))):
+            continue
+        if pin.get("require_tokens") or pin.get("require_texts"):
+            if not ((q_tokens & set(pin["require_tokens"]))
+                    or any(t in q_low
+                           for t in pin["require_texts"])):
+                continue
+        target = pin.get("target", {})
+        chosen = None
+        for spec in target.get("phrases", ()):
+            cand_secs = _v2_fts_sections(
+                _v2_match([spec["phrase"]]), scope, 6)
+            cand_hits = []
+            for sid in cand_secs:
+                h = _v2_section_hit(sid, match, anchors)
+                if h:
+                    cand_hits.append(h)
+            if not cand_hits:
+                continue
+            pt = (spec.get("pin_term") or "").lower()
+            if pt:
+                chosen = next(
+                    (h for h in cand_hits
+                     if pt in (h["title"] + " " + h["excerpt"]).lower()),
+                    None)
+            if chosen is None and target.get("program_scope"):
+                chosen = next(
+                    (h for h in cand_hits
+                     if _classify_hit(h)[0]
+                     == target["program_scope"]), None)
+            if chosen is None:
+                chosen = cand_hits[0]
+            break
+        if chosen is not None and all(
+                (h["url"], h["excerpt"][:60])
+                != (chosen["url"], chosen["excerpt"][:60])
+                for h in pin_hits):
+            pin_hits.append(chosen)
+    if pin_hits:
+        result = _front(pin_hits)
+    reg_hits = []
+    for sid in channels.get("R", [])[:2]:
+        h = _v2_section_hit(sid, match, anchors)
+        if h and all((x["url"], x["excerpt"][:60])
+                     != (h["url"], h["excerpt"][:60])
+                     for x in reg_hits + pin_hits):
+            reg_hits.append(h)
+    if reg_hits:
+        result = _front(reg_hits)
+
+    for h in result:
+        prog, dtype = _classify_hit(h)
+        h["program"] = prog
+        h["dtype"] = dtype
+
+    ranks = {name: {sid: i for i, sid in enumerate(lst)}
+             for name, lst in channels.items()}
+    sel = {(h["url"], h["excerpt"][:60]): i
+           for i, h in enumerate(result)}
+    pool = []
+    for h in hits[:28]:
+        k = (h["url"], h["excerpt"][:60])
+        sid = h.get("_section")
+        pool.append({
+            "t": (h.get("title") or "")[:70], "u": h["url"],
+            "s": round(scores.get(sid, 0.0), 4),
+            "T": ranks.get("T", {}).get(sid),
+            "V1": ranks.get("V1", {}).get(sid),
+            "V2": ranks.get("V2", {}).get(sid),
+            "R": ranks.get("R", {}).get(sid),
+            "X": ranks.get("X", {}).get(sid),
+            "w": True, "sel": sel.get(k)})
+    _retr_pool_note({"q": query[:80], "n": n, "engine": "v2",
+                     "gen": gen, "round2": round2,
+                     "typo_expansions": typo_alts, "pool": pool})
+    for h in result:
+        h.pop("_section", None)
+    _retr_note("v2", time.monotonic() - _t0)
+    _cache_put(_V2_CACHE, cache_key, result)
+    return [dict(h) for h in result]
+
+
+
 def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
                   boosts=True):
     """Combine keyword and vector search with proper reciprocal rank fusion."""
+    # v22: ask-mode calls dispatch to the generation-backed v2
+    # path when RETRIEVAL=v2 and the store opens. The dispatch
+    # decision itself is fail-soft: any error serves legacy.
+    if boosts:
+        try:
+            if _v2_effective():
+                return _hybrid_search_v2(query, corpus, n,
+                                         use_rewrite, use_rerank)
+        except Exception:
+            pass
     # Check cache
     cache_key = (query, id(corpus) if corpus else "in", n, use_rewrite,
                  use_rerank, boosts)
@@ -1563,18 +2373,10 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
             if dtype13 in ("POMS operations manual", "policy manual",
                            "regulation", "waiver application"):
                 lift += 0.02
-            u13 = (h.get("url") or "").lower()
-            t13 = (h.get("title") or "").lower()
-            # v20.2: IHCP Provider Reference Modules are PRIMARY
-            # sources (the operative rule text itself), not
-            # provider-administration pages; the demotion below
-            # was aimed at the latter and cost the Vision
-            # Services module the excerpt cut on the 2026-10-14
-            # eyeglasses ask purely for its title. Exempt the
-            # modules; everything else keeps the demotion.
-            if ("/payee/" in u13 or "provider" in t13) \
-                    and "provider reference module" not in t13:
-                lift -= 0.03
+            # v22: the -0.03 title/URL demotion for payee/provider
+            # pages that stood here is DELETED, with the v20.2
+            # module exemption it needed: no title-word demotions
+            # remain anywhere in the ranking (consult design).
             if lift:
                 h["_fused"] = h.get("_fused", 0) + lift
                 # Debug: the total v11/v13 boost-loop lift rides out on
@@ -2505,8 +3307,11 @@ def search(query, corpus=None, n=6, extra_terms=None):
                    "asset", "assets", "pay", "payment", "rate", "dollar", "price",
                    "fee", "fees", "premium", "deductible", "copay"))
     dollar_pat = re.compile(r"\$[\d,]+")
-    # Provider bias fix: if query has no provider terms, penalize provider-titled docs
-    has_provider_term = any(t in ("provider", "providers") for t in terms)
+    # v22: the provider title penalty that used to be computed
+    # here is DELETED (consult design: authority is metadata, not
+    # a title substring; the -15 demotion buried PROMOD00051 on
+    # the 2026-10-14 eyeglasses ask and v20.2 only exempted the
+    # modules). No title-word demotions remain in this function.
     # v18 (F15): the SFC spouse boost applies only when the
     # QUERY itself involves a spouse; through v17.3 chunk
     # content alone armed it for any query.
@@ -2515,10 +3320,6 @@ def search(query, corpus=None, n=6, extra_terms=None):
     for d in corpus:
         title = d["title"].lower()
         title_hits = sum(1 for t in terms if t in title)
-        # Penalize provider-facing pages for member queries
-        provider_penalty = 0
-        if not has_provider_term and "provider" in title:
-            provider_penalty = 15
         for ch in _doc_chunks(d):
             low = ch.lower()
             matched = sum(1 for t in terms if t in low)
@@ -2538,9 +3339,8 @@ def search(query, corpus=None, n=6, extra_terms=None):
             if q_spouse and has_spouse and has_sfc:
                 sfc_bonus = 50
             # score: phrase matches dominate, then term coverage, density, title
-            # provider_penalty demotes provider-facing pages for member queries
             score = (phrase_bonus + money_bonus + sfc_bonus + matched * 10 + density
-                     + title_hits * 3 - provider_penalty)
+                     + title_hits * 3)
             scored.append((score, d, ch))
     scored.sort(key=lambda x: -x[0])
     out, seen = [], set()
@@ -3193,7 +3993,14 @@ VERIFIED_FIGURES = [
             "tax credit up to $500."),
         "source": ("IRS ABLE guidance (age 46, 2026) and DFR Policy "
                    "Manual section 2615.10.35 (INvestABLE)"),
-        "figures": (20000.0, 100000.0, 500.0),
+        # v22 registry fix: the contribution-limit figures
+        # ($20,000 / $19,000) MOVED to the dated pair
+        # able_contribution_limit (+ _legacy) appended below:
+        # this entry's ANDed onset-vocabulary group kept the
+        # registry from ever engaging on a pure contribution
+        # question (the 2026-10-14 live v21 failure). The
+        # $100,000 SSI disregard and the $500 tax credit stay.
+        "figures": (100000.0, 500.0),
         # v18 (F16): the discrete stale-value watch list for
         # the generalized conflict scan below.
         "conflict_numbers": (
@@ -3423,10 +4230,9 @@ _V21_REGISTRY_META = {
                          "url": "text-resources-ussi"}}},
     "able_onset_age": {
         "valid_from": "2026-01-01", "valid_to": None,
-        "history": (
-            {"value": 19000.0, "valid_from": "2025-01-01",
-             "valid_to": "2025-12-31",
-             "note": "2025 ABLE annual contribution cap"},),
+        # v22 registry fix: the 2025 $19,000 history moved
+        # with the contribution figures to the dated pair
+        # able_contribution_limit (+ _legacy) below.
         "topic": {
             "phrases": (
                 ("able account contribution limit investable",
@@ -3599,6 +4405,95 @@ VERIFIED_FIGURES += [
                  "3006.00.00")),
             "doc_hint": {"title": "3006.00.00",
                          "url": "3000.pdf"}},
+    },
+]
+
+# v22 registry fix: the ABLE annual contribution limit joins
+# as a DATED PAIR (family "able_contribution_limit"), the
+# same WS2 pattern as the divisor pair. It used to live
+# inside able_onset_age (figures + a 2025 history row), whose
+# second trigger group demands onset vocabulary ("onset
+# age", "became disabled", ...): the groups are ANDed, so a
+# pure contribution question NEVER matched any registry entry
+# and the dated machinery never engaged (live v21 failure,
+# 2026-10-14: "What was the maximum able account
+# contribution for 2025?" answered "I don't know the 2025
+# figure" under verified_single with $19,000 admissible but
+# unreachable). A pair, not one entry + history, because
+# _registry_values admits an entry's base figures for every
+# date: only the family/date machinery keeps $20,000 out of
+# a 2025 question's allowed set. Both values are in the
+# verified record and in the corpus carriers (SSA POMS SI
+# 01130.740 prints the year table; the IRS newsroom page
+# states the 2025 sentence verbatim).
+_ABLE_CONTRIBUTION_GROUPS = [
+    {"tokens": {"able"},
+     "phrases": ("able account", "able program",
+                 "529a", "investable")},
+    {"tokens": {"contribution", "contributions", "contribute",
+                "contributing", "limit", "maximum", "annual"},
+     "phrases": ("contribution limit", "annual contribution",
+                 "maximum contribution", "contribution cap",
+                 "how much can i contribute",
+                 "how much can you contribute",
+                 "how much can be contributed")},
+]
+VERIFIED_FIGURES += [
+    {
+        "id": "able_contribution_limit",
+        "family": "able_contribution_limit",
+        "title": ("ABLE account annual contribution limit "
+                  "($20,000 for 2026)"),
+        "groups": _ABLE_CONTRIBUTION_GROUPS,
+        "statement": (
+            "The annual contribution limit for an ABLE "
+            "account is $20,000 for 2026. For 2025 the limit "
+            "was $19,000. (The first $100,000 in the account "
+            "is separately disregarded for SSI; that is a "
+            "balance disregard, not the contribution limit.)"),
+        "source": ("SSA POMS SI 01130.740 (annual "
+                   "contribution limit by calendar year: 2025 "
+                   "$19,000 / 2026 $20,000); IRS newsroom "
+                   "('The contribution limit for 2025 is "
+                   "$19,000')"),
+        "figures": (20000.0,),
+        "valid_from": "2026-01-01", "valid_to": None,
+        "topic": {
+            "phrases": (
+                ("able account annual contribution limit "
+                 "by calendar year", "20,000"),
+                ("able accounts annual contribution limit",
+                 "able")),
+            "doc_hint": {"title": "01130.740",
+                         "url": "0501130740"}},
+    },
+    {
+        "id": "able_contribution_limit_legacy",
+        "family": "able_contribution_limit",
+        "title": ("ABLE account annual contribution limit "
+                  "($19,000 for 2025)"),
+        "groups": _ABLE_CONTRIBUTION_GROUPS,
+        "statement": (
+            "For 2025, the annual contribution limit for an "
+            "ABLE account was $19,000. The limit rose to "
+            "$20,000 for 2026."),
+        "source": ("SSA POMS SI 01130.740 (annual "
+                   "contribution limit by calendar year: 2025 "
+                   "$19,000 / 2026 $20,000); IRS newsroom "
+                   "('The contribution limit for 2025 is "
+                   "$19,000')"),
+        "figures": (19000.0,),
+        "valid_from": "2025-01-01", "valid_to": "2025-12-31",
+        "topic": {
+            "phrases": (
+                ("able savings account contribution limit "
+                 "2025", "19,000"),
+                ("able account annual contribution limit "
+                 "by calendar year", "19,000")),
+            "doc_hint": {
+                "title": "able savings account",
+                "url": ("newsroom/people-paying-"
+                        "disability-related")}},
     },
 ]
 
@@ -10078,6 +10973,11 @@ class Handler(BaseHTTPRequestHandler):
                         # v20.2: the boot-time consistency
                         # verdict (see _run_consistency_check).
                         "consistency": CONSISTENCY,
+                        # v22: retrieval engine state (requested
+                        # vs effective, FTS5 capability, the
+                        # generation being served, vector state
+                        # and the embedding-drift canary).
+                        "retrieval": _v2_health(),
                         # v16: seat health (item 1) and the
                         # branch-out budget state (item 7).
                         "seats": _seat_health_block(),

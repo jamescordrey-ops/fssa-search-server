@@ -1,0 +1,298 @@
+{
+ "version": "v22.1",
+ "pins": [
+  {
+   "id": "bridge-00",
+   "trigger_tokens": [
+    "burned",
+    "disaster",
+    "disasters",
+    "earthquake",
+    "fema",
+    "flood",
+    "flooding",
+    "hurricane",
+    "tornado"
+   ],
+   "trigger_texts": [],
+   "require_tokens": [],
+   "require_texts": [],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "disaster assistance payments excluded",
+      "pin_term": null
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "converted from the v21 _TOPIC_BRIDGES table (deterministic topic bridge for a chronic retrieval gap)",
+   "case_id": null,
+   "source": "_TOPIC_BRIDGES"
+  },
+  {
+   "id": "bridge-01",
+   "trigger_tokens": [
+    "backpay"
+   ],
+   "trigger_texts": [
+    "back pay",
+    "lump sum"
+   ],
+   "require_tokens": [],
+   "require_texts": [],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "non-recurring lump sum payments excluded resources",
+      "pin_term": null
+     },
+     {
+      "phrase": "retroactive SSI Social Security benefits nine months",
+      "pin_term": "retroactive SSI or Social Security benefits"
+     },
+     {
+      "phrase": "nonrecurring lump-sum payment excluded income",
+      "pin_term": "nonrecurring lump-sum payment"
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "converted from the v21 _TOPIC_BRIDGES table (deterministic topic bridge for a chronic retrieval gap)",
+   "case_id": null,
+   "source": "_TOPIC_BRIDGES"
+  },
+  {
+   "id": "bridge-02",
+   "trigger_tokens": [
+    "automobile",
+    "car",
+    "truck",
+    "van",
+    "vehicle"
+   ],
+   "trigger_texts": [],
+   "require_tokens": [],
+   "require_texts": [],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "exempt vehicles countable resources",
+      "pin_term": null
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "converted from the v21 _TOPIC_BRIDGES table (deterministic topic bridge for a chronic retrieval gap)",
+   "case_id": null,
+   "source": "_TOPIC_BRIDGES"
+  },
+  {
+   "id": "bridge-03",
+   "trigger_tokens": [
+    "husband",
+    "spouse",
+    "spouses",
+    "wife"
+   ],
+   "trigger_texts": [
+    "structured family caregiving"
+   ],
+   "require_tokens": [],
+   "require_texts": [],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "spousal impoverishment income in the name of the spouse",
+      "pin_term": null
+     },
+     {
+      "phrase": "community spouse income not counted eligibility",
+      "pin_term": null
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "converted from the v21 _TOPIC_BRIDGES table (deterministic topic bridge for a chronic retrieval gap)",
+   "case_id": null,
+   "source": "_TOPIC_BRIDGES"
+  },
+  {
+   "id": "bridge-04",
+   "trigger_tokens": [
+    "reapplied"
+   ],
+   "trigger_texts": [
+    "retroactive"
+   ],
+   "require_tokens": [],
+   "require_texts": [],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "retroactive coverage eligible third month before application",
+      "pin_term": null
+     }
+    ],
+    "program_scope": "Medicaid"
+   },
+   "reason": "converted from the v21 _TOPIC_BRIDGES table (deterministic topic bridge for a chronic retrieval gap)",
+   "case_id": null,
+   "source": "_TOPIC_BRIDGES"
+  },
+  {
+   "id": "bridge-05",
+   "trigger_tokens": [
+    "caregiver",
+    "caregiving"
+   ],
+   "trigger_texts": [
+    "caregiver pay"
+   ],
+   "require_tokens": [
+    "hip"
+   ],
+   "require_texts": [
+    "household income",
+    "magi"
+   ],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "difficulty of care payments excluded income",
+      "pin_term": "difficulty of care"
+     },
+     {
+      "phrase": "medicaid waiver payments excludable caregiver",
+      "pin_term": "faq"
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "converted from the v21 _TOPIC_BRIDGES table (deterministic topic bridge for a chronic retrieval gap)",
+   "case_id": null,
+   "source": "_TOPIC_BRIDGES"
+  },
+  {
+   "id": "bridge-06",
+   "trigger_tokens": [],
+   "trigger_texts": [
+    "part b premium",
+    "medicare premium"
+   ],
+   "require_tokens": [],
+   "require_texts": [],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "medicare savings programs pay part b premiums",
+      "pin_term": "medicare savings"
+     },
+     {
+      "phrase": "qualified medicare beneficiary income limits",
+      "pin_term": "qualified medicare beneficiary"
+     }
+    ],
+    "program_scope": "Medicare"
+   },
+   "reason": "converted from the v21 _TOPIC_BRIDGES table (deterministic topic bridge for a chronic retrieval gap)",
+   "case_id": null,
+   "source": "_TOPIC_BRIDGES"
+  },
+  {
+   "id": "bridge-07",
+   "trigger_tokens": [
+    "able"
+   ],
+   "trigger_texts": [
+    "able account",
+    "stable account"
+   ],
+   "require_tokens": [],
+   "require_texts": [],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "able account resources excluded medicaid ssi",
+      "pin_term": "able"
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "converted from the v21 _TOPIC_BRIDGES table (deterministic topic bridge for a chronic retrieval gap)",
+   "case_id": null,
+   "source": "_TOPIC_BRIDGES"
+  },
+  {
+   "id": "bridge-08",
+   "trigger_tokens": [],
+   "trigger_texts": [
+    "over the income limit",
+    "over the limit",
+    "income cap",
+    "over the medicaid income limit",
+    "over the medicaid limit",
+    "is over the income limit",
+    "miller trust",
+    "qualified income trust"
+   ],
+   "require_tokens": [
+    "medicaid",
+    "waiver"
+   ],
+   "require_texts": [
+    "nursing home",
+    "long-term care",
+    "long term care"
+   ],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "qualified income trust medicaid eligibility",
+      "pin_term": "qualified income trust"
+     },
+     {
+      "phrase": "miller trust income limit medicaid",
+      "pin_term": "miller trust"
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "converted from the v21 _TOPIC_BRIDGES table (deterministic topic bridge for a chronic retrieval gap)",
+   "case_id": null,
+   "source": "_TOPIC_BRIDGES"
+  },
+  {
+   "id": "bridge-09",
+   "trigger_tokens": [
+    "eyeglass",
+    "eyeglasses",
+    "glasses",
+    "spectacles"
+   ],
+   "trigger_texts": [
+    "vision services",
+    "eye exam",
+    "eye exams"
+   ],
+   "require_tokens": [],
+   "require_texts": [],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "eyeglasses one pair frequency",
+      "pin_term": "one pair of eyeglasses"
+     },
+     {
+      "phrase": "vision services eyeglasses coverage",
+      "pin_term": "eyeglasses"
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "converted from the v21 _TOPIC_BRIDGES table (deterministic topic bridge for a chronic retrieval gap)",
+   "case_id": null,
+   "source": "_TOPIC_BRIDGES"
+  }
+ ]
+}

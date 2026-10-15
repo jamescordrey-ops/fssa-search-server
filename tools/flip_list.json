@@ -1,0 +1,18 @@
+{
+ "method": "hybrid_search, rewrite+rerank off, n=8; vector channels empty on the VM for both arms",
+ "cases": 22,
+ "legacy_pass": 20,
+ "v2_pass": 19,
+ "pass_to_pass": 19,
+ "fail_to_fail": 2,
+ "fail_to_pass": [],
+ "pass_to_fail": [
+  {
+   "question": "What is the substantial gainful activity limit for 2027, and what is the trial work period threshold?",
+   "corpus": "in",
+   "source": "retrieval_cases.jsonl",
+   "legacy_top1": "DFR: SNAP (Food Assistance)IN.gov",
+   "v2_top1": "Indiana Medicaid for Members: Understanding Terms"
+  }
+ ]
+}

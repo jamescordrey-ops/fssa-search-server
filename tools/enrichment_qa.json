@@ -1,0 +1,32 @@
+{
+ "rows": 6095,
+ "fleet_rows": 1400,
+ "template_rows": 4695,
+ "total_questions": 27987,
+ "figure_failures": [],
+ "figure_failure_count": 0,
+ "question_failures": [],
+ "question_failure_count": 0,
+ "alias_failures": [],
+ "alias_failure_count": 0,
+ "judgment_sample_sections": 88,
+ "judgment_sample_file": "enrichment_judgment_sample.jsonl",
+ "judgment": {
+  "grader": "build agent (parent of the fleet), topical-answerability criterion",
+  "sample_sections_graded": 80,
+  "questions_graded": 782,
+  "failures": 65,
+  "failure_rate_all_questions": 0.0831,
+  "failure_classes": {
+   "template-topic-is-trailing-date": 65,
+   "fleet-question-off-topic": 0
+  },
+  "notes": [
+   "Graded in two passes: the full 50-section wave-1 sample (499 questions) and 30 wave-2 sections drawn from the regenerated sample (283 questions). 8 rows of the final 88-row sample file were not judgment-graded.",
+   "All 65 failures are ONE class in the deterministic template layer: POMS titles ending in an effective date made the date the whole topic ('What are the rules for 03/25/2025?'), affecting 232 sections corpus-wide. Fixed in topic_of (trailing date stripped), deterministic pass re-run idempotently, post-fix corpus-wide count of the pattern: 0, and the wave-2 sample (graded after the fix) contains none.",
+   "Fleet-written questions: 0 off-topic in 782 graded questions across both waves. Several fleet questions embed figures written against 1,400 chars of section text while grading excerpts show 700, so embedded figures were graded for topicality only, not re-verified digit by digit.",
+   "Template questions with full manual titles as topics are awkward but topical; counted as passes."
+  ],
+  "sample_file": "enrichment_judgment_sample.jsonl"
+ }
+}

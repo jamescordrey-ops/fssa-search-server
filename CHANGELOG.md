@@ -5,6 +5,51 @@ each version are in `docs/`. Corpus updates are manual: new documents
 are collected, verified against their sources, and merged alongside a
 version bump rather than synced automatically.
 
+## v22 — 2026-10-14
+
+Retrieval rebuilt in-process around corpus enrichment (the
+consult design): a versioned corpus generation with a section
+layer, weighted FTS5 search, registry pins resolved by document
+id, declarative pins, vocabulary-driven typo expansion, and a
+synthetic-question channel — behind a RETRIEVAL=v2 flag with the
+v21 path intact as the fail-soft. No external engine; nothing
+was downloaded. Deployed the same day; see docs/STATUS-v22.md
+for the full build + deploy record, including the canary
+finding below.
+
+- Corpus: immutable generation g0000 (5,241 docs / 73,454
+  replica chunks / 6,095 sections) in a SQLite store (docs,
+  chunks, sections, enrichment, FTS5 indexes with column
+  weights), content-hash chunk ids, jurisdiction from content,
+  registry verbatim-quote lint at build. At deploy the vector
+  layer was finalized where the embeddings live: the recorded
+  -440 delta reconciled exactly as measured (4,714 docs matched,
+  393 vector-canonical, 134 embedded fresh, 1 orphan URL
+  dropped) — 74,135 chunks, each with exactly one vector.
+- Enrichment: every section carries substring-validated
+  figures, aliases/acronyms both directions, scope tags, and
+  template questions; 1,400 sections (23%) also carry
+  fleet-written natural questions (27,987 total), QA'd with
+  zero deterministic failures. Enrichment is retrieval-keys
+  only, never served or cited.
+- Retrieval v2: channels T (weighted BM25F) / V1 (chunk
+  vectors) / V2 (synthetic-question vectors) / R (registry by
+  doc id) / X (exact + rescue), weighted RRF fusion from a
+  versioned profile, section aggregation, declarative
+  pins.json. All title-word demotions deleted. Registry fix
+  shipped in this version: the ABLE contribution limit is its
+  own dated entry pair with contribution-vocabulary triggers
+  (it previously sat inside the onset-age entry, whose
+  triggers required onset vocabulary).
+- Known state at ship: the boot embedding-drift canary
+  measures the stored vectors as not bit-reproducible by the
+  current embedder build (cosine 0.933 vs the 0.999 gate), so
+  V1/V2 disable themselves by design and v2 serves on its
+  text channels until the corpus is re-embedded under the
+  current digest. /health's legacy consistency field is
+  unchanged (warn-only, -440) by design; generation exactness
+  is asserted by the finalize step.
+
 ## v21 — 2026-10-14
 
 Retrieval accuracy, an effective-dated figures registry, a staged

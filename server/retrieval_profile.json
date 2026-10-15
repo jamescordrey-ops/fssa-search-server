@@ -1,0 +1,18 @@
+{
+  "version": "v22.1",
+  "rrf_k": 60,
+  "channel_weights": {"T": 1.0, "V1": 1.0, "V2": 1.1, "R": 1.2, "X": 1.2},
+  "channel_depths": {"T_sections": 60, "V1_chunks": 60, "V2_questions": 60,
+                     "R_sections": 2, "X_sections": 10},
+  "fts_weights": {"chunk": [5.0, 3.0, 1.0],
+                  "section": [5.0, 3.0, 1.0, 2.0, 3.0]},
+  "agreement_bonus": 0.004,
+  "section_aggregation": {"second_chunk_factor": 0.3},
+  "priors": {"authority_per_tier_above_2": 0.05,
+             "jurisdiction_match": 1.05,
+             "other_state_when_indiana_scoped": 0.8,
+             "frequency_intent_with_frequency_figure": 1.1,
+             "figure_intent_with_figures": 1.05},
+  "windows": {"excerpt_chars": 2000, "neighbours": 1},
+  "notes": "Starting weights per the v22 consult design (weighted RRF, k=60). Tuning is a reporting exercise against the flip list, not a gate; weights live here, not in code, so a profile change never needs a server rebuild."
+}

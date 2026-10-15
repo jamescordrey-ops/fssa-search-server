@@ -1,0 +1,2970 @@
+{
+ "units_tested": 54,
+ "units_by_source": {
+  "registry": 8,
+  "implicated": 46,
+  "sample": 0
+ },
+ "phrasings_total": 224,
+ "phrasings_per_unit": 4.15,
+ "per_generator": {
+  "G1": {
+   "run": 136,
+   "fail": 4
+  },
+  "G2-typo": {
+   "run": 54,
+   "fail": 2
+  },
+  "G4": {
+   "run": 34,
+   "fail": 5
+  }
+ },
+ "classes": {
+  "pass": 49,
+  "vocabulary_gap": 5
+ },
+ "vector_side": "NOT exercised (no embeddings file on the VM)",
+ "g3": "off (post-deploy step)",
+ "top_vocabulary_gaps": [
+  {
+   "unit": "DFR: SNAP Monthly Income Limits and Maximum Allotment (FY2027)",
+   "lay_question": "What is the substantial gainful activity limit for 2027, and what is the trial work period threshold?",
+   "corpus_terms": [
+    "subtracting",
+    "allotment",
+    "deductions",
+    "allowable",
+    "gross"
+   ]
+  },
+  {
+   "unit": "Medicaid and CHIP Eligibility & Enrollment Webinars | Medicaid",
+   "lay_question": "What is MAGI and how is it used to decide Medicaid eligibility?",
+   "corpus_terms": [
+    "exchanges",
+    "scenarios",
+    "hosted",
+    "renewals",
+    "seniors"
+   ]
+  },
+  {
+   "unit": "Minnesota Spousal Impoverishment | Medicaid",
+   "lay_question": "My wife and I have $190,000 in countable savings. I need nursing home care in Indiana and she will stay home. How much can she keep as the community spouse resource allowance?",
+   "corpus_terms": [
+    "impoverishment",
+    "spousal",
+    "withdrawn",
+    "incomplete",
+    "minnesota"
+   ]
+  },
+  {
+   "unit": "New Hampshire Medicaid Care Management Dental Services (NH-02) | Medicaid",
+   "lay_question": "How often are dental exams covered for adults under Indiana Medicaid?",
+   "corpus_terms": [
+    "hampshire",
+    "dental",
+    "management",
+    "expiration",
+    "supporting"
+   ]
+  },
+  {
+   "unit": "Trial Work Period (TWP) | Choose Work! - Ticket to Work - Social Security",
+   "lay_question": "What is the substantial gainful activity limit for 2027, and what is the trial work period threshold?",
+   "corpus_terms": [
+    "subtracting",
+    "restart",
+    "differs",
+    "redbook",
+    "accumulate"
+   ]
+  }
+ ],
+ "fuzzy_rescue_notes": [],
+ "results": [
+  {
+   "unit": {
+    "unit_id": "registry:backpay_exclusion-0",
+    "source": "registry:backpay_exclusion",
+    "side": "federal",
+    "doc_title": "SSI Resources | Supplemental Security Income (SSI) | SSA",
+    "doc_url": "https://www.ssa.gov/ssi/text-resources-ussi.htm",
+    "program": "SSI/SSDI",
+    "key_terms": [
+     "evaluted",
+     "fsas",
+     "wedding",
+     "noncitizen",
+     "idas"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the evaluted fsas wedding noncitizen idas limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "What are the rules for evaluted fsas wedding noncitizen idas?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "evaluted fsas wedding noncitizen idas",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "evalted fsas wedding noncitizen idas",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "registry:able_onset_age-1",
+    "source": "registry:able_onset_age",
+    "side": "in",
+    "doc_title": "DDARS: Community and Home Options to Institutional Care for the Elderly and DisabledIN.gov",
+    "doc_url": "https://www.in.gov/fssa/ddars/bba/community-and-home-options-to-institutional-care-for-the-elderly-and-disabled",
+    "program": "General",
+    "key_terms": [
+     "serviceshomemakerrespiteattendant",
+     "nursingcase",
+     "managementhome",
+     "aidespecialized",
+     "equipmentenvironmental"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the serviceshomemakerrespiteattendant nursingcase managementhome limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for serviceshomemakerrespiteattendant nursingcase managementhome?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "serviceshomemakerrespiteattendant nursingcase managementhome aidespecialized equipmentenvironmental",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "serviceshomemakerespiteattendant nursingcase managementhome aidespecialized equipmentenvironmental",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "registry:snap_resource_limit_in-2",
+    "source": "registry:snap_resource_limit_in",
+    "side": "in",
+    "doc_title": "DFR: SNAP (Food Assistance)IN.gov",
+    "doc_url": "https://www.in.gov/fssa/dfr/snap-food-assistance/",
+    "program": "General",
+    "key_terms": [
+     "boarders",
+     "factored",
+     "aliens",
+     "convicted",
+     "mechanical"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the boarders factored aliens convicted mechanical limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for boarders factored aliens convicted mechanical?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "boarders factored aliens convicted mechanical",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "boarers factored aliens convicted mechanical",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is the resource limit for SNAP in Indiana?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "registry:csra-3",
+    "source": "registry:csra",
+    "side": "in",
+    "doc_title": "DFR Policy Manual Ch 3000: Eligibility Standards",
+    "doc_url": "https://secure.in.gov/fssa/dfr/files/3000.pdf",
+    "program": "General",
+    "key_terms": [
+     "3000.00.00",
+     "contents",
+     "elderly",
+     "tanf",
+     "gross",
+     "chapter"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for contents elderly tanf gross chapter?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "3000.00.00 contents elderly tanf gross chapter",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "3000.00.00 contnts elderly tanf gross chapter",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "registry:asset_limit_2000-4",
+    "source": "registry:asset_limit_2000",
+    "side": "in",
+    "doc_title": "FSSA: FSSA Mission and Vision IN.gov",
+    "doc_url": "https://www.in.gov/fssa/about-fssa/fssa-mission-vision",
+    "program": "General",
+    "key_terms": [
+     "visionwe",
+     "missionwe",
+     "steadfast",
+     "thoughtfully",
+     "reclaim"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for visionwe missionwe steadfast thoughtfully reclaim?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "General"
+    },
+    {
+     "q": "visionwe missionwe steadfast thoughtfully reclaim",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "General"
+    },
+    {
+     "q": "visinwe missionwe steadfast thoughtfully reclaim",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "registry:waiver_income_cap-5",
+    "source": "registry:waiver_income_cap",
+    "side": "in",
+    "doc_title": "FSSA: HomeIN.gov",
+    "doc_url": "https://www.in.gov/fssa/",
+    "program": "General",
+    "key_terms": [
+     "servicesimpactvocational",
+     "servicessee",
+     "newsroom",
+     "shouldn",
+     "complicated"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for servicesimpactvocational servicessee newsroom shouldn compli?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "General"
+    },
+    {
+     "q": "servicesimpactvocational servicessee newsroom shouldn complicated",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "General"
+    },
+    {
+     "q": "servicesimpatvocational servicessee newsroom shouldn complicated",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "registry:ssa_2027_figures-6",
+    "source": "registry:ssa_2027_figures",
+    "side": "in",
+    "doc_title": "DFR: SNAP Monthly Income Limits and Maximum Allotment (FY2027)",
+    "doc_url": "https://www.in.gov/fssa/dfr/snap-food-assistance/income",
+    "program": "General",
+    "key_terms": [
+     "subtracting",
+     "allotment",
+     "deductions",
+     "allowable",
+     "gross"
+    ]
+   },
+   "class": "vocabulary_gap",
+   "phrasings": [
+    {
+     "q": "What is the subtracting allotment deductions allowable gross limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for subtracting allotment deductions allowable gross?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "subtracting allotment deductions allowable gross",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "subtrcting allotment deductions allowable gross",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is the substantial gainful activity limit for 2027, and what is the trial work period threshold?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": null,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "registry:difficulty_of_care-7",
+    "source": "registry:difficulty_of_care",
+    "side": "federal",
+    "doc_title": "Certain Medicaid waiver payments may be excludable from income | Internal Revenue Service",
+    "doc_url": "https://www.irs.gov/individuals/certain-medicaid-waiver-payments-may-be-excludable-from-income",
+    "program": "MAGI",
+    "key_terms": [
+     "abatement",
+     "nonemployee",
+     "sharefacebooktwitterlinkedinprint",
+     "stromme",
+     "actc"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the abatement nonemployee sharefacebooktwitterlinkedinprint stro limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "MAGI"
+    },
+    {
+     "q": "What are the rules for abatement nonemployee sharefacebooktwitterlinkedinprint stro?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "MAGI"
+    },
+    {
+     "q": "abatement nonemployee sharefacebooktwitterlinkedinprint stromme actc",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "MAGI"
+    },
+    {
+     "q": "abatment nonemployee sharefacebooktwitterlinkedinprint stromme actc",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "MAGI"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-8",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "DFR: SNAP (Food Assistance)IN.gov",
+    "doc_url": "https://www.in.gov/fssa/dfr/snap-food-assistance/",
+    "program": "General",
+    "key_terms": [
+     "snapto",
+     "belongings",
+     "nutritious",
+     "surrounding",
+     "consistently"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the snapto belongings nutritious surrounding consistently limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for snapto belongings nutritious surrounding consistently?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "snapto belongings nutritious surrounding consistently",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "snato belongings nutritious surrounding consistently",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is the resource limit for SNAP in Indiana?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-9",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "DFR: SNAP (Food Assistance)IN.gov",
+    "doc_url": "https://www.in.gov/fssa/dfr/snap-food-assistance/",
+    "program": "General",
+    "key_terms": [
+     "snapthe",
+     "sectionchange",
+     "restrictionstatussection",
+     "obbb",
+     "applyindividuals"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for snapthe sectionchange restrictionstatussection obbb applyind?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "snapthe sectionchange restrictionstatussection obbb applyindividuals",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "snathe sectionchange restrictionstatussection obbb applyindividuals",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is the resource limit for SNAP in Indiana?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-10",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "FSSA: Resource GuideIN.gov",
+    "doc_url": "https://www.in.gov/fssa/resource-guide/",
+    "program": "General",
+    "key_terms": [
+     "opportunitiesworkplace",
+     "traininginstruction",
+     "advocacymore",
+     "indianacareerconnect",
+     "comto"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the opportunitiesworkplace traininginstruction advocacymore indi limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for opportunitiesworkplace traininginstruction advocacymore indi?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "opportunitiesworkplace traininginstruction advocacymore indianacareerconnect comto",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "opportunitisworkplace traininginstruction advocacymore indianacareerconnect comto",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is the asset limit for Medicaid in Indiana?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-11",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "FSSA: Resource GuideIN.gov",
+    "doc_url": "https://www.in.gov/fssa/resource-guide/",
+    "program": "General",
+    "key_terms": [
+     "homeownership",
+     "saves",
+     "ihcda",
+     "programsthe",
+     "programindiana"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the homeownership saves ihcda programsthe programindiana limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for homeownership saves ihcda programsthe programindiana?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "homeownership saves ihcda programsthe programindiana",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "homeowership saves ihcda programsthe programindiana",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is the asset limit for Medicaid in Indiana?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-12",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "Health and Wellness Waiver Application IN.0210.R07.05 (Dec 2025)",
+    "doc_url": "https://www.in.gov/dA/503994565e/H-and-W-WaiverDEC2025.PDF?language_id=1",
+    "program": "HCBS",
+    "key_terms": [
+     "lris",
+     "effectuate",
+     "waitlist",
+     "aggregate",
+     "relatives"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for lris effectuate waitlist aggregate relatives?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "HCBS"
+    },
+    {
+     "q": "lris effectuate waitlist aggregate relatives",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "HCBS"
+    },
+    {
+     "q": "lris effecuate waitlist aggregate relatives",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "HCBS"
+    },
+    {
+     "q": "What is structured family caregiving and who qualifies?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-13",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "Health and Wellness Waiver Application IN.0210.R07.05 (Dec 2025)",
+    "doc_url": "https://www.in.gov/dA/503994565e/H-and-W-WaiverDEC2025.PDF?language_id=1",
+    "program": "HCBS",
+    "key_terms": [
+     "pdhcs",
+     "restructure",
+     "lris",
+     "prompts",
+     "miscellaneous"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the pdhcs restructure lris prompts miscellaneous limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "HCBS"
+    },
+    {
+     "q": "What are the rules for pdhcs restructure lris prompts miscellaneous?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "pdhcs restructure lris prompts miscellaneous",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "HCBS"
+    },
+    {
+     "q": "pdcs restructure lris prompts miscellaneous",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "HCBS"
+    },
+    {
+     "q": "What is structured family caregiving and who qualifies?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-14",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "H&W Waiver Provider Manual (DDARS, v12.2)",
+    "doc_url": "https://www.in.gov/fssa/ddars/bds/medicaid-hcbs-waivers",
+    "program": "General",
+    "key_terms": [
+     "mortalities",
+     "violates",
+     "reverification",
+     "initiates",
+     "substantiated"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "How often mortalities violates reverification initiates substantiated?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": null,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for mortalities violates reverification initiates substantiated?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "mortalities violates reverification initiates substantiated",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": null,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "mortaities violates reverification initiates substantiated",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": null,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is sturctured family caregiving and who qualifies?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 2,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-15",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "H&W Waiver Provider Manual (DDARS, v12.2)",
+    "doc_url": "https://www.in.gov/fssa/ddars/bds/medicaid-hcbs-waivers",
+    "program": "General",
+    "key_terms": [
+     "decertification",
+     "aggrieved",
+     "adversely",
+     "demonstrating",
+     "petition"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "How often decertification aggrieved adversely demonstrating petition?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": null,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for decertification aggrieved adversely demonstrating petition?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "decertification aggrieved adversely demonstrating petition",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": null,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "decertiication aggrieved adversely demonstrating petition",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": null,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is sturctured family caregiving and who qualifies?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 2,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-16",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "DFR: SNAP (Food Assistance)",
+    "doc_url": "https://www.in.gov/fssa/dfr/snap-food-assistance/about-snap",
+    "program": "General",
+    "key_terms": [
+     "belongings",
+     "nutritious",
+     "surrounding",
+     "consistently",
+     "residency"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the belongings nutritious surrounding consistently residency limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for belongings nutritious surrounding consistently residency?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "belongings nutritious surrounding consistently residency",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "belonings nutritious surrounding consistently residency",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is the resource limit for SNAP in Indiana?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 6,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-17",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "DFR: SNAP (Food Assistance)",
+    "doc_url": "https://www.in.gov/fssa/dfr/snap-food-assistance/about-snap",
+    "program": "General",
+    "key_terms": [
+     "obbb",
+     "baskets",
+     "thrifty",
+     "trump",
+     "modifies"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for obbb baskets thrifty trump modifies?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "obbb baskets thrifty trump modifies",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "obbb basets thrifty trump modifies",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is the resource limit for SNAP in Indiana?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 6,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-18",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "Indiana Long Term Care Insurance Program: Spousal Impoverishment Protection Law",
+    "doc_url": "https://www.in.gov/iltcp/medicaid/spousal-impoverishment-protection-law",
+    "program": "Medicaid",
+    "key_terms": [
+     "impoverishment",
+     "institutionalization",
+     "spousal",
+     "snapshot",
+     "bringing"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the impoverishment institutionalization spousal snapshot bringin limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "What are the rules for impoverishment institutionalization spousal snapshot bringin?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "impoverishment institutionalization spousal snapshot bringing",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "impovershment institutionalization spousal snapshot bringing",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "My wife and I have $190,000 in countable savings. I need nursing home care in Indiana and she will stay home. How much can she keep as the community spouse resource allowance?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-19",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "Indiana Long Term Care Insurance Program: Spousal Impoverishment Protection Law",
+    "doc_url": "https://www.in.gov/iltcp/medicaid/spousal-impoverishment-protection-law",
+    "program": "Medicaid",
+    "key_terms": [
+     "impov",
+     "spousal",
+     "brochure",
+     "contribute",
+     "liability"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the impov spousal brochure contribute liability limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "What are the rules for impov spousal brochure contribute liability?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "impov spousal brochure contribute liability",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "imov spousal brochure contribute liability",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "My wife and I have $190,000 in countable savings. I need nursing home care in Indiana and she will stay home. How much can she keep as the community spouse resource allowance?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-20",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "DFR Policy Manual Ch 2600: Resources",
+    "doc_url": "https://secure.in.gov/fssa/dfr/files/2600.pdf",
+    "program": "General",
+    "key_terms": [
+     "2600.00.00",
+     "insignificant",
+     "vehicles",
+     "principles",
+     "contents",
+     "availability"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for insignificant vehicles principles contents availability?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "2600.00.00 insignificant vehicles principles contents availability",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "2600.00.00 insignficant vehicles principles contents availability",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "I got a $5,000 backpay check from Social Security. Does it count against my Medicaid?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 5,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-21",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "DFR Policy Manual Ch 2600: Resources",
+    "doc_url": "https://secure.in.gov/fssa/dfr/files/2600.pdf",
+    "program": "General",
+    "key_terms": [
+     "2605.20.05",
+     "mineral",
+     "remainder",
+     "valuations",
+     "conversion",
+     "tables"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for mineral remainder valuations conversion tables?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "2605.20.05 mineral remainder valuations conversion tables",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "2605.20.05 minral remainder valuations conversion tables",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "I got a $5,000 backpay check from Social Security. Does it count against my Medicaid?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 5,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-22",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "IHCPPM 2615.75.15: Certain Trusts Receiving Special Consideration (Miller Trust / QIT, Pooled Trusts, Special Needs Trusts)",
+    "doc_url": "https://in.gov/dA/2ba8891981/2615.75.15CERTAIN-TRUSTS-RECEIVING-SPECIAL-CONSIDERATION.pdf?language_id=1",
+    "program": "General",
+    "key_terms": [
+     "2615.75.15",
+     "conferring",
+     "pooled",
+     "specifying",
+     "trusts",
+     "preceding"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for conferring pooled specifying trusts preceding?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "2615.75.15 conferring pooled specifying trusts preceding",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "2615.75.15 confering pooled specifying trusts preceding",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is a qualified income trust and when does an Indiana Medicaid applicant need one?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-23",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "IHCPPM 2615.75.15: Certain Trusts Receiving Special Consideration (Miller Trust / QIT, Pooled Trusts, Special Needs Trusts)",
+    "doc_url": "https://in.gov/dA/2ba8891981/2615.75.15CERTAIN-TRUSTS-RECEIVING-SPECIAL-CONSIDERATION.pdf?language_id=1",
+    "program": "General",
+    "key_terms": [
+     "2615.75.15",
+     "ihcppm",
+     "incapacitated",
+     "accumulated",
+     "trusts",
+     "specifies"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for ihcppm incapacitated accumulated trusts specifies?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "2615.75.15 ihcppm incapacitated accumulated trusts specifies",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "2615.75.15 ihcpm incapacitated accumulated trusts specifies",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is a qualified income trust and when does an Indiana Medicaid applicant need one?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-24",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "IHCPPM 3006.00.00: Average Monthly Cost of Private Nursing Facility Care (Transfer Penalty Divisor)",
+    "doc_url": "https://in.gov/fssa/ompp/files/Medicaid_PM_3000.pdf#3006.00.00",
+    "program": "General",
+    "key_terms": [
+     "3006.00.00",
+     "legacy",
+     "computing",
+     "penalties",
+     "explained",
+     "penalty"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the legacy computing penalties explained penalty limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for legacy computing penalties explained penalty?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "General"
+    },
+    {
+     "q": "3006.00.00 legacy computing penalties explained penalty",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "General"
+    },
+    {
+     "q": "3006.00.00 legcy computing penalties explained penalty",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What is Indiana's Medicaid transfer penalty divisor?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-25",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "IHCPPM 3010.20.10 and 3455.15.10.10: Spousal Impoverishment Standards and Excess Shelter Allowance",
+    "doc_url": "https://in.gov/fssa/ompp/files/Medicaid_PM_3000.pdf#3010.20.10",
+    "program": "Medicaid",
+    "key_terms": [
+     "3010.20.10",
+     "medworks",
+     "extracted",
+     "footnote",
+     "carries",
+     "marker"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the medworks extracted footnote carries marker limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "What are the rules for medworks extracted footnote carries marker?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "3010.20.10 medworks extracted footnote carries marker",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "3010.20.10 medwrks extracted footnote carries marker",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "My wife and I have $190,000 in countable savings. I need nursing home care in Indiana and she will stay home. How much can she keep as the community spouse resource allowance?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 5,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-26",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "IHCPPM 3010.20.10 and 3455.15.10.10: Spousal Impoverishment Standards and Excess Shelter Allowance",
+    "doc_url": "https://in.gov/fssa/ompp/files/Medicaid_PM_3000.pdf#3010.20.10",
+    "program": "Medicaid",
+    "key_terms": [
+     "3010.20.10",
+     "madw",
+     "medworks",
+     "spousal",
+     "allocation",
+     "corrected"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the madw medworks spousal allocation corrected limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "What are the rules for madw medworks spousal allocation corrected?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "3010.20.10 madw medworks spousal allocation corrected",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "3010.20.10 madw medwrks spousal allocation corrected",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "My wife and I have $190,000 in countable savings. I need nursing home care in Indiana and she will stay home. How much can she keep as the community spouse resource allowance?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 5,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-27",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "IHCP Provider Reference Module: Vision Services (PROMOD00051)",
+    "doc_url": "https://www.in.gov/medicaid/providers/files/vision-services.pdf",
+    "program": "General",
+    "key_terms": [
+     "fluocinolone",
+     "acetonide",
+     "intravitreal",
+     "yutiq",
+     "retisert"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for fluocinolone acetonide intravitreal yutiq retisert?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "fluocinolone acetonide intravitreal yutiq retisert",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "fluociolone acetonide intravitreal yutiq retisert",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "Under Indiana Medicaid fee-for-service, how often are eyeglasses covered for adults?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-28",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "IHCP Provider Reference Module: Vision Services (PROMOD00051)",
+    "doc_url": "https://www.in.gov/medicaid/providers/files/vision-services.pdf",
+    "program": "General",
+    "key_terms": [
+     "opticians",
+     "optician",
+     "optometrists",
+     "examinations",
+     "dispensed"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for opticians optician optometrists examinations dispensed?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "opticians optician optometrists examinations dispensed",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "optiians optician optometrists examinations dispensed",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "Under Indiana Medicaid fee-for-service, how often are eyeglasses covered for adults?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-29",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "IHCP Provider Reference Module: Dental Services (PROMOD00022)",
+    "doc_url": "https://in.gov/medicaid/providers/files/modules/dental-services.pdf",
+    "program": "General",
+    "key_terms": [
+     "varnish",
+     "fluoride",
+     "topical",
+     "fqhc",
+     "terminology"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for varnish fluoride topical fqhc terminology?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "varnish fluoride topical fqhc terminology",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "varish fluoride topical fqhc terminology",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "How often are dental exams covered for adults under Indiana Medicaid?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-30",
+    "source": "implicated",
+    "side": "in",
+    "doc_title": "IHCP Provider Reference Module: Dental Services (PROMOD00022)",
+    "doc_url": "https://in.gov/medicaid/providers/files/modules/dental-services.pdf",
+    "program": "General",
+    "key_terms": [
+     "gabby",
+     "homepage",
+     "fqhc",
+     "inquiry",
+     "clinics"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for gabby homepage fqhc inquiry clinics?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 3,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "gabby homepage fqhc inquiry clinics",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 3,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "gaby homepage fqhc inquiry clinics",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "How often are dental exams covered for adults under Indiana Medicaid?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-31",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "CHIP Eligibility & Enrollment | Medicaid",
+    "doc_url": "https://www.medicaid.gov/chip/chip-eligibility-enrollment",
+    "program": "Medicaid",
+    "key_terms": [
+     "pregnancyeligibility",
+     "informationstates",
+     "populationsthere",
+     "andtargeted",
+     "fcep"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for pregnancyeligibility informationstates populationsthere andt?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "pregnancyeligibility informationstates populationsthere andtargeted fcep",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "pregnancyeigibility informationstates populationsthere andtargeted fcep",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "What is MAGI and how is it used to decide Medicaid eligibility?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-32",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "Medicaid and CHIP Eligibility Operations and Enrollment Snapshot | Medicaid",
+    "doc_url": "https://www.medicaid.gov/medicaid-and-chip-eligibility-operations-and-enrollment-snapshot",
+    "program": "Medicaid",
+    "key_terms": [
+     "snapshotsjune",
+     "sourcesaccess",
+     "datasince",
+     "datastates",
+     "dataperformance"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for snapshotsjune sourcesaccess datasince datastates dataperform?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "snapshotsjune sourcesaccess datasince datastates dataperformance",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "snapshtsjune sourcesaccess datasince datastates dataperformance",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-33",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "Spousal Impoverishment | Medicaid",
+    "doc_url": "https://www.medicaid.gov/medicaid/eligibility-policy/spousal-impoverishment",
+    "program": "Medicaid",
+    "key_terms": [
+     "servicessmd",
+     "standardspost",
+     "resourcesextension",
+     "incomethe",
+     "basedservices"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the servicessmd standardspost resourcesextension incomethe based limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": 1,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "What are the rules for servicessmd standardspost resourcesextension incomethe based?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": 1,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "servicessmd standardspost resourcesextension incomethe basedservices",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 1,
+     "chunk_rank": 1,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "serviessmd standardspost resourcesextension incomethe basedservices",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "My wife and I have $190,000 in countable savings. I need nursing home care in Indiana and she will stay home. How much can she keep as the community spouse resource allowance?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 5,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-34",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "Spousal Impoverishment | Medicaid",
+    "doc_url": "https://www.medicaid.gov/medicaid/eligibility-policy/spousal-impoverishment",
+    "program": "Medicaid",
+    "key_terms": [
+     "impoverishment",
+     "spousal",
+     "contributed",
+     "institutionalized",
+     "deducted"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the impoverishment spousal contributed institutionalized deducte limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "What are the rules for impoverishment spousal contributed institutionalized deducte?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "impoverishment spousal contributed institutionalized deducted",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "impovershment spousal contributed institutionalized deducted",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "My wife and I have $190,000 in countable savings. I need nursing home care in Indiana and she will stay home. How much can she keep as the community spouse resource allowance?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 5,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-35",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "Medicaid/CHIP Eligibility Verification Plans | Medicaid",
+    "doc_url": "https://www.medicaid.gov/medicaid/eligibility-policy/medicaid/chip-eligibility-verification-plans",
+    "program": "Medicaid",
+    "key_terms": [
+     "planrelated",
+     "documentsalabama",
+     "addendumconnecticut",
+     "addendumdistrict",
+     "addendumiowa"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for planrelated documentsalabama addendumconnecticut addendumdis?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "planrelated documentsalabama addendumconnecticut addendumdistrict addendumiowa",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "planrlated documentsalabama addendumconnecticut addendumdistrict addendumiowa",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-36",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "Medicaid and CHIP Eligibility & Enrollment Webinars | Medicaid",
+    "doc_url": "https://www.medicaid.gov/resources-for-states/medicaid-and-chip-eligibility-enrollment-webinars",
+    "program": "Medicaid",
+    "key_terms": [
+     "exchanges",
+     "scenarios",
+     "hosted",
+     "renewals",
+     "seniors"
+    ]
+   },
+   "class": "vocabulary_gap",
+   "phrasings": [
+    {
+     "q": "What are the rules for exchanges scenarios hosted renewals seniors?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "exchanges scenarios hosted renewals seniors",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "exchnges scenarios hosted renewals seniors",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "What is MAGI and how is it used to decide Medicaid eligibility?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": null,
+     "chunk_rank": null,
+     "winner_prog": "Medicaid"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-37",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "Minnesota Spousal Impoverishment | Medicaid",
+    "doc_url": "https://www.medicaid.gov/medicaid/section-1115-demo/demonstration-and-waiver-list/82206",
+    "program": "Medicaid",
+    "key_terms": [
+     "impoverishment",
+     "spousal",
+     "withdrawn",
+     "incomplete",
+     "minnesota"
+    ]
+   },
+   "class": "vocabulary_gap",
+   "phrasings": [
+    {
+     "q": "What are the rules for impoverishment spousal withdrawn incomplete minnesota?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "impoverishment spousal withdrawn incomplete minnesota",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 1,
+     "chunk_rank": 1,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "impovershment spousal withdrawn incomplete minnesota",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "My wife and I have $190,000 in countable savings. I need nursing home care in Indiana and she will stay home. How much can she keep as the community spouse resource allowance?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": null,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-38",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "New Hampshire Medicaid Care Management Dental Services (NH-02) | Medicaid",
+    "doc_url": "https://www.medicaid.gov/medicaid/section-1115-demo/demonstration-and-waiver-list/148711",
+    "program": "Medicaid",
+    "key_terms": [
+     "hampshire",
+     "dental",
+     "management",
+     "expiration",
+     "supporting"
+    ]
+   },
+   "class": "vocabulary_gap",
+   "phrasings": [
+    {
+     "q": "What are the rules for hampshire dental management expiration supporting?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "hampshire dental management expiration supporting",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": 0,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "hamphire dental management expiration supporting",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 3,
+     "chunk_rank": 3,
+     "winner_prog": "Medicaid"
+    },
+    {
+     "q": "How often are dental exams covered for adults under Indiana Medicaid?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": null,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-39",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "Trial Work Period (TWP) | Choose Work! - Ticket to Work - Social Security",
+    "doc_url": "https://choosework.ssa.gov/library/fact-sheet-trial-work-period-twp",
+    "program": "SSI/SSDI",
+    "key_terms": [
+     "subtracting",
+     "restart",
+     "differs",
+     "redbook",
+     "accumulate"
+    ]
+   },
+   "class": "vocabulary_gap",
+   "phrasings": [
+    {
+     "q": "What is the subtracting restart differs redbook accumulate limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "What are the rules for subtracting restart differs redbook accumulate?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "subtracting restart differs redbook accumulate",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "subtrcting restart differs redbook accumulate",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "What is the substantial gainful activity limit for 2027, and what is the trial work period threshold?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": null,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-40",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "SSA - POMS: SI 01130.676 - Federal Tax Refunds and Advance Tax Credits for SSI Resources - 12/07/2023",
+    "doc_url": "https://secure.ssa.gov/poms.nsf/lnx/0501130676",
+    "program": "SSI/SSDI",
+    "key_terms": [
+     "eitcs",
+     "ctcs",
+     "buyers",
+     "homebuyers",
+     "reinstates"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the eitcs ctcs buyers homebuyers reinstates limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "What are the rules for eitcs ctcs buyers homebuyers reinstates?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "eitcs ctcs buyers homebuyers reinstates",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "eics ctcs buyers homebuyers reinstates",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-41",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "INvestABLE Indiana | INvestABLE 101",
+    "doc_url": "https://savewithable.com/in/home/INvestABLE101.html",
+    "program": "General",
+    "key_terms": [
+     "ugift",
+     "investable",
+     "compound",
+     "advantages",
+     "deferred"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the ugift investable compound advantages deferred limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for ugift investable compound advantages deferred?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "ugift investable compound advantages deferred",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "ugft investable compound advantages deferred",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-42",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "INvestABLE Indiana | INvestABLE 101",
+    "doc_url": "https://savewithable.com/in/home/INvestABLE101.html",
+    "program": "General",
+    "key_terms": [
+     "severed",
+     "determinable",
+     "lasted",
+     "similarly",
+     "causes"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for severed determinable lasted similarly causes?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "severed determinable lasted similarly causes",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "sevred determinable lasted similarly causes",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-43",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "Plan Benefits | INvestABLE",
+    "doc_url": "https://savewithable.com/in/home/plan-benefits.html",
+    "program": "General",
+    "key_terms": [
+     "ugift",
+     "investable",
+     "compound",
+     "advantages",
+     "deferred"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the ugift investable compound advantages deferred limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for ugift investable compound advantages deferred?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "ugift investable compound advantages deferred",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "ugft investable compound advantages deferred",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-44",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "Plan Benefits | INvestABLE",
+    "doc_url": "https://savewithable.com/in/home/plan-benefits.html",
+    "program": "General",
+    "key_terms": [
+     "ugift",
+     "booklet",
+     "tablet",
+     "investments",
+     "recurring"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the ugift booklet tablet investments recurring limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for ugift booklet tablet investments recurring?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "ugift booklet tablet investments recurring",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "ugft booklet tablet investments recurring",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-45",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "Investment Options | INvestABLE",
+    "doc_url": "https://savewithable.com/in/home/investment-options.html",
+    "program": "General",
+    "key_terms": [
+     "investor",
+     "ugift",
+     "fdic",
+     "investable",
+     "preservation"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for investor ugift fdic investable preservation?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "investor ugift fdic investable preservation",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "invetor ugift fdic investable preservation",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-46",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "Forms | INvestABLE",
+    "doc_url": "https://savewithable.com/in/home/forms.html",
+    "program": "General",
+    "key_terms": [
+     "incoming",
+     "investable",
+     "rollover",
+     "withdrawals",
+     "indirect"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for incoming investable rollover withdrawals indirect?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "incoming investable rollover withdrawals indirect",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "incoing investable rollover withdrawals indirect",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-47",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "INvestABLE Indiana Plan Overview",
+    "doc_url": "https://cdn.unite529.com/jcdn/files/UABLE/pdfs/inplanoverview.pdf",
+    "program": "General",
+    "key_terms": [
+     "savewithable",
+     "withdrawals",
+     "branch",
+     "funeral",
+     "withdrawn"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the savewithable withdrawals branch funeral withdrawn limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for savewithable withdrawals branch funeral withdrawn?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "savewithable withdrawals branch funeral withdrawn",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "savewihable withdrawals branch funeral withdrawn",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-48",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "INvestABLE Indiana Plan Overview",
+    "doc_url": "https://cdn.unite529.com/jcdn/files/UABLE/pdfs/inplanoverview.pdf",
+    "program": "General",
+    "key_terms": [
+     "savewithable",
+     "adviser",
+     "investable",
+     "weighted",
+     "taxpayers"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for savewithable adviser investable weighted taxpayers?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "savewithable adviser investable weighted taxpayers",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "savewihable adviser investable weighted taxpayers",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-49",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "INvestABLE Indiana Program Description (Plan Disclosure Booklet)",
+    "doc_url": "https://cdn.unite529.com/jcdn/files/UABLE/pdfs/in-programdescription.pdf",
+    "program": "General",
+    "key_terms": [
+     "capitalized",
+     "inception",
+     "deleted",
+     "amends",
+     "entirety"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the capitalized inception deleted amends entirety limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for capitalized inception deleted amends entirety?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "capitalized inception deleted amends entirety",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "capitlized inception deleted amends entirety",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What was the ABLE account contribution limit in 2025?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 6,
+     "chunk_rank": null,
+     "winner_prog": "MAGI"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-50",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "INvestABLE Indiana Program Description (Plan Disclosure Booklet)",
+    "doc_url": "https://cdn.unite529.com/jcdn/files/UABLE/pdfs/in-programdescription.pdf",
+    "program": "General",
+    "key_terms": [
+     "fifththird",
+     "moderately",
+     "inception",
+     "portfolio",
+     "conservative"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for fifththird moderately inception portfolio conservative?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "fifththird moderately inception portfolio conservative",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "fifthhird moderately inception portfolio conservative",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What was the ABLE account contribution limit in 2025?",
+     "gen": "G4",
+     "kind": "lay",
+     "rank": 6,
+     "chunk_rank": null,
+     "winner_prog": "MAGI"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-51",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "INvestABLE Indiana Financial Features",
+    "doc_url": "https://cdn.unite529.com/jcdn/files/UABLE/pdfs/in-financialfeatures.pdf",
+    "program": "General",
+    "key_terms": [
+     "deleting",
+     "digits",
+     "boxes",
+     "debit",
+     "recurring"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the deleting digits boxes debit recurring limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "How often deleting digits boxes debit recurring?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for deleting digits boxes debit recurring?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for deleing digits boxes debit recurring?",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-52",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "INvestABLE Indiana Financial Features",
+    "doc_url": "https://cdn.unite529.com/jcdn/files/UABLE/pdfs/in-financialfeatures.pdf",
+    "program": "General",
+    "key_terms": [
+     "staple",
+     "recurring",
+     "specify",
+     "frequency",
+     "adjusted"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What is the staple recurring specify frequency adjusted limit?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    },
+    {
+     "q": "How often staple recurring specify frequency adjusted?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for staple recurring specify frequency adjusted?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "What are the rules for stale recurring specify frequency adjusted?",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 1,
+     "chunk_rank": null,
+     "winner_prog": "SSI/SSDI"
+    }
+   ]
+  },
+  {
+   "unit": {
+    "unit_id": "implicated-53",
+    "source": "implicated",
+    "side": "federal",
+    "doc_title": "Indiana ABLE Authority: INvestABLE Indiana",
+    "doc_url": "https://www.in.gov/tos/able",
+    "program": "General",
+    "key_terms": [
+     "lgip",
+     "trustindiana",
+     "depositories",
+     "unclaimed",
+     "submenu"
+    ]
+   },
+   "class": "pass",
+   "phrasings": [
+    {
+     "q": "What are the rules for lgip trustindiana depositories unclaimed submenu?",
+     "gen": "G1",
+     "kind": "neutral",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "lgip trustindiana depositories unclaimed submenu",
+     "gen": "G1",
+     "kind": "corpus",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    },
+    {
+     "q": "lgip trustidiana depositories unclaimed submenu",
+     "gen": "G2-typo",
+     "kind": "typo",
+     "rank": 0,
+     "chunk_rank": null,
+     "winner_prog": "General"
+    }
+   ]
+  }
+ ]
+}
