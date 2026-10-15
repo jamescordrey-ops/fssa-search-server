@@ -5,6 +5,43 @@ each version are in `docs/`. Corpus updates are manual: new documents
 are collected, verified against their sources, and merged alongside a
 version bump rather than synced automatically.
 
+## v22.3 — 2026-10-15
+
+The judge-panel reliability release: three fixes from the
+diagnosis of a correct answer that shipped as IDK on v22.2.
+Deployed as a file-only swap on generation g0002; see
+docs/STATUS-v22.3.md for the full record.
+
+- Claim deduplication: a draft sentence carried both as a
+  normalized extracted claim and as a raw-form citation
+  claim (markdown, [registry]/[n] markers) now merges into
+  ONE load-bearing claim that inherits the verdict, instead
+  of the raw copy sitting unjudged at not_addressed and
+  failing the round. Matching is conservative (identical
+  figure sets, >=85% content-token containment, a Jaccard
+  floor); when in doubt both claims are kept.
+- Registry claims judged first: the panel's claim queue
+  orders claims carrying the [registry] citation (or
+  figures matching the engaged registry entry's admitted
+  values) ahead of the rest, so a panel that degrades
+  mid-round has already covered the registry-anchored
+  claims. Judging itself and the two-family rule for the
+  full verified badge are unchanged. The figure check's
+  recognition of registry-admitted values as verified
+  quantities was audited end to end (present since v13)
+  and is now covered by offline checks.
+- Judge bench after the first full timeout: a judge-seat
+  candidate that consumes a full leg timeout (the 30s
+  judge discipline bound) is benched for the rest of the
+  ask, with the reason recorded, instead of being re-seated
+  in the next round. Budget-clamped sheds do not bench.
+- Offline checks: the existing suites stay green (64/64
+  and full pass); a new suite (tools/offline_checks_v223.py,
+  33 checks) covers the three fixes, including a replay of
+  the diagnosed failure shape that now resolves to 4
+  load-bearing claims, all judged, passing at
+  single-family level.
+
 ## v22.2 — 2026-10-15
 
 The mechanisms-trigger and corpus-repair release. Deployed

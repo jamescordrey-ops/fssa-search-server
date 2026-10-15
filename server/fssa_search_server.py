@@ -6077,6 +6077,18 @@ def _leg_timeout(base):
     return min(float(base), remaining)
 
 
+def _ask_judge_benched(job, model):
+    """v22.3 (fix 3): is this judge candidate benched for the
+    rest of the current ask after a full leg timeout (the
+    bench is recorded by _judge_seat_text, the only place
+    marks are written)? Reads clean for any other job and
+    outside an ask."""
+    try:
+        return (job, model) in _ask_ctx().judge_benched
+    except Exception:
+        return False
+
+
 def _seat_pick(job, skip=(), exclude_families=()):
     """The active (model, key slot) for a job: the first
     candidate not benched, not in skip, and on a key slot that
@@ -6109,7 +6121,8 @@ def _seat_pick(job, skip=(), exclude_families=()):
             with _SEAT_LOCK:
                 benched = _seat_state(job, pmodel)[
                     "benched_until"] > now
-            if not benched:
+            if not benched \
+                    and not _ask_judge_benched(job, pmodel):
                 idx = [m for m, _s in cands].index(pmodel)
                 return pmodel, pslot, idx > 0
         # planned seat unusable (key gone, benched, excluded):
@@ -6123,6 +6136,8 @@ def _seat_pick(job, skip=(), exclude_families=()):
                                      i)):
         model, slot = cands[idx]
         if model in skip or not _slot_has_key(slot):
+            continue
+        if _ask_judge_benched(job, model):
             continue
         if _model_family(model) in excl:
             continue
@@ -6200,6 +6215,8 @@ def _plan_panel():
                 if _seat_state(job, model)["benched_until"] \
                         > time.monotonic():
                     continue
+            if _ask_judge_benched(job, model):
+                continue
             med = _seat_median(job, model)
             score = med if med is not None \
                 else SEATS[job]["budget_median"] * 0.75
@@ -6286,11 +6303,21 @@ class _AskContext:
     __slots__ = ("cost", "events", "retr", "verdict_families",
                  "served_models", "panel_plan", "draft_family",
                  "lock", "unit_deadline", "retr_pools", "ask_id",
-                 "seat_skip_noted")
+                 "seat_skip_noted", "judge_benched")
 
     def __init__(self):
         self.cost = 0.0
         self.events = []
+        # v22.3 (fix 3): judge-seat candidates benched for the
+        # REST OF THE ASK after one full leg timeout, keyed
+        # (job, model) -> reason. The runtime seat-health rule
+        # needs two consecutive timeouts and cools down on a
+        # clock; inside one ask a single full 30s timeout is
+        # already the whole story (the 2026-10-15 CSRA ask
+        # burned 60.6s re-seating one dead judge candidate in
+        # consecutive rounds before the global rule benched
+        # it). Ask-scoped only: the next ask starts clean.
+        self.judge_benched = {}
         # v21: the ask's id (set by _events_reset per ask;
         # gap-log rows carry it so a queue candidate joins
         # back to its ask record), and the set of seat-skip
@@ -6509,6 +6536,8 @@ def _note_seat_skips(job, picked_model, tried):
                 return None  # attempted: its seat_fail speaks
             if not _slot_has_key(slot):
                 return f"no key configured (slot {slot})"
+            if _ask_judge_benched(job, model):
+                return "benched for this ask (full leg timeout)"
             with _SEAT_LOCK:
                 benched = _seat_state(job, model)[
                     "benched_until"] > now
@@ -6685,6 +6714,35 @@ def _judge_seat_text(job, system, user):
             # the ask record (see _note_seat_fail).
             _note_seat_fail(job, model, slot, lat, _timed_out,
                             f"{type(e).__name__}: {e}")
+            # v22.3 (fix 3): a FULL leg timeout benches this
+            # candidate for the rest of the ask. Full means
+            # the leg was granted (nearly) the whole judge
+            # discipline bound — _leg_timeout had not clamped
+            # it to a budget remainder — and the call consumed
+            # it. A budget-clamped shed does NOT bench: the
+            # seat never got its full bound, so the timeout
+            # indicts the budget, not the seat. The global
+            # two-consecutive-timeouts rule still applies
+            # across asks; this rule is stricter inside one
+            # ask, where re-seating a candidate that just ate
+            # a full 30s is how the 2026-10-15 CSRA ask lost
+            # 60.6s to one dead seat across two rounds.
+            if job.startswith("judge") and _timed_out \
+                    and _jt >= THIRD_JUDGE_TIMEOUT * 0.9 \
+                    and lat >= _jt * 0.9:
+                _reason = (
+                    f"full leg timeout ({lat:.1f}s at the "
+                    f"{THIRD_JUDGE_TIMEOUT}s judge bound); "
+                    f"benched for the rest of the ask")
+                _bctx = _ask_ctx()
+                with _bctx.lock:
+                    _bctx.judge_benched[(job, model)] = _reason
+                    _bctx.events.append({
+                        "kind": "seat_bench", "job": job,
+                        "model": model, "scope": "ask",
+                        "reason": _reason})
+                print(f"[seat] ASK-BENCH {job} {model}: "
+                      f"{_reason}", flush=True)
             tried.append(model)
             if len(tried) >= len(SEATS[job]["candidates"]):
                 _note_seat_skips(job, None, tried)  # v21 (WS4b)
@@ -8974,6 +9032,121 @@ def _norm_claim_text(text):
     return re.sub(r"\s+", " ", (text or "").strip().lower())[:300]
 
 
+# --- v22.3 (fix 1): raw-form duplicate claims -----------------------
+# The 2026-10-15 CSRA retest (ask 07d907a1fc52) shipped a fully
+# correct draft to IDK: the primary extractor restated the
+# draft's three figure bullets as normalized claims (all judged
+# supported), while _parse_citations ALSO carried the same three
+# bullets as extra claims in their raw form (bold labels, **
+# emphasis, [1][registry] markers, a trailing clause the
+# extractor dropped). _norm_claim_text equality could not see
+# them as the same claims, so the raw copies sat as separate
+# load-bearing claims, were never judged (every second-family
+# leg died or was shed), and their not_addressed finals failed
+# the round. The matcher below folds the two forms onto one
+# token/figure space and merges ONLY on a conservative rule:
+# identical figure multisets, the smaller side's content
+# tokens >= 85% contained in the larger, overall token
+# Jaccard >= 0.45, and at least 4 content tokens on the smaller
+# side. When in doubt both claims are kept: a false merge
+# (one verdict silently covering a distinct claim) is worse
+# than a duplicate.
+_CLAIM_FOLD = (
+    (" ", " "), (" ", " "), ("‑", "-"),
+    ("‘", "'"), ("’", "'"), ("“", '"'),
+    ("”", '"'), ("–", "-"), ("—", "-"),
+    ("½", " 1/2 "))
+_CLAIM_NUM_RX = re.compile(r"\d[\d,]*(?:\.\d+)?(?:\s*/\s*\d+)?")
+_CLAIM_WORD_RX = re.compile(r"[a-z0-9]+")
+_CLAIM_LABEL_RX = re.compile(
+    r"^([a-z][a-z0-9 /&'()-]{0,40}?):\s+")
+_CLAIM_STOP = frozenset(
+    "the a an of to in is are was were be been being and or "
+    "but if then so as at on for with by from that this it its "
+    "she he they we you your her his their our may can could "
+    "will would shall should do does did have has had per than "
+    "into over under about between who whom whose what when "
+    "where which while during before after up down out off "
+    "again further once here there all any both each few more "
+    "most other some such only own same too very just".split())
+
+
+def _claim_fold(text):
+    t = text or ""
+    for a, b in _CLAIM_FOLD:
+        t = t.replace(a, b)
+    return t.lower()
+
+
+def _claim_numbers(text):
+    """Every numeric value a claim states (money, counts,
+    fractions), as a sorted list of floats. Citation markers
+    are stripped first: a [1] is furniture, not a figure."""
+    t = re.sub(r"\[\d+\]|\[registry\]", " ",
+               _claim_fold(text))
+    out = []
+    for m in _CLAIM_NUM_RX.finditer(t):
+        raw = m.group(0).replace(",", "").replace(" ", "")
+        try:
+            if "/" in raw:
+                a, b = raw.split("/", 1)
+                out.append(round(float(a) / float(b), 4))
+            else:
+                out.append(round(float(raw), 4))
+        except ValueError:
+            pass
+    return sorted(out)
+
+
+def _claim_tokens(text):
+    """The claim's word tokens on the folded space: markdown
+    links and citation markers dropped, emphasis treated as
+    spacing, and a short digit-free lead-in label ('Minimum
+    protection:') stripped — decoration is not content (the
+    F4 normalizer's rule, extended to the raw bullet form)."""
+    t = _claim_fold(text)
+    t = re.sub(r"\[[^\]]*\]\([^)]*\)", " ", t)
+    t = re.sub(r"\[\d+\]|\[registry\]", " ", t)
+    for ch in "*_`#":
+        t = t.replace(ch, " ")
+    t = re.sub(r"\s+", " ", t).strip()
+    m = _CLAIM_LABEL_RX.match(t)
+    if m:
+        label = m.group(1).strip()
+        if len(label.split()) <= 5 and not any(
+                ch.isdigit() for ch in label):
+            t = t[m.end():]
+    return _CLAIM_WORD_RX.findall(t.replace("/", " "))
+
+
+def _claim_content(text):
+    return {w for w in _claim_tokens(text)
+            if w not in _CLAIM_STOP and not w.isdigit()}
+
+
+def _claim_dupe_score(a_text, b_text):
+    """Containment score (0..1) when the two texts state the
+    SAME claim in normalized vs raw form, else None. The
+    figure multisets must be identical (a claim about $32,532
+    never merges with one about $33,000, and a two-figure
+    conflict sentence never merges with a one-figure claim),
+    and the smaller side needs >= 4 content tokens so very
+    short claims only ever merge on exact normalized text."""
+    if _claim_numbers(a_text) != _claim_numbers(b_text):
+        return None
+    ca, cb = _claim_content(a_text), _claim_content(b_text)
+    if min(len(ca), len(cb)) < 4:
+        return None
+    containment = len(ca & cb) / min(len(ca), len(cb))
+    if containment < 0.85:
+        return None
+    ta, tb = set(_claim_tokens(a_text)), set(_claim_tokens(b_text))
+    jacc = len(ta & tb) / max(1, len(ta | tb))
+    if jacc < 0.45:
+        return None
+    return containment
+
+
 def _registry_block_hash():
     """A fingerprint of the verified-figures registry in force,
     so a registry edit invalidates verdicts cached under the
@@ -9223,6 +9396,33 @@ def _judge_round(question, hits, answer, hard, mech_block="",
     for ec in extra_claims or ():
         if _norm_claim_text(ec["text"]) in seen_norm:
             continue
+        # v22.3 (fix 1): a raw-form duplicate of a claim
+        # already on the list (the same draft sentence in its
+        # citation-carrying form: bold label, ** emphasis,
+        # [n]/[registry] markers) merges into that claim
+        # instead of sitting beside it as a second load-bearing
+        # claim with no verdict path. The survivor keeps the
+        # verdict; the duplicate contributes its sources and
+        # its load-bearing flag. Matching is the conservative
+        # _claim_dupe_score rule — when in doubt the extra is
+        # appended like any other claim.
+        _survivor, _best = None, 0.0
+        for _c in claims:
+            if _c.get("meta"):
+                continue
+            _s = _claim_dupe_score(_c["text"], ec["text"])
+            if _s is not None and _s > _best:
+                _survivor, _best = _c, _s
+        if _survivor is not None:
+            for _j in ec.get("sources") or ():
+                if _j not in _survivor["sources"]:
+                    _survivor["sources"].append(_j)
+            if ec.get("load_bearing"):
+                _survivor["load_bearing"] = True
+            _survivor["notes"].append(
+                "v22.3 dedupe: raw-form duplicate merged "
+                "into this claim")
+            continue
         seen_norm.add(_norm_claim_text(ec["text"]))
         claims.append({"text": ec["text"],
                        "load_bearing": bool(ec.get("load_bearing")),
@@ -9232,6 +9432,33 @@ def _judge_round(question, hits, answer, hard, mech_block="",
                        "meta": _is_meta_claim(ec["text"]),
                        "sources": list(ec.get("sources") or []),
                        "refutations": []})
+    # --- v22.3 (fix 2): registry-carrying claims are judged
+    # FIRST, while the round's budget is fresh. A claim is
+    # registry-carrying when it cites the registry ([registry]
+    # in its text) or states a figure the engaged registry
+    # entries admit for the question's date. Judging itself is
+    # unchanged — every claim still needs its verdicts, and
+    # the two-family rule for the full verified badge is
+    # untouched; only the queue order changes, so a panel that
+    # degrades mid-round has already covered the claims the
+    # server's own verified figures anchor. The sort is
+    # stable: relative order inside each class is preserved.
+    try:
+        _admitted = _registry_values(
+            _registry_matches(question),
+            on_date=_question_date(question))
+    except Exception:
+        _admitted = []
+
+    def _registry_priority(c):
+        if "[registry]" in (c.get("text") or "").lower():
+            return 0
+        for _f in _claim_numbers(c.get("text")):
+            if any(abs(_f - _v) <= 0.011 for _v in _admitted):
+                return 0
+        return 1
+
+    claims = sorted(claims, key=_registry_priority)
     # --- S2: verdict cache. Resolved claims (identical claim +
     # identical scoped evidence) resolve without new judge
     # calls; the join below can still invalidate a cached claim
