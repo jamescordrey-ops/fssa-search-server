@@ -1,0 +1,18 @@
+{
+ "id": "gap-c57ccf5007",
+ "status": "staged \u2014 pending human merge",
+ "class": "newer_edition",
+ "question": "What are the 2027 CMS spousal impoverishment standards (MMMNA and CSRA) for a community spouse?",
+ "ask_id": "fixture-cms2027-standards",
+ "gate": "sufficiency",
+ "badge": "idk",
+ "missing": [
+  "CMS has not published the 2027 spousal impoverishment standards"
+ ],
+ "class_guess_from_server": "newer_edition",
+ "source_url": null,
+ "fetch_date": null,
+ "chunk_count": null,
+ "diff_summary": null,
+ "note": "No source URL in the gap row; a human supplies the source before any fetch. Standing target: see the watchlist."
+}

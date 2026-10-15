@@ -1,0 +1,16 @@
+{
+ "id": "vocab-ad4c000e40",
+ "status": "staged \u2014 pending human merge",
+ "class": "vocabulary_gap",
+ "question": "How often are dental exams covered for adults under Indiana Medicaid?",
+ "unit_doc": "New Hampshire Medicaid Care Management Dental Services (NH-02) | Medicaid",
+ "unit_url": "https://www.medicaid.gov/medicaid/section-1115-demo/demonstration-and-waiver-list/148711",
+ "corpus_terms": [
+  "hampshire",
+  "dental",
+  "management",
+  "expiration",
+  "supporting"
+ ],
+ "note": "Lay phrasings failed while the corpus-term phrasing reached the document. Concept-map candidate: register the lay phrasing's terms for this unit's key terms in growth_terms.json (human merge)."
+}

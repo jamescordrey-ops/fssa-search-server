@@ -1,0 +1,2 @@
+{"question": "Under Indiana Medicaid fee-for-service, how often are eyeglasses covered for adults?", "expect_any": ["IHCP Provider Reference Module: Vision S"], "note": "growth-loop proposal from ask fixture-eyeglasses-v20: retrieval miss; doc was in corpus all along", "ask_id": "fixture-eyeglasses-v20"}
+{"question": "What is Indiana's Medicaid transfer penalty divisor?", "expect_any": ["3006.00.00"], "note": "growth-loop proposal from ask fixture-divisor-v202: retrieval miss; doc was in corpus all along", "ask_id": "fixture-divisor-v202"}

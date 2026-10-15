@@ -1,0 +1,16 @@
+{
+ "id": "vocab-0a04943be7",
+ "status": "staged \u2014 pending human merge",
+ "class": "vocabulary_gap",
+ "question": "My wife and I have $190,000 in countable savings. I need nursing home care in Indiana and she will stay home. How much can she keep as the community spouse resource allowance?",
+ "unit_doc": "Minnesota Spousal Impoverishment | Medicaid",
+ "unit_url": "https://www.medicaid.gov/medicaid/section-1115-demo/demonstration-and-waiver-list/82206",
+ "corpus_terms": [
+  "impoverishment",
+  "spousal",
+  "withdrawn",
+  "incomplete",
+  "minnesota"
+ ],
+ "note": "Lay phrasings failed while the corpus-term phrasing reached the document. Concept-map candidate: register the lay phrasing's terms for this unit's key terms in growth_terms.json (human merge)."
+}

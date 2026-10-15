@@ -1,0 +1,16 @@
+{
+ "id": "vocab-69b5b7d730",
+ "status": "staged \u2014 pending human merge",
+ "class": "vocabulary_gap",
+ "question": "What is the resource limit for SNAP in Indiana?",
+ "unit_doc": "DFR: SNAP (Food Assistance)",
+ "unit_url": "https://www.in.gov/fssa/dfr/snap-food-assistance/about-snap",
+ "corpus_terms": [
+  "obbb",
+  "baskets",
+  "thrifty",
+  "trump",
+  "modifies"
+ ],
+ "note": "Lay phrasings failed while the corpus-term phrasing reached the document. Concept-map candidate: register the lay phrasing's terms for this unit's key terms in growth_terms.json (human merge)."
+}

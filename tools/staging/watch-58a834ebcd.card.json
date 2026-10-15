@@ -1,0 +1,21 @@
+{
+ "id": "watch-58a834ebcd",
+ "status": "staged \u2014 pending human merge",
+ "class": "watchlist",
+ "question": "Indiana 2027 HCBS waiver income cap",
+ "ask_id": null,
+ "gate": null,
+ "badge": null,
+ "missing": null,
+ "class_guess_from_server": null,
+ "source_url": null,
+ "fetch_date": null,
+ "chunk_count": null,
+ "diff_summary": null,
+ "expected_domains": [
+  "in.gov",
+  "fssa.in.gov"
+ ],
+ "publication_status": "awaiting publication",
+ "note": "Indiana had not posted a 2027 cap as of 2026-10-14. 300% of the 2027 SSI FBR ($1,029) implies about $3,087, UNCONFIRMED; the waiver registry entry carries that as a successor note, never as a figure. On publication this becomes a superseded-figure card for waiver_income_cap."
+}

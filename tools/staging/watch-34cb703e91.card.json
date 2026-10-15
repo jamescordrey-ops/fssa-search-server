@@ -1,0 +1,20 @@
+{
+ "id": "watch-34cb703e91",
+ "status": "staged \u2014 pending human merge",
+ "class": "watchlist",
+ "question": "CMS 2027 spousal impoverishment standards",
+ "ask_id": null,
+ "gate": null,
+ "badge": null,
+ "missing": null,
+ "class_guess_from_server": null,
+ "source_url": null,
+ "fetch_date": null,
+ "chunk_count": null,
+ "diff_summary": null,
+ "expected_domains": [
+  "cms.gov"
+ ],
+ "publication_status": "awaiting publication",
+ "note": "MMMNA minimum/maximum and CSRA minimum/maximum for 2027. CMS publishes these each fall; not posted as of 2026-10-14. On publication this becomes a superseded-figure card for the csra and mmmna registry entries (which are dated through 2026-12-31)."
+}

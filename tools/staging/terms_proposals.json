@@ -1,0 +1,42 @@
+{
+ "eyeglasses": [
+  "promod00051",
+  "provider",
+  "reference",
+  "module",
+  "vision",
+  "services"
+ ],
+ "covered": [
+  "promod00051",
+  "provider",
+  "reference",
+  "module",
+  "vision",
+  "services"
+ ],
+ "transfer": [
+  "3006.00.00",
+  "average",
+  "monthly",
+  "cost",
+  "private",
+  "nursing"
+ ],
+ "penalty": [
+  "3006.00.00",
+  "average",
+  "monthly",
+  "cost",
+  "private",
+  "nursing"
+ ],
+ "divisor": [
+  "3006.00.00",
+  "average",
+  "monthly",
+  "cost",
+  "private",
+  "nursing"
+ ]
+}

@@ -149,7 +149,8 @@ verified before the file was created).
 v18 (2026-10-14): the money and verifier hardening build (see
 v18/PLAN.md and v18/redteam/ADJUDICATION.md). The $1.00/day
 preflight cap becomes a reservation-based HARD ceiling of
-$2.00/day at the single OpenRouter choke point: every call
+$2.00/day (v21: $10.00/day) at the single OpenRouter choke
+point: every call
 reserves its provable maximum (prompt bytes as the input bound,
 max_tokens at the model's output price, priced at the most
 expensive backend its route may fall back to) under a lock
@@ -255,7 +256,8 @@ xAI is an ORDINARY PAID provider: the $150/mo data-sharing
 free-credits program was sunset at the end of May 2025 and
 the $25 signup promo never materialized, so xAI spend
 counts against the real-money caps (the $2.00/day ledger
-and the $0.50 per-ask ceiling) exactly like OpenRouter,
+and the $0.50 per-ask ceiling through v20.2; $10.00/day and
+$1.00 in v21) exactly like OpenRouter,
 through the same reservation gate. The XAI_FREE_CREDITS
 flag (default False, now a permanent fact) exists only so
 a future grant program could switch xAI accounting to a
@@ -292,7 +294,47 @@ Plus the comment scrub:
 first-name attributions in comments/docstrings replaced
 with neutral wording (no logic, prompt, or behavior
 change beyond the items above). See v20.2/STATUS.md.
+
+v21 (2026-10-14): the retrieval-accuracy build (see
+v21/STATUS.md). Two production IDKs (eyeglasses on v20,
+the transfer divisor on v20.2) shared one shape: the
+authoritative chunk was IN the corpus but never entered
+the candidate pool on natural phrasing, and the panel then
+verified a truthful-about-its-excerpts IDK. v21 answers
+that class, not the instances: (1) an exact-term RESCUE
+pass — when the fused pool shows zero coverage of the
+question's rare terms, or a unit still ends IDK, the
+corpus is scanned for the question's own rare terms and
+phrases, hits are scored by co-occurrence then rarity
+then source authority, and the best chunks join the pool
+(rs channel; a post-IDK rescue re-runs the unit once,
+corpus before web); (2) REGISTRY-DRIVEN retrieval —
+VERIFIED_FIGURES entries carry topic phrases + a source
+pointer, and a matched entry pins its source chunk into
+the pool (rg channel); (3) the registry is EFFECTIVE-DATED
+— entries carry valid_from/valid_to, figure selection
+uses the date the question is about, and the transfer
+divisor joins as a dated pair ($8,027 from 2026-07-01;
+$7,651 before it); (4) the NIM transport honors per-leg
+DEADLINES, so the retry inside a leg can no longer double
+a 30s judge leg into the observed 60s (v20.2 retest:
+60.19s/60.16s seat failures); (5) EVERY seat outcome path
+emits its reason — picks that skip a candidate now record
+seat_skip events (benched / keyless / family-excluded /
+plan-led), so no seat result is reason-less again; (6)
+gap-log rows carry the ask id and a classification guess,
+feeding the growth-loop staging runner (tools/), whose
+review queue and the 2027 watchlist ship in this version
+as tooling — merging stays a human act. (7) CAP RAISE
+(the operator's decision, 2026-10-14): the real-money
+ledger caps rise — daily $2.00 -> $10.00, per-ask $0.50
+-> $1.00 — so a grading or testing session cannot trip
+the fence mid-session and silently gate off the paid
+legs. The reservation mechanism, the ledger, and the
+trip behavior are unchanged; the fence still exists,
+just higher.
 """
+import datetime
 import calendar
 import contextvars
 import hashlib
@@ -449,10 +491,13 @@ ASK_TIME_CAP_S = 600
 # v18 (§B remainder): the per-ask OpenRouter cost ceiling. Past
 # this line the ladder stops spending on redrafts and ships the
 # best capped Partial from the claims already judged (or IDKs);
-# it works alongside the time cap and the $2.00/day hard stop.
+# it works alongside the time cap and the $10.00/day hard
+# stop (v21: raised from $2.00/day and a $0.50 ceiling at the
+# operator's direction, 2026-10-14, so a grading session
+# cannot trip the fence mid-session; the fence itself stays).
 # Tunable via env; the operator may retune after the first battery.
 PER_ASK_CEILING_USD = float(
-    os.environ.get("FSSA_PER_ASK_CEILING_USD", "0.50"))
+    os.environ.get("FSSA_PER_ASK_CEILING_USD", "1.00"))
 # The demoted local 14B as LAST-RESORT judge. v15.1 (the operator's
 # ruling, 2026-10-13): the flag gates ONLY the both-remotes-down
 # degradation (Lite AND the NIM seat unable to extract -> the
@@ -1090,6 +1135,200 @@ def _check_arithmetic(answer):
             + "\n\nArithmetic recheck (recomputed by the server):\n"
             + "\n".join(notes)), len(notes)
 
+# --- v21 (WS1a): the exact-term rescue pass ------------------------------
+# Two live failures share one shape: the authoritative chunk was
+# IN the corpus but the fused pool never contained it on natural
+# phrasing (IHCP Vision module on v20; IHCPPM 3006.00.00 on
+# v20.2, where the pool's fused scores sat in a flat 0.0602-
+# 0.0700 band and the key noun appeared in 0 of 16 candidates).
+# Keyword scoring dilutes a rare term across a whole question;
+# the rescue pass inverts the search: it scans chunk text for
+# the question's own rare terms and ranks by how many DISTINCT
+# terms co-occur in ONE chunk, then by term rarity, then by the
+# source-authority order _classify_hit implies. It supplements
+# the fused pool (its own rs rank channel in the pool
+# snapshot); it never replaces it.
+_RESCUE_GENERIC = set(
+    "question answer ask asks tell covered coverage eligible "
+    "eligibility qualify qualifies program state federal "
+    "indiana medicaid medicare often frequently much many "
+    "need needs know want wants person people individual "
+    "family care health services service benefit benefits "
+    "month monthly year years".split())
+
+
+def _rare_terms(question):
+    """The question's rare/content terms: multiword phrases of
+    consecutive content words first, then the content words
+    themselves; growth-loop registrations (WS3c) append their
+    mapped corpus terms. Generic program vocabulary is
+    excluded by _RESCUE_GENERIC; STOP words never appear."""
+    ql = (question or "").lower()
+    words = re.findall(r"[a-z]+", ql)
+    stream = [w for w in words if w not in STOP]
+    singles = []
+    for w in stream:
+        if w not in _RESCUE_GENERIC and len(w) >= 3 \
+                and w not in singles:
+            singles.append(w)
+    phrases = {2: [], 3: []}
+    for span in (2, 3):
+        for i in range(len(stream) - span + 1):
+            ph = " ".join(stream[i:i + span])
+            if ph not in phrases[span]:
+                phrases[span].append(ph)
+    # Class-capped assembly: single content words first (the
+    # strongest exact-match signal), then bigrams, then
+    # trigrams; growth registrations ride along uncapped.
+    terms = []
+    for group in (singles[:8], phrases[2][:6], phrases[3][:4]):
+        for t in group:
+            if t not in terms:
+                terms.append(t)
+    for mapped in _growth_expansions(ql):
+        if mapped not in terms:
+            terms.append(mapped)
+    return terms
+
+
+_AUTHORITY = {"policy manual": 4, "POMS operations manual": 4,
+              "regulation": 4, "waiver application": 3,
+              "IHCP bulletin": 3, "SSA explainer": 2,
+              "plan handbook": 1, "program page": 1}
+
+
+def _rescue_search(question, corpus, exclude_keys=(), limit=4):
+    """Scan the corpus's chunks for the question's rare terms.
+    Returns (hits, terms): at most `limit` chunks, at most 2
+    per document, excluding `exclude_keys` ((url, excerpt[:60])
+    pairs already in hand). A chunk qualifies when it carries
+    at least 2 distinct question terms, or a single term that
+    is rare across the corpus (in at most 5 documents). One
+    pass computes document frequency and candidates together;
+    cost is a full chunk scan, paid only when the rescue
+    actually fires."""
+    terms = _rare_terms(question)
+    if not terms:
+        return [], terms
+    docs = corpus if corpus is not None else CORPUS_IN
+    total_docs = max(1, len(docs))
+    df = {t: 0 for t in terms}
+    cands = []
+    for d in docs:
+        # The match text for every chunk is the document
+        # TITLE plus the chunk text (which itself carries
+        # its section-heading prefix from _chunks for
+        # manual-style docs). Title inclusion is load-
+        # bearing, not cosmetic: the transfer divisor lives
+        # in IHCPPM 3006.00.00's TITLE ("(Transfer Penalty
+        # Divisor)") while its body text never uses the
+        # word "divisor" at all — a body-only matcher can
+        # never rescue that question on the term (probe-set
+        # grounding, 2026-10-14).
+        title_low = (d.get("title") or "").lower()
+        doc_terms = set()
+        for ch in _doc_chunks(d):
+            low = title_low + " " + ch.lower()
+            matched = [t for t in terms if t in low]
+            if not matched:
+                continue
+            doc_terms.update(matched)
+            key = (d["url"], ch[:60])
+            if key in exclude_keys:
+                continue
+            cands.append((d, ch, matched))
+        for t in doc_terms:
+            df[t] += 1
+    import math
+    rarity = {t: math.log(1.0 + total_docs / (1.0 + df[t]))
+              for t in terms}
+    scored = []
+    for d, ch, matched in cands:
+        distinct = len(set(matched))
+        if distinct < 2 and not any(df[t] <= 5 for t in matched):
+            continue
+        hit = {"title": d["title"], "url": d["url"],
+               "source": d.get("source", "pdf"),
+               "verified": d.get("verified", True),
+               "excerpt": ch[:2000]}
+        if d.get("tags"):
+            hit["tags"] = d["tags"]
+        _p, dtype = _classify_hit(hit)
+        auth = _AUTHORITY.get(dtype, 1)
+        if _is_indiana_source(hit):
+            auth += 0.5
+        # Scoring: RARITY-WEIGHTED co-occurrence first (the
+        # sum of the matched terms' rarity), then the raw
+        # distinct count, then authority. A raw distinct
+        # count alone misranks: on the eyeglasses question a
+        # generic Indiana page matches five COMMON terms
+        # (fee, adults, "indiana medicaid", ...) and would
+        # beat the Vision module chunk's three RARE ones
+        # (eyeglasses, vision, promod00051) — the exact
+        # failure this pass exists to fix, reproduced in
+        # tools/offline_checks.py. Weighting by rarity keeps
+        # co-occurrence in charge (a chunk must still carry
+        # several of the question's terms) while making the
+        # rare terms count for what they are worth.
+        score = (round(sum(rarity[t] for t in
+                           set(matched)), 3), distinct, auth)
+        scored.append((score, hit))
+    scored.sort(key=lambda x: (-x[0][0], -x[0][1], -x[0][2]))
+    out, per_doc = [], {}
+    for _score, hit in scored:
+        if len(out) >= limit:
+            break
+        if per_doc.get(hit["url"], 0) >= 2:
+            continue
+        per_doc[hit["url"]] = per_doc.get(hit["url"], 0) + 1
+        out.append(hit)
+    return out, terms
+
+
+def _registry_pin_hits(question, corpus, on_date=None):
+    """v21 (WS1b): registry-driven retrieval. For each
+    registry entry the question matches (date-aware, WS2),
+    find the chunk that carries its figure: search the
+    entry's topic phrases, then choose doc-hint match first,
+    pin-term match second, top hit last (the bridge pin
+    selection order). Returns [(entry, hit), ...]."""
+    out = []
+    for entry in _registry_matches(question, on_date=on_date):
+        topic = entry.get("topic") or {}
+        phrases = topic.get("phrases") or ()
+        if not phrases:
+            continue
+        hint = topic.get("doc_hint") or {}
+        ht = (hint.get("title") or "").lower()
+        hu = (hint.get("url") or "").lower()
+        chosen = None
+        for phrase, pin_term in phrases:
+            found = search(phrase, corpus, n=24)
+            if not found:
+                continue
+            cand = None
+            if ht or hu:
+                cand = next(
+                    (f for f in found
+                     if (ht and ht in (f["title"] or "").lower())
+                     or (hu and hu in (f["url"] or "").lower())),
+                    None)
+            if cand is None and pin_term:
+                pt = pin_term.lower()
+                cand = next(
+                    (f for f in found
+                     if pt in ((f["title"] or "") + " "
+                               + (f["excerpt"] or "")).lower()),
+                    None)
+            if cand is None:
+                cand = found[0]
+            chosen = cand
+            break
+        if chosen is not None:
+            out.append((entry, chosen))
+    return out
+
+
 def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
                   boosts=True):
     """Combine keyword and vector search with proper reciprocal rank fusion."""
@@ -1196,6 +1435,17 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
                     top = found[0]
                 bridge_tops.append((bidx, top))
 
+    # v21 (WS1b): registry-driven retrieval — a question that
+    # matches a registry entry pins the chunk carrying its
+    # figure, fused below as its own list (rg in the pool
+    # snapshot) and pinned with the bridges after rerank.
+    registry_hits = []
+    registry_tops = []  # (entry id, hit)
+    if boosts:
+        for _rentry, _rhit in _registry_pin_hits(query, corpus):
+            registry_hits.append(_rhit)
+            registry_tops.append((_rentry["id"], _rhit))
+
     # proper reciprocal rank fusion (no artificial bonuses)
     RRF_K = 60
     scores = {}
@@ -1219,6 +1469,11 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
         if rank < 4:
             solo_candidates.add(key)
         scores[key] = scores.get(key, 0) + 1.0 / (rank + RRF_K)
+    for rank, h in enumerate(registry_hits):
+        key = (h["url"], h["excerpt"][:60])
+        if rank < 4:
+            solo_candidates.add(key)
+        scores[key] = scores.get(key, 0) + 1.0 / (rank + RRF_K)
     # solo-source bonus (v6): a top chunk found ONLY by the policy or
     # bridge searches (the lists built to find exactly it) is otherwise
     # buried by single-list RRF below the rerank window (the FEMA miss:
@@ -1231,7 +1486,8 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
 
     # merge hits
     merged = {}
-    for h in kw_hits + vec_hits + kw2_hits + bridge_hits:
+    for h in kw_hits + vec_hits + kw2_hits + bridge_hits \
+            + registry_hits:
         key = (h["url"], h["excerpt"][:60])
         if key not in merged:
             merged[key] = h
@@ -1374,6 +1630,90 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
         url_counts[h["url"]] = url_counts.get(h["url"], 0) + 1
         diverse.append(h)
     hits = diverse
+    # v21 (WS1a, trigger i): the exact-term rescue pass. The
+    # pool is WEAK when at least one of the question's rare
+    # terms has ZERO coverage in the rerank window's chunks
+    # (calibrated on the two failures: the divisor pool held
+    # the key noun in 0 of 16 candidates; the Vision module
+    # never entered the eyeglasses pool at all). Injected
+    # chunks ride at the head of the pool with fused scores
+    # just above the window top, so the rerank judges them
+    # instead of never seeing them; the best one is also
+    # pinned after rerank (below).
+    rescue_hits = []
+    if boosts:
+        _rterms = _rare_terms(query)
+        if _rterms:
+            _win_text = " ".join(
+                ((h.get("title") or "") + " "
+                 + (h.get("excerpt") or "")).lower()
+                for h in hits[:max(12, n * 2)])
+            _uncovered = [t for t in _rterms
+                          if t not in _win_text]
+            _strong = [t for t in _uncovered
+                       if t.count(" ") <= 1]
+            _tri = [t for t in _uncovered if t.count(" ") == 2]
+            # v21 calibration (the operator, 2026-10-14):
+            # the trigger fires on SUSPICION of a weak pool,
+            # not only on proof — accuracy over shaving
+            # seconds, with the per-class unit budgets and
+            # the leg-shedding discipline as the outer
+            # fence. A flat low fused band is the divisor
+            # pool's shape (16 candidates, fused
+            # 0.0602-0.0700, nothing standing out): when the
+            # window's top scores sit within 0.02 of each
+            # other and none clears 0.09, the pool counts
+            # as weak even if every term is nominally
+            # "covered" somewhere in it.
+            _top_scores = sorted(
+                (h.get("_fused", 0) for h in hits[:8]),
+                reverse=True)
+            _flat = (len(_top_scores) >= 4
+                     and _top_scores[0] <= 0.09
+                     and (_top_scores[0] - _top_scores[-1])
+                     <= 0.02)
+            if _strong or len(_tri) >= 2 or _flat:
+                if not _uncovered:
+                    _uncovered = ["(flat fused band)"]
+                # No exclusion set here: the rescue's best
+                # chunks are PROMOTED to the head (below),
+                # whether they are new to the pool or already
+                # sat in it below the selection cut. Excluding
+                # pooled chunks misfires: a chunk can be in
+                # the fused selection when the rescue runs and
+                # still be pushed out of the final list by the
+                # pin blocks that run after it (observed on
+                # the QIT anchor: IHCPPM 2615.75.15, keyword
+                # rank 0, in the window, never served).
+                _sel_keys = {(h["url"], h["excerpt"][:60])
+                             for h in hits[:n]}
+                rescue_hits, _ = _rescue_search(
+                    query, corpus, exclude_keys=(), limit=4)
+                if rescue_hits:
+                    _top_fused = max(
+                        (h.get("_fused", 0) for h in hits),
+                        default=0.0)
+                    _by_key = {(h["url"], h["excerpt"][:60]): h
+                               for h in hits}
+                    _inj, _inj_keys = [], set()
+                    for _rh in rescue_hits:
+                        _k = (_rh["url"], _rh["excerpt"][:60])
+                        _inj.append(_by_key.get(_k, _rh))
+                        _inj_keys.add(_k)
+                    for _ri, _ih in enumerate(_inj):
+                        _ih["_fused"] = (_top_fused + 0.02
+                                         - _ri * 0.001)
+                    hits = _inj + [
+                        h for h in hits
+                        if (h["url"], h["excerpt"][:60])
+                        not in _inj_keys]
+                    rescue_hits = _inj
+                    _note_rescue(
+                        _uncovered,
+                        sum(1 for h in _inj
+                            if (h["url"], h["excerpt"][:60])
+                            not in _sel_keys),
+                        "weak_pool", query)
     # v20.2 (observability): snapshot the fused scores and
     # the per-list ranks BEFORE the strip below erases
     # _fused; the pool record is assembled once the final
@@ -1381,7 +1721,9 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
     # stashed on the ask context for the ask record.
     _pool_ranks = {}
     for _lname, _lst in (("kw", kw_hits), ("vec", vec_hits),
-                         ("kw2", kw2_hits), ("br", bridge_hits)):
+                         ("kw2", kw2_hits), ("br", bridge_hits),
+                         ("rg", registry_hits),
+                         ("rs", rescue_hits)):
         _rm = {}
         for _r, _hh in enumerate(_lst):
             _rm.setdefault((_hh["url"], _hh["excerpt"][:60]), _r)
@@ -1410,6 +1752,50 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
             result = ranked[:n]
     if result is None:
         result = hits[:n]
+
+    # v21 (WS1b + WS1a): registry pins (at most 2) and the
+    # rescue's best chunk (at most 1) join the result ahead of
+    # the rerank order, UNDER the bridge pins: the bridge block
+    # below re-fronts its own pins, so the served order is
+    # bridges, then registry, then rescue, then the reranked
+    # pool (overall pin cap 4 with the bridge cap of 3 is
+    # bounded by n itself on small result sets).
+    if boosts and result and (registry_tops or rescue_hits):
+        _xpins = []
+        for _eid, _top in registry_tops:
+            if len(_xpins) >= 2:
+                break
+            _k = (_top["url"], _top["excerpt"][:60])
+            _ex = next((h for h in result
+                        if (h["url"], h["excerpt"][:60]) == _k),
+                       None)
+            if _ex is None and sum(
+                    1 for h in result
+                    if h["url"] == _top["url"]) >= 2:
+                continue
+            _xpins.append(_ex if _ex is not None else
+                          {k: v for k, v in _top.items()
+                           if k not in ("_fused", "_vscore")})
+        if rescue_hits and len(_xpins) < 3:
+            _top = rescue_hits[0]
+            _k = (_top["url"], _top["excerpt"][:60])
+            if all((h["url"], h["excerpt"][:60]) != _k
+                   for h in _xpins):
+                _ex = next((h for h in result
+                            if (h["url"], h["excerpt"][:60])
+                            == _k), None)
+                if _ex is not None or sum(
+                        1 for h in result
+                        if h["url"] == _top["url"]) < 2:
+                    _xpins.append(
+                        _ex if _ex is not None else
+                        {k: v for k, v in _top.items()
+                         if k not in ("_fused", "_vscore")})
+        if _xpins:
+            _xk = {(h["url"], h["excerpt"][:60]) for h in _xpins}
+            _rest = [h for h in result
+                     if (h["url"], h["excerpt"][:60]) not in _xk]
+            result = (_xpins + _rest)[:n]
 
     # guaranteed bridge slots (v7; pins moved to the FRONT in v8): when
     # a topic bridge fired, its top chunk is the operative rule
@@ -1487,6 +1873,8 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True, use_rerank=True,
                 "vec": _pool_ranks["vec"].get(_k),
                 "kw2": _pool_ranks["kw2"].get(_k),
                 "br": _pool_ranks["br"].get(_k),
+                "rg": _pool_ranks["rg"].get(_k),
+                "rs": _pool_ranks["rs"].get(_k),
                 "w": _k in _win, "sel": _sel.get(_k)})
             if len(_pool) >= 28:
                 break
@@ -1831,6 +2219,51 @@ SYNONYMS = {
     "gift": ["transfer", "assets"],
 }
 
+# --- v21 (WS3c): growth-loop lay terms --------------------------------
+# The growth loop's staging pass (tools/growth_loop.py) proposes
+# lay-term registrations: concept -> the corpus terms/sections the
+# concept lives under. Approved registrations land in
+# growth_terms.json NEXT TO the server file (override the path
+# with FSSA_GROWTH_TERMS). The file is read ONCE at boot; its
+# absence is normal (no registrations merged yet) and never
+# fatal. Consumption: search() expands a registered concept
+# found in the query with its mapped terms (the SYNONYMS
+# mechanism, generalized to phrases and section numbers), and
+# _rare_terms() adds the mapped terms to the rescue pass's
+# term list. Merging a staged registration stays a human act:
+# nothing in the server writes this file.
+GROWTH_TERMS_PATH = os.environ.get("FSSA_GROWTH_TERMS",
+                                   "growth_terms.json")
+_GROWTH_TERMS = {}
+try:
+    with open(GROWTH_TERMS_PATH, encoding="utf-8") as _gf:
+        _raw_gt = json.load(_gf)
+    if isinstance(_raw_gt, dict):
+        for _gk, _gv in _raw_gt.items():
+            if isinstance(_gv, (list, tuple)):
+                _GROWTH_TERMS[str(_gk).lower()] = [
+                    str(_gx).lower() for _gx in _gv]
+    print(f"[growth] loaded {len(_GROWTH_TERMS)} lay-term "
+          f"registration(s) from {GROWTH_TERMS_PATH}", flush=True)
+except FileNotFoundError:
+    pass
+except Exception as _ge:
+    print(f"[growth] {GROWTH_TERMS_PATH} unreadable ({_ge}); "
+          "lay-term expansion off", flush=True)
+
+
+def _growth_expansions(text_low):
+    """The mapped corpus terms for every registered concept
+    present in `text_low` (already lowercased)."""
+    out = []
+    for concept, mapped in _GROWTH_TERMS.items():
+        if concept in text_low:
+            for m in mapped:
+                if m not in out:
+                    out.append(m)
+    return out
+
+
 _SECTION_HEAD_RX = re.compile(
     r"(?m)^[ \t]*(\d{4}\.\d{2}\.\d{2}(?:\.\d{2})?)[ \t]*\n"
     r"[ \t]*([A-Z][A-Z0-9 /&()\-',]{2,78}?)[ \t]*$")
@@ -2050,6 +2483,12 @@ def search(query, corpus=None, n=6, extra_terms=None):
     for t in raw_terms:
         if t in SYNONYMS:
             terms.extend(w for w in SYNONYMS[t] if w not in terms)
+    # v21 (WS3c): growth-loop lay-term registrations expand the
+    # query the same way (concept phrase -> corpus terms /
+    # section numbers, matched as substrings like every term).
+    for _gt in _growth_expansions(query.lower()):
+        if _gt not in terms:
+            terms.append(_gt)
     # Add rewritten terms separately (not concatenated, to avoid phrase corruption)
     if extra_terms:
         for t in extra_terms:
@@ -2579,7 +3018,11 @@ def _conflict_scan(hits):
     value's provenance, close enough to be the same fact
     stated two ways)."""
     out = []
+    _today21 = _today_iso()
     for entry in VERIFIED_FIGURES:
+        if not _entry_in_force(entry, _today21):
+            continue  # v21 (WS2): conflicts compare against
+            # the value in force TODAY, not a dated sibling
         terms = entry.get("conflict_terms") or (
             entry["title"].lower(),)
         corpus_vals = {}
@@ -2613,6 +3056,8 @@ def _conflict_scan(hits):
     # anywhere — undetectable by the dollar scan above) are
     # surfaced the same way.
     for entry in VERIFIED_FIGURES:
+        if not _entry_in_force(entry, _today21):
+            continue
         for spec in entry.get("conflict_numbers", ()):
             terms = spec.get("terms") or (entry["title"].lower(),)
             for h in hits or ():
@@ -2804,9 +3249,14 @@ VERIFIED_FIGURES = [
         "groups": [
             {"tokens": set(),
              "phrases": ("community spouse", "mmmna",
-                         "monthly maintenance needs")},
+                         "monthly maintenance needs",
+                         "spouse of a medicaid applicant",
+                         "spousal income",
+                         "how much income can the spouse")},
             {"tokens": {"income"},
-             "phrases": ("keep each month",)},
+             "phrases": ("keep each month",
+                         "maintenance needs allowance",
+                         "maximum monthly maintenance")},
         ],
         "statement": (
             "The community spouse may keep between $2,705.00 and "
@@ -2936,6 +3386,223 @@ VERIFIED_FIGURES = [
 ]
 
 
+# --- v21 (WS1b + WS2): registry topics + effective dating --------------
+# The v13-v19 entries above are hand-verified prose; v21 adds
+# two fields to every entry WITHOUT rewriting their statements:
+#   "topic": {"phrases": ((search phrase, pin term), ...),
+#             "doc_hint": {"title": substr, "url": substr}}
+#       the retrieval pointer (WS1b): when a question matches
+#       the entry, hybrid_search pins the source chunk that
+#       carries the figure into the candidate pool (rg channel),
+#       chosen doc-hint first, then pin-term, then top hit.
+#   "valid_from" / "valid_to": ISO dates or None (WS2). An
+#       entry serves only inside its window; entries sharing a
+#       "family" key are date-exclusive alternatives of one
+#       figure. "history" carries superseded values with their
+#       own windows: a question ABOUT a past period still
+#       matches the entry (its statement is date-aware prose)
+#       and _registry_values admits the historical figure.
+#   "successor": a note about the next period's value that is
+#       NOT verified (never a figure, never served as one).
+# The metadata lives in this augmentation block so the
+# verified statements above stay byte-identical to v19/v20;
+# the dates are backfilled from each entry's own source line
+# and the verified record (see v21/STATUS.md for the per-entry
+# grounding). An open window (None) means "no bound in the
+# record", never an invented date.
+_V21_REGISTRY_META = {
+    "backpay_exclusion": {
+        "valid_from": None, "valid_to": None,
+        "topic": {
+            "phrases": (
+                ("retroactive SSI Social Security benefits "
+                 "excluded nine months", "nine months"),
+                ("ssi resources retroactive benefits excluded",
+                 "retroactive")),
+            "doc_hint": {"title": "SSI Resources",
+                         "url": "text-resources-ussi"}}},
+    "able_onset_age": {
+        "valid_from": "2026-01-01", "valid_to": None,
+        "history": (
+            {"value": 19000.0, "valid_from": "2025-01-01",
+             "valid_to": "2025-12-31",
+             "note": "2025 ABLE annual contribution cap"},),
+        "topic": {
+            "phrases": (
+                ("able account contribution limit investable",
+                 "able"),
+                ("able accounts annual contribution", "able")),
+            "doc_hint": {"title": "able", "url": "irs.gov"}}},
+    "snap_resource_limit_in": {
+        "valid_from": None, "valid_to": None,
+        "topic": {
+            "phrases": (
+                ("snap food assistance resource limit indiana",
+                 "resource"),
+                ("indiana snap households limited resources "
+                 "5000", "snap"),
+                ("indiana snap broad-based categorical "
+                 "eligibility resource limit", "resource")),
+            "doc_hint": {
+                "title": "SNAP (Food Assistance)",
+                "url": "snap-food-assistance"}}},
+    "csra": {
+        "valid_from": "2026-01-01", "valid_to": "2026-12-31",
+        "topic": {
+            "phrases": (
+                ("spousal impoverishment standards community "
+                 "spouse", "spousal impoverishment"),
+                ("spousal impoverishment protection law "
+                 "assets half", "spousal impoverishment"),
+                ("community spouse resource allowance 2026",
+                 "162,660")),
+            "doc_hint": {"title": "3010.20.10",
+                         "url": "3000.pdf"}}},
+    "mmmna": {
+        # The entry's stated minimum ($2,705.00) is the
+        # July-December 2026 figure (CMS spousal standards
+        # revise the minimum each July 1); the pre-July 2026
+        # minimum is not in the verified record, so the
+        # window starts 2026-07-01 rather than inventing one.
+        "valid_from": "2026-07-01", "valid_to": "2026-12-31",
+        "topic": {
+            "phrases": (
+                ("spousal impoverishment standards monthly "
+                 "maintenance needs allowance",
+                 "monthly maintenance needs allowance"),
+                ("spousal impoverishment maintenance standard "
+                 "shelter allowance", "spousal impoverishment"),),
+            "doc_hint": {"title": "3010.20.10",
+                         "url": "3000.pdf"}}},
+    "home_equity_limit": {
+        "valid_from": "2026-01-01", "valid_to": None,
+        "topic": {
+            "phrases": (
+                ("home equity limitation medicaid 3005.10.05",
+                 "home equity"),),
+            "doc_hint": {"title": "3005.10.05",
+                         "url": "3000.pdf"}}},
+    "asset_limit_2000": {
+        "valid_from": None, "valid_to": None,
+        "topic": {
+            "phrases": (
+                ("supplemental security income resource limits "
+                 "2000 individual", "resource limits"),),
+            "doc_hint": {"title": "SSI Resources",
+                         "url": "ssi"}}},
+    "waiver_income_cap": {
+        "valid_from": "2026-01-01", "valid_to": "2026-12-31",
+        "successor": (
+            "The 2027 cap had NOT been posted by Indiana as of "
+            "2026-10-14. 300% of the 2027 SSI federal benefit "
+            "rate ($1,029) implies about $3,087, but that value "
+            "is UNCONFIRMED: it is not a registry figure and "
+            "must never be served as verified."),
+        "topic": {
+            "phrases": (
+                ("hcbs waiver income limit 2982 special income "
+                 "level", "special income level"),
+                ("indiana medicaid waiver income limit",
+                 "income limit")),
+            "doc_hint": {"title": "Eligibility Guide",
+                         "url": "in.gov"}}},
+    "ssa_2027_figures": {
+        "valid_from": "2027-01-01", "valid_to": "2027-12-31",
+        "topic": {
+            "phrases": (
+                ("social security 2027 cost of living "
+                 "adjustment fact sheet", "2027"),
+                ("substantial gainful activity 2027 trial work "
+                 "period", "trial work")),
+            "doc_hint": {"title": "2027",
+                         "url": "ssa.gov/news"}}},
+    "difficulty_of_care": {
+        "valid_from": None, "valid_to": None,
+        "topic": {
+            "phrases": (
+                ("difficulty of care medicaid waiver payments "
+                 "excludable income", "difficulty of care"),),
+            "doc_hint": {"title": "difficulty of care",
+                         "url": "irs.gov"}}},
+}
+for _e21 in VERIFIED_FIGURES:
+    _m21 = _V21_REGISTRY_META.get(_e21["id"])
+    if _m21:
+        _e21.update(_m21)
+
+# v21 (WS2): the transfer penalty divisor joins the registry
+# as a DATED PAIR (family "transfer_penalty_divisor"). It was
+# NOT a v13-v20 registry entry (the figure lived only in the
+# corpus, IHCPPM 3006.00.00, which is exactly why the
+# 2026-10-14 divisor ask had no registry help). Both values
+# are in the verified record: $8,027 for applications on or
+# after July 1, 2026; $7,651 before.
+_DIVISOR_GROUPS = [
+    {"tokens": set(),
+     "phrases": ("transfer penalty", "penalty divisor",
+                 "transfer divisor", "penalty period",
+                 "asset transfer")},
+]
+VERIFIED_FIGURES += [
+    {
+        "id": "transfer_penalty_divisor_current",
+        "family": "transfer_penalty_divisor",
+        "title": ("Indiana Medicaid transfer penalty divisor "
+                  "($8,027, applications from July 2026)"),
+        "groups": _DIVISOR_GROUPS,
+        "statement": (
+            "Indiana's Medicaid transfer penalty divisor is "
+            "$8,027 per month for applications filed on or "
+            "after July 1, 2026: the penalty period for an "
+            "uncompensated asset transfer is the transfer "
+            "amount divided by $8,027 (the average monthly "
+            "cost of private nursing facility care, IHCPPM "
+            "3006.00.00). For applications filed before July "
+            "1, 2026, the divisor was $7,651."),
+        "source": ("IHCPPM 3006.00.00 (average monthly cost "
+                   "of private nursing facility care)"),
+        "figures": (8027.0,),
+        "valid_from": "2026-07-01", "valid_to": None,
+        "topic": {
+            "phrases": (
+                ("average monthly cost private nursing "
+                 "facility care transfer penalty divisor",
+                 "divisor"),
+                ("transfer penalty divisor 3006.00.00",
+                 "3006.00.00")),
+            "doc_hint": {"title": "3006.00.00",
+                         "url": "3000.pdf"}},
+    },
+    {
+        "id": "transfer_penalty_divisor_legacy",
+        "family": "transfer_penalty_divisor",
+        "title": ("Indiana Medicaid transfer penalty divisor "
+                  "($7,651, applications before July 2026)"),
+        "groups": _DIVISOR_GROUPS,
+        "statement": (
+            "For Indiana Medicaid applications filed before "
+            "July 1, 2026, the transfer penalty divisor was "
+            "$7,651 per month (the average monthly cost of "
+            "private nursing facility care, IHCPPM "
+            "3006.00.00). For applications filed on or after "
+            "July 1, 2026, the divisor is $8,027."),
+        "source": ("IHCPPM 3006.00.00 (average monthly cost "
+                   "of private nursing facility care)"),
+        "figures": (7651.0,),
+        "valid_from": None, "valid_to": "2026-06-30",
+        "topic": {
+            "phrases": (
+                ("average monthly cost private nursing "
+                 "facility care transfer penalty divisor",
+                 "divisor"),
+                ("transfer penalty divisor 3006.00.00",
+                 "3006.00.00")),
+            "doc_hint": {"title": "3006.00.00",
+                         "url": "3000.pdf"}},
+    },
+]
+
+
 def _groups_hit(groups, q_low, q_tokens):
     """True when EVERY trigger group hits: a group hits when any of its
     word tokens or substring phrases appears in the question. Shared by
@@ -2950,12 +3617,102 @@ def _groups_hit(groups, q_low, q_tokens):
     return True
 
 
-def _registry_matches(question):
-    """Registry entries whose trigger groups all hit on the question."""
+_MONTH_NUM = {name: i + 1 for i, name in enumerate((
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november",
+    "december"))}
+
+
+def _today_iso():
+    return datetime.date.today().isoformat()
+
+
+def _question_date(question):
+    """v21 (WS2): the date a question is ABOUT, as an ISO
+    string, or None when the question carries no date signal
+    (callers then use today). An explicit month + year pins
+    the 15th of that month; a bare year pins June 1 of it (so
+    a year-only question sees the value in force mid-year);
+    "next year" / "last year" resolve against today. A year
+    outside 2019-2030 is not a date signal (section numbers
+    and statute years are not question dates)."""
+    ql = (question or "").lower()
+    m = re.search(
+        r"\b(january|february|march|april|may|june|july|"
+        r"august|september|october|november|december)"
+        r"(?:\s+of)?\s+(20\d\d)\b", ql)
+    if m and 2019 <= int(m.group(2)) <= 2030:
+        return (f"{m.group(2)}-{_MONTH_NUM[m.group(1)]:02d}"
+                f"-15")
+    today = datetime.date.today()
+    if "next year" in ql:
+        return f"{today.year + 1}-06-01"
+    if "last year" in ql:
+        return f"{today.year - 1}-06-01"
+    m = re.search(r"\b(20\d\d)\b", ql)
+    if m and 2019 <= int(m.group(1)) <= 2030:
+        return f"{m.group(1)}-06-01"
+    return None
+
+
+def _date_in_window(d, valid_from, valid_to):
+    """ISO string comparison: d inside [valid_from, valid_to],
+    either bound None = open."""
+    if valid_from and d < valid_from:
+        return False
+    if valid_to and d > valid_to:
+        return False
+    return True
+
+
+def _entry_in_force(entry, on_date):
+    """The entry's own window contains on_date."""
+    return _date_in_window(on_date, entry.get("valid_from"),
+                           entry.get("valid_to"))
+
+
+def _entry_matches_date(entry, on_date):
+    """In force on on_date, OR one of its history windows
+    contains on_date (the entry's statement speaks to that
+    period explicitly, so it may serve with the historical
+    figure admitted by _registry_values)."""
+    if on_date is None or _entry_in_force(entry, on_date):
+        return True
+    return any(
+        _date_in_window(on_date, h.get("valid_from"),
+                        h.get("valid_to"))
+        for h in entry.get("history", ()))
+
+
+def _registry_matches(question, on_date=None):
+    """Registry entries whose trigger groups all hit on the
+    question AND that are in force for the date the question
+    is about (v21 WS2: explicit question date, else today).
+    Entries sharing a "family" are date-exclusive by
+    construction; if two somehow match (overlapping windows
+    after a future edit), the in-force one wins, then the
+    latest valid_from, so a family never serves two values."""
+    if on_date is None:
+        on_date = _question_date(question) or _today_iso()
     q_low = (question or "").lower()
     q_tokens = set(re.findall(r"[a-z]+", q_low))
-    return [e for e in VERIFIED_FIGURES
-            if _groups_hit(e["groups"], q_low, q_tokens)]
+    matched = [e for e in VERIFIED_FIGURES
+               if _groups_hit(e["groups"], q_low, q_tokens)
+               and _entry_matches_date(e, on_date)]
+    fams = {}
+    for e in matched:
+        fam = e.get("family")
+        if fam:
+            fams.setdefault(fam, []).append(e)
+    for fam, es in fams.items():
+        if len(es) < 2:
+            continue
+        es.sort(key=lambda e: (
+            _entry_in_force(e, on_date),
+            e.get("valid_from") or ""), reverse=True)
+        for e in es[1:]:
+            matched.remove(e)
+    return matched
 
 
 def _registry_block(entries):
@@ -2968,14 +3725,26 @@ def _registry_block(entries):
     for e in entries:
         lines.append(f"- {e['title']}: {e['statement']} "
                      f"[Source: {e['source']}]")
+        if e.get("successor"):
+            lines.append(f"  Note: {e['successor']}")
     return "\n".join(lines)
 
 
-def _registry_values(entries):
-    """Flat list of an entry set's verified dollar figures."""
+def _registry_values(entries, on_date=None):
+    """Flat list of an entry set's verified dollar figures.
+    v21 (WS2): history values whose window contains the
+    question's date join the in-force figures (a question
+    about 2025 may state the 2025 ABLE cap); a history value
+    never joins for a date outside its window."""
+    if on_date is None:
+        on_date = _today_iso()
     vals = []
     for e in entries:
         vals.extend(e.get("figures", ()))
+        for h in e.get("history", ()):
+            if _date_in_window(on_date, h.get("valid_from"),
+                               h.get("valid_to")):
+                vals.append(h["value"])
     return vals
 
 
@@ -3607,11 +4376,42 @@ GAP_LOG_PATH = os.environ.get("FSSA_GAP_LOG", "gap_log.jsonl")
 _GAP_LOCK = threading.Lock()
 
 
+def _gap_class_guess(gate, missing, question):
+    """v21 (WS3a): the growth loop's first-pass classification
+    guess, stamped on every gap row so the staging runner can
+    route without re-deriving it. Deliberately coarse, with an
+    honest vocabulary: a question about a FUTURE year is
+    "newer_edition" (the governing material is a newer edition
+    or not yet published); a gate that means "the corpus did
+    not hold it" (sufficiency, branch-out) is
+    "missing_document"; everything else is "unknown" — the
+    runner refines "unknown" rows with its corpus-coverage
+    check (the retrieval-miss class lives there, because only
+    the check can prove the document was present all along)."""
+    years = [int(y) for y in re.findall(r"\b(20\d\d)\b",
+                                        (question or "").lower())]
+    if years and max(years) > datetime.date.today().year:
+        return "newer_edition"
+    if gate in ("branch_out", "sufficiency"):
+        return "missing_document"
+    return "unknown"
+
+
 def log_gap(question, badge, gate, missing, part=None):
+    # v21 (WS3a): every row also carries the ask id (the join
+    # key back to ask_records.jsonl) and the classification
+    # guess, so a gap row IS a complete growth-loop queue
+    # candidate on its own.
+    try:
+        _ask_id = _ask_ctx().ask_id
+    except Exception:
+        _ask_id = None
     rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
            "question": (question or "")[:300], "badge": badge,
            "gate": gate, "missing": list(missing or ())[:8],
-           "part": part}
+           "part": part, "ask_id": _ask_id,
+           "class_guess": _gap_class_guess(gate, missing,
+                                           question)}
     try:
         with _GAP_LOCK:
             with open(GAP_LOG_PATH, "a", encoding="utf-8") as f:
@@ -3932,8 +4732,9 @@ def _slot_provider_name(slot):
 # confirmed 2026-10-14) and the reported $25 signup promo
 # never materialized, so NO grant exists: by default xAI
 # spend reserves and settles through the OpenRouter
-# reservation gate and counts against the $2.00/day ledger
-# and the $0.50 per-ask ceiling exactly like OpenRouter
+# reservation gate and counts against the daily ledger
+# ($10.00/day in v21) and the per-ask ceiling ($1.00 in v21)
+# exactly like OpenRouter
 # spend. XAI_FREE_CREDITS stays in the code only so a future
 # grant program could flip xAI accounting to the
 # visibility-only credit ledger (xai_spend.json,
@@ -4443,11 +5244,18 @@ def _seat_health_block():
 class _AskContext:
     __slots__ = ("cost", "events", "retr", "verdict_families",
                  "served_models", "panel_plan", "draft_family",
-                 "lock", "unit_deadline", "retr_pools")
+                 "lock", "unit_deadline", "retr_pools", "ask_id",
+                 "seat_skip_noted")
 
     def __init__(self):
         self.cost = 0.0
         self.events = []
+        # v21: the ask's id (set by _events_reset per ask;
+        # gap-log rows carry it so a queue candidate joins
+        # back to its ask record), and the set of seat-skip
+        # reasons already noted this ask (v21 WS4b dedupe).
+        self.ask_id = None
+        self.seat_skip_noted = set()
         self.retr = {}
         # v20.2 (observability): one fused-pool snapshot per
         # ask-mode hybrid_search call (see _retr_pool_note);
@@ -4528,7 +5336,11 @@ def _events():
 def _events_reset():
     # A fresh ask gets a fresh context (cost, events, retrieval
     # timings, panel state all reset together).
-    _ASK_CTX_VAR.set(_AskContext())
+    ctx = _AskContext()
+    # v21: every ask gets an id at birth; the ask record and
+    # its gap-log rows all carry it (growth-loop join key).
+    ctx.ask_id = uuid.uuid4().hex[:12]
+    _ASK_CTX_VAR.set(ctx)
 
 
 def _note_seat(job, model, failover):
@@ -4623,6 +5435,104 @@ def _note_seat_down(job, reason):
                            "error": str(reason)[:200]})
 
 
+def _note_seat_skips(job, picked_model, tried):
+    """v21 (WS4b): explain the candidates a seat pick passed
+    over. v20.2's seat_fail/seat_down events cover candidates
+    that were ATTEMPTED; a candidate the pick silently skipped
+    (benched by seat health, keyless, family-excluded, or
+    simply not the round's planned lead) left no trace — in
+    the operator's 2026-10-14 divisor ask the NIM primary
+    never served and the record could not say why (the failover
+    served; the skip reason existed nowhere). After every
+    pick in a serving loop, this notes a reason for each
+    candidate worth explaining: the configured lead when it
+    did not serve, the round's planned pick when it did not
+    serve, and any candidate sorting ahead of the pick in
+    the layer-major walk. Deduped per (job, model) per ask.
+    Display-only picks (_panel_info, _seat_health_block) do
+    NOT call this: they are not outcome paths."""
+    try:
+        ctx = _ask_ctx()
+        cands = SEATS[job]["candidates"]
+        if not cands:
+            return
+        now = time.monotonic()
+        plan = ctx.panel_plan.get(job)
+        excl = set(_seat_exclusions(job))
+        for other, pick in ctx.panel_plan.items():
+            if other != job:
+                excl.add(_model_family(pick[0]))
+
+        def _why(model, slot):
+            if model in tried:
+                return None  # attempted: its seat_fail speaks
+            if not _slot_has_key(slot):
+                return f"no key configured (slot {slot})"
+            with _SEAT_LOCK:
+                benched = _seat_state(job, model)[
+                    "benched_until"] > now
+            if benched:
+                return "benched (seat-health cooldown)"
+            if _model_family(model) in excl:
+                return "model family excluded this round"
+            if plan is not None and model != plan[0]:
+                return "the round's planned pick leads"
+            if plan is not None:
+                return "planned pick unusable; walk fell through"
+            return "passed over by the seat walk"
+
+        explain = set()
+        if cands[0][0] != picked_model:
+            explain.add(cands[0][0])
+        if plan is not None and plan[0] != picked_model:
+            explain.add(plan[0])
+        if picked_model is not None:
+            order = sorted(
+                range(len(cands)),
+                key=lambda i: (_candidate_layer(*cands[i]), i))
+            picked_pos = order.index(
+                [m for m, _s in cands].index(picked_model))
+            for pos, ci in enumerate(order):
+                if pos < picked_pos:
+                    explain.add(cands[ci][0])
+        slots = {m: s for m, s in cands}
+        notes = []
+        for model in explain:
+            if model == picked_model or model in tried:
+                continue
+            if (job, model) in ctx.seat_skip_noted:
+                continue
+            why = _why(model, slots[model])
+            if why is None:
+                continue
+            ctx.seat_skip_noted.add((job, model))
+            notes.append({"kind": "seat_skip", "job": job,
+                          "model": model, "slot": slots[model],
+                          "reason": why})
+        if notes:
+            with ctx.lock:
+                ctx.events.extend(notes)
+    except Exception:
+        pass  # observability must never break a seat call
+
+
+def _note_rescue(terms, injected, trigger, query=""):
+    """v21 (WS1a): the exact-term rescue pass fired. The pool
+    snapshots carry the injected chunks (rs/rg ranks); this
+    event carries the trigger and the terms that drove it,
+    so a rescued ask is diagnosable from the record alone."""
+    try:
+        ctx = _ask_ctx()
+        with ctx.lock:
+            ctx.events.append({
+                "kind": "rescue", "trigger": trigger,
+                "terms": list(terms)[:6],
+                "injected": int(injected),
+                "q": (query or "")[:80]})
+    except Exception:
+        pass
+
+
 def _judge_seat_text(job, system, user):
     """One verdict call on a judge seat, with seat health
     and failover to the seat's next measured candidate.
@@ -4649,6 +5559,7 @@ def _judge_seat_text(job, system, user):
             job, skip=tried,
             exclude_families=_seat_exclusions(job))
         if model is None:
+            _note_seat_skips(job, None, tried)  # v21 (WS4b)
             # v20.2: the seat-down reason lands in the ask
             # record, not only in the raised string (callers
             # that degrade per the panel rules may not keep
@@ -4663,6 +5574,10 @@ def _judge_seat_text(job, system, user):
         # budget; at the budget edge the seat sheds instead
         # of starting a call that cannot finish inside it.
         _jt = _leg_timeout(THIRD_JUDGE_TIMEOUT)
+        # v21 (WS4a): the leg's hard deadline, threaded into
+        # the transports so the retry inside a leg cannot
+        # double this budget (see _nim_text).
+        _leg_deadline = time.monotonic() + _jt
         if _jt <= 0:
             _note_seat_down(
                 job, "unit budget spent; seat leg shed")
@@ -4678,7 +5593,7 @@ def _judge_seat_text(job, system, user):
                 content = _or_text(
                     model, system, user, temperature=0,
                     max_tokens=max_tokens,
-                    timeout=_jt)
+                    timeout=_jt, deadline=_leg_deadline)
             elif slot == 4:
                 # v20: xAI candidate (no v20 judge chain seats
                 # one by default; the dispatch keeps the slot
@@ -4686,13 +5601,13 @@ def _judge_seat_text(job, system, user):
                 content = _xai_text(
                     model, system, user, temperature=0,
                     max_tokens=4000,
-                    timeout=_jt)
+                    timeout=_jt, deadline=_leg_deadline)
             elif slot == 5:
                 # v20: Groq candidate (seat C's Qwen primary).
                 content = _groq_text(
                     model, system, user, temperature=0,
                     max_tokens=4000,
-                    timeout=_jt)
+                    timeout=_jt, deadline=_leg_deadline)
             elif slot == 6:
                 # v20: the rationed Gemini 3.8 Flash
                 # mid-ladder rung (counted at attempt time;
@@ -4709,13 +5624,14 @@ def _judge_seat_text(job, system, user):
                     model, system, user, temperature=0,
                     max_tokens=2048,
                     timeout=_jt,
-                    provider="nim")
+                    provider="nim", deadline=_leg_deadline)
             lat = time.monotonic() - t0
             _seat_report(job, model, lat, True)
             if failover:
                 with _SEAT_LOCK:
                     _seat_state(job, model)["failovers"] += 1
             _note_seat(job, model, failover)
+            _note_seat_skips(job, model, tried)  # v21 (WS4b)
             return content
         except Exception as e:
             lat = time.monotonic() - t0
@@ -4730,6 +5646,7 @@ def _judge_seat_text(job, system, user):
                             f"{type(e).__name__}: {e}")
             tried.append(model)
             if len(tried) >= len(SEATS[job]["candidates"]):
+                _note_seat_skips(job, None, tried)  # v21 (WS4b)
                 _note_seat_down(
                     job, f"all {len(tried)} candidates failed; "
                     f"last: {type(e).__name__}: {e}")
@@ -5000,7 +5917,7 @@ OPENROUTER_DRAFTER_TIMEOUT = 120  # Cerebras drafts land in
 # seconds; the bound only caps a degraded backend before the
 # NIM seat takes over (the NIM path keeps DRAFTER_TIMEOUT).
 OPENROUTER_DAILY_CAP_USD = float(
-    os.environ.get("OPENROUTER_DAILY_CAP_USD", "2.00"))
+    os.environ.get("OPENROUTER_DAILY_CAP_USD", "10.00"))
 _OR_ROUTES = {
     OPENROUTER_HARD_MODEL: {
         "order": ["Cerebras", "Groq"], "allow_fallbacks": True,
@@ -5031,7 +5948,8 @@ _OR_ROUTES = {
 
 # --- v18: the reservation gate + spend ledger (the §B hard stop) -------
 # the operator's mechanism (v18 PLAN §B): the daily OpenRouter cap is a
-# true hard ceiling of $2.00/day, enforced by RESERVATIONS at a
+# true hard ceiling ($2.00/day through v20.2; $10.00/day in v21
+# at the operator's direction), enforced by RESERVATIONS at a
 # provable maximum at the single choke point (_nim_text with
 # or_route=True — every OpenRouter call in the server passes
 # through it; tests/test_hard_stop.py audits that no paid path
@@ -5416,7 +6334,7 @@ def _or_health_block():
 
 
 def _or_text(model, system, user, temperature=0, max_tokens=2048,
-             timeout=60):
+             timeout=60, deadline=None):
     """One OpenRouter chat call with usage reporting and the
     model's pinned backend routing. Raises when the seat
     cannot run (no key, cap tripped, provider failure) so the
@@ -5432,7 +6350,7 @@ def _or_text(model, system, user, temperature=0, max_tokens=2048,
                      OPENROUTER_KEY_FILE, model, system, user,
                      temperature=temperature, max_tokens=max_tokens,
                      timeout=timeout, provider="openrouter",
-                     extra=extra, or_route=True)
+                     extra=extra, or_route=True, deadline=deadline)
 
 
 # --- v20: the Groq daily guard ---------------------------------------
@@ -5752,7 +6670,7 @@ def _xai_health_block():
 # --- v20: the xAI + Groq transports -----------------------------------
 
 def _xai_text(model, system, user, temperature=0, max_tokens=2048,
-              timeout=60):
+              timeout=60, deadline=None):
     """One xAI chat call. Default (paid) mode: the call
     reserves its provable maximum against the shared
     real-money ledger BEFORE it starts — a refusal means the
@@ -5781,7 +6699,7 @@ def _xai_text(model, system, user, temperature=0, max_tokens=2048,
             XAI_BASE_URL, XAI_KEY_ENV, XAI_KEY_FILE, model,
             system, user, temperature=temperature,
             max_tokens=max_tokens, timeout=timeout,
-            provider="xai", usage_out=usage)
+            provider="xai", usage_out=usage, deadline=deadline)
     except Exception:
         # Settle at the full reserved maximum (F11-1); a
         # grant-mode call records nothing on failure.
@@ -5800,7 +6718,7 @@ def _xai_text(model, system, user, temperature=0, max_tokens=2048,
 
 
 def _groq_text(model, system, user, temperature=0, max_tokens=2048,
-               timeout=60):
+               timeout=60, deadline=None):
     """One Groq chat call on the free tier, under the daily
     guard: past the soft cap the call never starts and the
     caller falls over. The request is counted at attempt
@@ -5820,7 +6738,7 @@ def _groq_text(model, system, user, temperature=0, max_tokens=2048,
         GROQ_BASE_URL, GROQ_KEY_ENV, GROQ_KEY_FILE, model,
         system, user, temperature=temperature,
         max_tokens=max_tokens, timeout=timeout,
-        provider="groq", usage_out=usage)
+        provider="groq", usage_out=usage, deadline=deadline)
     cost = _usage_cost(_GROQ_PRICES, _GROQ_PRICE_DEFAULT,
                        model, usage)
     if cost is None:
@@ -5833,7 +6751,7 @@ def _groq_text(model, system, user, temperature=0, max_tokens=2048,
 def _nim_text(base_url, key_env, key_file, model, system, user,
               temperature=0, max_tokens=2048, timeout=60,
               provider="nim", extra=None, or_route=False,
-              usage_out=None):
+              usage_out=None, deadline=None):
     """One chat call to a hosted OpenAI-compatible provider (the
     NIM layer's seats), over the keep-alive pool (v15 S3).
     Returns the reply text; raises RuntimeError when the seat
@@ -5867,6 +6785,24 @@ def _nim_text(base_url, key_env, key_file, model, system, user,
     host, path = u.netloc, u.path.rstrip("/") + "/chat/completions"
     last_err = None
     for attempt in (0, 1):
+        # v21 (WS4a): the leg deadline. Through v20.2 the retry
+        # below ran on ANY exception with the FULL timeout
+        # again, so a 30s judge leg whose first attempt read-
+        # timed-out at 30s retried into a second 30s and the
+        # seat_fail landed at ~60s (v20.2 retest: 60.19s /
+        # 60.16s) — the leg budget never bit on this transport.
+        # Now the per-attempt socket timeout is clamped to the
+        # time left before `deadline`, and no attempt (the
+        # retry included) starts once the deadline has passed.
+        _attempt_timeout = timeout
+        if deadline is not None:
+            _remaining = deadline - time.monotonic()
+            if _remaining <= 0:
+                raise RuntimeError(
+                    f"{provider} leg deadline spent before "
+                    f"attempt {attempt + 1} (timeout budget "
+                    "exhausted; no further attempt started)")
+            _attempt_timeout = min(timeout, _remaining)
         reservation = None
         if or_route:
             # v18 (§B hard stop): every OpenRouter HTTP attempt
@@ -5886,7 +6822,7 @@ def _nim_text(base_url, key_env, key_file, model, system, user,
                 host, path, payload,
                 {"Content-Type": "application/json",
                  "Authorization": "Bearer " + key},
-                timeout=timeout)
+                timeout=_attempt_timeout)
         except Exception as e:
             # The request was sent and never parsed (timeout,
             # transport failure): settle at the full reserved
@@ -5894,6 +6830,11 @@ def _nim_text(base_url, key_env, key_file, model, system, user,
             _or_settle(reservation, None)
             last_err = e
             if attempt == 0:
+                if deadline is not None \
+                        and deadline - time.monotonic() <= 0:
+                    raise RuntimeError(
+                        f"{provider} unavailable: {e} (leg "
+                        "deadline spent; retry suppressed)")
                 continue
             raise RuntimeError(f"{provider} unavailable: {e}")
         if status == 429:
@@ -6006,7 +6947,7 @@ def _normalize_citations(text):
 
 
 def nim_ask(model, question, hits, instructions="", key_env=None,
-            key_file=None, timeout=None):
+            key_file=None, timeout=None, deadline=None):
     """One NIM draft generation (v15 item 2 / S4): the same prompt
     shape as the local and Gemini drafters (SYSTEM_PROMPT +
     instructions, numbered excerpts), temperature 0.3. Returns
@@ -6023,7 +6964,7 @@ def nim_ask(model, question, hits, instructions="", key_env=None,
                         sys_prompt, user_msg,
                         temperature=0.3, max_tokens=2048,
                         timeout=timeout or DRAFTER_TIMEOUT,
-                        provider=DRAFTER_PROVIDER)
+                        provider=DRAFTER_PROVIDER, deadline=deadline)
     # Hosted open models occasionally trail control-token debris
     # (kimi-k3's catalog smoke ended "<|close|>response"); it is
     # never answer text, so cut anything from the first such
@@ -6038,7 +6979,8 @@ def nim_ask(model, question, hits, instructions="", key_env=None,
     return content, sys_prompt + "\n\n" + user_msg
 
 
-def or_ask(model, question, hits, instructions="", timeout=None):
+def or_ask(model, question, hits, instructions="", timeout=None,
+           deadline=None):
     """One OpenRouter draft generation (v17): nim_ask's exact
     prompt shape and debris strip on the paid primary seat.
     Returns (answer, prompt). Raises when the seat cannot run;
@@ -6050,7 +6992,8 @@ def or_ask(model, question, hits, instructions="", timeout=None):
                                   else "")
     content = _or_text(model, sys_prompt, user_msg,
                        temperature=0.3, max_tokens=2048,
-                       timeout=timeout or OPENROUTER_DRAFTER_TIMEOUT)
+                       timeout=timeout or OPENROUTER_DRAFTER_TIMEOUT,
+                       deadline=deadline)
     content = re.split(r"<\|[^>]{0,40}>", content)[0].strip()
     # v17.1: normalize the GPT-OSS citation dialect (the v17
     # pest-control failure) before the pipeline reads the draft.
@@ -6061,7 +7004,8 @@ def or_ask(model, question, hits, instructions="", timeout=None):
     return content, sys_prompt + "\n\n" + user_msg
 
 
-def xai_ask(model, question, hits, instructions="", timeout=None):
+def xai_ask(model, question, hits, instructions="", timeout=None,
+            deadline=None):
     """One xAI draft generation (v20): or_ask's exact prompt
     shape and post-processing on the prepaid xAI seat (the
     hard chain's paid layer, behind Groq and the NIM bench).
@@ -6073,7 +7017,8 @@ def xai_ask(model, question, hits, instructions="", timeout=None):
                                   else "")
     content = _xai_text(model, sys_prompt, user_msg,
                         temperature=0.3, max_tokens=2048,
-                        timeout=timeout or XAI_DRAFTER_TIMEOUT)
+                        timeout=timeout or XAI_DRAFTER_TIMEOUT,
+                        deadline=deadline)
     content = re.split(r"<\|[^>]{0,40}>", content)[0].strip()
     content = _normalize_citations(content)
     if not content:
@@ -6081,7 +7026,8 @@ def xai_ask(model, question, hits, instructions="", timeout=None):
     return content, sys_prompt + "\n\n" + user_msg
 
 
-def groq_ask(model, question, hits, instructions="", timeout=None):
+def groq_ask(model, question, hits, instructions="", timeout=None,
+             deadline=None):
     """One Groq draft generation (v20): or_ask's exact prompt
     shape and post-processing on the free-tier primary seat
     (hard: GPT-OSS-120B; simple: GPT-OSS-20B). Returns
@@ -6095,7 +7041,8 @@ def groq_ask(model, question, hits, instructions="", timeout=None):
                                   else "")
     content = _groq_text(model, sys_prompt, user_msg,
                          temperature=0.3, max_tokens=2048,
-                         timeout=timeout or GROQ_DRAFTER_TIMEOUT)
+                         timeout=timeout or GROQ_DRAFTER_TIMEOUT,
+                         deadline=deadline)
     content = re.split(r"<\|[^>]{0,40}>", content)[0].strip()
     content = _normalize_citations(content)
     if not content:
@@ -6993,7 +7940,9 @@ def _registry_block_hash():
     try:
         raw = json.dumps(
             [[e.get("id"), e.get("statement"), e.get("figures"),
-              e.get("conflict_numbers")] for e in VERIFIED_FIGURES],
+              e.get("conflict_numbers"), e.get("valid_from"),
+              e.get("valid_to"), e.get("history"),
+              e.get("successor")] for e in VERIFIED_FIGURES],
             sort_keys=True, default=str)
     except Exception:
         raw = ""
@@ -7695,20 +8644,28 @@ def _generate(engine, model, question, hits, instructions):
         # local fallback (Layer 4), unchanged from v16.
         _gt = _leg_timeout(GROQ_DRAFTER_TIMEOUT)
         if _groq_available() and _gt > 0:
+            _gmodel = (GROQ_HARD_MODEL if engine == "nim"
+                       else GROQ_SIMPLE_MODEL)
+            _gt0 = time.monotonic()
             try:
                 answer, prompt = groq_ask(
-                    GROQ_HARD_MODEL if engine == "nim"
-                    else GROQ_SIMPLE_MODEL,
+                    _gmodel,
                     question, hits, instructions=instructions,
-                    timeout=_gt)
-                _note_seat(job, GROQ_HARD_MODEL
-                           if engine == "nim"
-                           else GROQ_SIMPLE_MODEL, False)
+                    timeout=_gt, deadline=_gt0 + _gt)
+                _note_seat(job, _gmodel, False)
                 return (answer, prompt,
-                        (GROQ_HARD_MODEL if engine == "nim"
-                         else GROQ_SIMPLE_MODEL) + " (Groq API)",
+                        _gmodel + " (Groq API)",
                         False, False)
             except Exception as e:
+                # v21 (WS4b): the primary's failure lands in
+                # the ask record, not only the server log.
+                _glat = time.monotonic() - _gt0
+                _note_seat_fail(
+                    job, _gmodel, 5, _glat,
+                    _glat >= GROQ_DRAFTER_TIMEOUT * 0.9
+                    or "timed out" in str(e)
+                    or "timeout" in str(e).lower(),
+                    f"{type(e).__name__}: {e}")
                 print(f"[groq] {job} primary failed: "
                       f"{str(e)[:150]}; the chain falls over",
                       flush=True)
@@ -7728,6 +8685,7 @@ def _generate(engine, model, question, hits, instructions):
                 break
             smodel, slot, failover = _seat_pick(job, skip=tried)
             if smodel is None:
+                _note_seat_skips(job, None, tried)  # v21 (WS4b)
                 break
             key_env, key_file = SEAT_SLOTS[slot]
             t0 = time.monotonic()
@@ -7736,39 +8694,70 @@ def _generate(engine, model, question, hits, instructions):
                     smodel, question, hits,
                     instructions=instructions,
                     key_env=key_env, key_file=key_file,
-                    timeout=_lt)
+                    timeout=_lt, deadline=t0 + _lt)
                 lat = time.monotonic() - t0
                 _seat_report(job, smodel, lat, True)
                 _note_seat(job, smodel, failover)
+                _note_seat_skips(job, smodel, tried)  # v21 (WS4b)
                 label = smodel + " (NIM API)"
                 if failover:
                     label += " (failover seat)"
                 return answer, prompt, label, False, False
             except Exception as e:
                 lat = time.monotonic() - t0
+                _to = (lat >= NIM_DRAFTER_TIMEOUT * 0.9
+                       or "timed out" in str(e)
+                       or "timeout" in str(e).lower())
                 _seat_report(job, smodel, lat, False,
-                             timed_out=lat >= NIM_DRAFTER_TIMEOUT * 0.9
-                             or "timed out" in str(e)
-                             or "timeout" in str(e).lower())
+                             timed_out=_to)
+                # v21 (WS4b): bench failures persist their
+                # reasons (through v20.2 this path recorded
+                # only the aggregate seat-health counters).
+                _note_seat_fail(job, smodel, slot, lat, _to,
+                                f"{type(e).__name__}: {e}")
                 tried.append(smodel)
                 last_err = e
                 if len(tried) >= len(SEATS[job]["candidates"]):
                     break
+        # v21 (WS4b): the bench's outcome is never silent —
+        # why it did not serve lands in the record before the
+        # paid layer gets its turn.
+        if tried:
+            _note_seat_down(
+                job, f"nim bench exhausted: {len(tried)} "
+                f"candidate(s) failed; last: "
+                f"{type(last_err).__name__}: {last_err}")
+        elif _lt <= 0:
+            _note_seat_down(
+                job, "nim bench shed: unit budget spent")
+        else:
+            _note_seat_down(
+                job, "nim bench: no candidate available "
+                "(benched, keyless, or family-excluded)")
         # Layer 3 (paid): xAI Grok 4.7 first on hard
         # questions (reservation-gated like OpenRouter), then
         # the v17 OpenRouter seat (hard: GPT-OSS-120B;
         # simple: GPT-OSS-20B).
         _xt = _leg_timeout(XAI_DRAFTER_TIMEOUT)
         if engine == "nim" and _xai_available() and _xt > 0:
+            _xt0 = time.monotonic()
             try:
                 answer, prompt = xai_ask(
                     XAI_HARD_MODEL, question, hits,
-                    instructions=instructions, timeout=_xt)
+                    instructions=instructions, timeout=_xt,
+                    deadline=_xt0 + _xt)
                 _note_seat(job, XAI_HARD_MODEL, False)
                 return (answer, prompt,
                         XAI_HARD_MODEL + " (xAI API)",
                         False, False)
             except Exception as e:
+                _xlat = time.monotonic() - _xt0
+                _note_seat_fail(
+                    job, XAI_HARD_MODEL, 4, _xlat,
+                    _xlat >= XAI_DRAFTER_TIMEOUT * 0.9
+                    or "timed out" in str(e)
+                    or "timeout" in str(e).lower(),
+                    f"{type(e).__name__}: {e}")
                 print(f"[xai] {job} seat failed: "
                       f"{str(e)[:150]}; the chain falls over",
                       flush=True)
@@ -7776,17 +8765,29 @@ def _generate(engine, model, question, hits, instructions):
         if _or_available() and _ot > 0:
             or_model = (OPENROUTER_HARD_MODEL if engine == "nim"
                         else OPENROUTER_SIMPLE_MODEL)
+            _ot0 = time.monotonic()
             try:
                 answer, prompt = or_ask(
                     or_model, question, hits,
-                    instructions=instructions, timeout=_ot)
+                    instructions=instructions, timeout=_ot,
+                    deadline=_ot0 + _ot)
                 _note_seat(job, or_model, False)
                 return (answer, prompt,
                         or_model + " (OpenRouter API)", False, False)
             except Exception as e:
+                _olat = time.monotonic() - _ot0
+                _note_seat_fail(
+                    job, or_model, 0, _olat,
+                    _olat >= OPENROUTER_DRAFTER_TIMEOUT * 0.9
+                    or "timed out" in str(e)
+                    or "timeout" in str(e).lower(),
+                    f"{type(e).__name__}: {e}")
                 print(f"[openrouter] {job} seat failed: "
                       f"{str(e)[:150]}; the chain falls over",
                       flush=True)
+        _note_seat_down(
+            job, f"every drafting layer down (tried NIM bench "
+            f"{tried})")
         raise RuntimeError(
             f"{job}: every drafting layer down (tried NIM "
             f"bench {tried}): {last_err}")
@@ -9409,7 +10410,8 @@ class Handler(BaseHTTPRequestHandler):
             t_retrieved = time.monotonic()
             # --- v14 pipeline: sufficiency gate -> ladder -> badges --
             mechanisms_all = _mechanism_matches(question)
-            allowed_extra = _registry_values(registry_entries)
+            allowed_extra = _registry_values(
+                registry_entries, on_date=_question_date(question))
             if csra_comp:
                 allowed_extra += [csra_comp["assets"], csra_comp["half"],
                                   csra_comp["csra"]]
@@ -9475,7 +10477,8 @@ class Handler(BaseHTTPRequestHandler):
                 except NameError:
                     _units_now = []
                 _record_ask({
-                    "kind": "ask", "ts": time.time(),
+                    "kind": "ask", "ask_id": _ask_ctx().ask_id,
+                    "ts": time.time(),
                     "wall_s": round(t_end - t_start, 3),
                     "question": question, "corpus": corpus_name,
                     "local": local_mode, "badge": badge,
@@ -9523,6 +10526,7 @@ class Handler(BaseHTTPRequestHandler):
                         # reasons included), its judge error
                         # strings (previously response-only),
                         # and any retrieval pools it ran.
+                        "rescue": u.get("rescue"),
                         "events": u.get("events"),
                         "judge_errors": (u.get("judging")
                                           or {}).get("errors"),
@@ -9664,9 +10668,11 @@ class Handler(BaseHTTPRequestHandler):
                     p_csra = None
                     if any(e["id"] == "csra" for e in p_reg):
                         p_csra = compute_csra(part)
-                    p_allowed = _registry_values(p_reg) + [
+                    p_allowed = _registry_values(
+                        p_reg, on_date=_question_date(part)) + [
                         v for v in allowed_extra
-                        if v not in _registry_values(p_reg)]
+                        if v not in _registry_values(
+                            p_reg, on_date=_question_date(part))]
                     if p_csra:
                         p_allowed += [p_csra["assets"], p_csra["half"],
                                       p_csra["csra"]]
@@ -9777,7 +10783,8 @@ class Handler(BaseHTTPRequestHandler):
             units = []
             for (spec, ctx), unit in zip(prepared, raw_units):
                 unit_hits = spec["hits"]
-                if unit["badge"] == "idk" \
+                if (unit["badge"] == "idk"
+                        or unit["badge"].startswith("partial")) \
                         and unit["gate"] != "time" \
                         and (unit["judging"] or {}).get("mode") \
                         != "none":
@@ -9793,7 +10800,58 @@ class Handler(BaseHTTPRequestHandler):
                         c for c in unit.get("claims", ())
                         if c["final"] != "supported"
                         and not c.get("meta")]
-                    web_b = _branch_attempt(failed_claims)
+                    # v21 (WS1a, trigger ii; calibration
+                    # widened the same day at the operator's
+                    # direction): a unit that ends IDK — or in
+                    # the partial tier, where some claims
+                    # demonstrably lacked evidence — gets the
+                    # exact-term rescue over the CORPUS before
+                    # any web branch-out spends a Tavily
+                    # search. When the rescue injects chunks
+                    # the unit never saw, the unit ALWAYS
+                    # re-runs once on the enlarged evidence
+                    # (the branch-out's union shape, corpus
+                    # first) through the same gates; the
+                    # re-run is adopted only when its badge
+                    # strictly outranks the original, so the
+                    # rescue can complete a partial but never
+                    # downgrade one.
+                    _seen_r = {(h["url"], h["excerpt"][:60])
+                               for h in spec["hits"]}
+                    _rescue_r, _rterms_r = _rescue_search(
+                        spec["unit_q"], ctx["corp"],
+                        exclude_keys=_seen_r, limit=4)
+                    if _rescue_r:
+                        _note_rescue(_rterms_r, len(_rescue_r),
+                                     "post_idk", spec["unit_q"])
+                        _ctx_r = dict(ctx)
+                        _ctx_r["hits"] = (list(spec["hits"])
+                                          + _rescue_r)
+                        _unit_r = _run_unit(_ctx_r)
+                        _unit_r["rescue"] = {
+                            "terms": _rterms_r[:6],
+                            "injected": len(_rescue_r),
+                            "urls": [h["url"]
+                                     for h in _rescue_r]}
+                        _BADGE_RANK_R = {
+                            "idk": 0, "partial_single": 1,
+                            "partial_reduced": 2, "partial": 3,
+                            "verified_single": 4,
+                            "verified_reduced": 5,
+                            "verified_web_reduced": 5,
+                            "verified": 6, "verified_web": 6}
+                        if _BADGE_RANK_R.get(
+                                _unit_r["badge"], 0) \
+                                > _BADGE_RANK_R.get(
+                                    unit["badge"], 0):
+                            unit = _unit_r
+                            unit_hits = _ctx_r["hits"]
+                        else:
+                            unit["rescue"] = _unit_r["rescue"]
+                    if unit["badge"] == "idk":
+                        web_b = _branch_attempt(failed_claims)
+                    else:
+                        web_b = []
                     if web_b:
                         ctx2 = dict(ctx)
                         ctx2["hits"] = list(spec["hits"]) + web_b

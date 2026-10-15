@@ -5,6 +5,45 @@ each version are in `docs/`. Corpus updates are manual: new documents
 are collected, verified against their sources, and merged alongside a
 version bump rather than synced automatically.
 
+## v21 — 2026-10-14
+
+Retrieval accuracy, an effective-dated figures registry, a staged
+growth loop, and judge-timeout discipline. Ledger caps raised
+($10/day, $1/ask) as an operator config change; the ledger, choke
+point, and trip behavior are unchanged.
+
+- Retrieval: an exact-term rescue pass fires on suspicion of a weak
+  pool (and again after an IDK or partial draft, always re-drafting
+  on injection) and promotes matching chunks into the rerank window;
+  match text includes document titles and section headings, which is
+  load-bearing where a key term lives in a title only. Registry
+  entries pin their source chunk into the pool by topic. Lay-term
+  registrations (server/growth_terms.json, loaded at boot) expand
+  both search and the rescue.
+- Registry: every verified figure gained valid_from/valid_to
+  windows, a family key, dated history, and prose successor notes
+  for unconfirmed next-period values (notes are never served as
+  figures). The transfer penalty divisor is a dated pair: $8,027
+  for applications on or after 2026-07-01, $7,651 before.
+- Growth loop: server gap rows are complete queue candidates
+  (ask id + class guess). tools/growth_loop.py classifies gaps,
+  fetches only from allowlisted official domains into a staging
+  area, and writes review cards (staged output in tools/staging/);
+  merges are human-approved. Retrieval misses become regression
+  and term proposals, never fetches. A 2027 watchlist (CMS spousal
+  standards, Part B premium, Indiana waiver cap) stages standing
+  cards; nothing unpublished is fetched or asserted.
+- Vocabulary audit: tools/vocab_audit.py generates phrasings per
+  corpus unit (templates, substitutions, real questions; LLM
+  cross-examination pluggable, default off) and stages gap cards
+  from offline retrieval dry-runs (output in tools/vocab_staging/).
+- Judges: NIM legs honor the leg deadline across retries (a 30s
+  leg can no longer burn 60s); every seat outcome path (served,
+  skipped, failed, shed) records its reason.
+- tools/retrieval_regression.py + retrieval_cases.jsonl are in the
+  tree unused: the retrieval-core direction was decided directly,
+  so the harness is not a gate.
+
 ## v20.2 — 2026-10-14
 
 Retrieval fixes, observability, and a comment scrub.

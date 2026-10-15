@@ -1,0 +1,61 @@
+{
+ "id": "gap-5549b82235",
+ "status": "staged \u2014 pending human merge",
+ "class": "retrieval_miss",
+ "question": "What is Indiana's Medicaid transfer penalty divisor?",
+ "ask_id": "fixture-divisor-v202",
+ "gate": "judging",
+ "badge": "verified_reduced",
+ "missing": [
+  "no excerpt in the 16-candidate pool mentions the divisor; IHCPPM 3006.00.00 never entered the candidate pool"
+ ],
+ "class_guess_from_server": "unknown",
+ "source_url": null,
+ "fetch_date": null,
+ "chunk_count": 1,
+ "diff_summary": null,
+ "note": "The governing document is already in the corpus; retrieval missed it. This is a regression-case proposal, not a fetch.",
+ "matched_doc": "IHCPPM 3006.00.00: Average Monthly Cost of Private Nursing Facility Care (Transfer Penalty Divisor)",
+ "matched_terms": [
+  "transfer",
+  "penalty",
+  "divisor",
+  "3006.00.00",
+  "average monthly cost"
+ ],
+ "lay_term_suggestions": [
+  {
+   "concept": "transfer",
+   "corpus_terms": [
+    "3006.00.00",
+    "average",
+    "monthly",
+    "cost",
+    "private",
+    "nursing"
+   ]
+  },
+  {
+   "concept": "penalty",
+   "corpus_terms": [
+    "3006.00.00",
+    "average",
+    "monthly",
+    "cost",
+    "private",
+    "nursing"
+   ]
+  },
+  {
+   "concept": "divisor",
+   "corpus_terms": [
+    "3006.00.00",
+    "average",
+    "monthly",
+    "cost",
+    "private",
+    "nursing"
+   ]
+  }
+ ]
+}

@@ -1,0 +1,49 @@
+{
+ "id": "gap-a086c09746",
+ "status": "staged \u2014 pending human merge",
+ "class": "retrieval_miss",
+ "question": "Under Indiana Medicaid fee-for-service, how often are eyeglasses covered for adults?",
+ "ask_id": "fixture-eyeglasses-v20",
+ "gate": "judging",
+ "badge": "idk",
+ "missing": [
+  "the IHCP Vision Services module (PROMOD00051) never entered the candidate pool on the natural phrasing"
+ ],
+ "class_guess_from_server": "unknown",
+ "source_url": null,
+ "fetch_date": null,
+ "chunk_count": 27,
+ "diff_summary": null,
+ "note": "The governing document is already in the corpus; retrieval missed it. This is a regression-case proposal, not a fetch.",
+ "matched_doc": "IHCP Provider Reference Module: Vision Services (PROMOD00051)",
+ "matched_terms": [
+  "eyeglasses",
+  "covered",
+  "vision",
+  "promod00051"
+ ],
+ "lay_term_suggestions": [
+  {
+   "concept": "eyeglasses",
+   "corpus_terms": [
+    "promod00051",
+    "provider",
+    "reference",
+    "module",
+    "vision",
+    "services"
+   ]
+  },
+  {
+   "concept": "covered",
+   "corpus_terms": [
+    "promod00051",
+    "provider",
+    "reference",
+    "module",
+    "vision",
+    "services"
+   ]
+  }
+ ]
+}

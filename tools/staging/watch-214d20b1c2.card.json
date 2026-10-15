@@ -1,0 +1,20 @@
+{
+ "id": "watch-214d20b1c2",
+ "status": "staged \u2014 pending human merge",
+ "class": "watchlist",
+ "question": "2027 Medicare Part B premium",
+ "ask_id": null,
+ "gate": null,
+ "badge": null,
+ "missing": null,
+ "class_guess_from_server": null,
+ "source_url": null,
+ "fetch_date": null,
+ "chunk_count": null,
+ "diff_summary": null,
+ "expected_domains": [
+  "cms.gov"
+ ],
+ "publication_status": "awaiting publication",
+ "note": "Expected late November 2026 (the usual CMS announcement window). Not posted as of 2026-10-14."
+}
