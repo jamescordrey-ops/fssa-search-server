@@ -1,0 +1,146 @@
+{
+ "Under Indiana Medicaid fee-for-service, how often are eyeglasses covered for adults?": {
+  "pass": true,
+  "top1": "IHCP Provider Reference Module: Vision Services (PROMOD00051)",
+  "corpus": "in",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What is Indiana's Medicaid transfer penalty divisor?": {
+  "pass": true,
+  "top1": "IHCPPM 3006.00.00: Average Monthly Cost of Private Nursing Facility Care (Transfer Penalty",
+  "corpus": "in",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What is a qualified income trust and when does an Indiana Medicaid applicant need one?": {
+  "pass": true,
+  "top1": "IHCPPM 2615.75.15: Certain Trusts Receiving Special Consideration (Miller Trust / QIT, Poo",
+  "corpus": "in",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What is the substantial gainful activity limit for 2027, and what is the trial work period threshold?": {
+  "pass": false,
+  "top1": "Office of Early Childhood and Out-of-School Learning: FAQ for FamiliesIN.gov",
+  "corpus": "in",
+  "source": "retrieval_cases.jsonl"
+ },
+ "My wife and I have $190,000 in countable savings. I need nursing home care in Indiana and she will stay home. How much can she keep as the community spouse resource allowance?": {
+  "pass": true,
+  "top1": "Indiana Long Term Care Insurance Program: Spousal Impoverishment Protection Law",
+  "corpus": "in",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What is structured family caregiving and who qualifies?": {
+  "pass": true,
+  "top1": "DFR Policy Manual Ch 2800: Income",
+  "corpus": "in",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What is a Miller trust and when would someone in Indiana need one?": {
+  "pass": true,
+  "top1": "IHCPPM 2615.75.15: Certain Trusts Receiving Special Consideration (Miller Trust / QIT, Poo",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "How much income can the spouse of a Medicaid applicant keep each month?": {
+  "pass": true,
+  "top1": "IHCPPM 3010.20.10 and 3455.15.10.10: Spousal Impoverishment Standards and Excess Shelter A",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What is MAGI and how is it used to decide Medicaid eligibility?": {
+  "pass": true,
+  "top1": "Eligibility Policy | Medicaid",
+  "corpus": "federal",
+  "source": "retrieval_cases.jsonl"
+ },
+ "I'm on Indiana Medicaid with an HCBS waiver, my wife is my paid caregiver through Structured Family Caregiving, her father passed and she'll inherit about $60,000 once the estate settles; does it affect my eligibility and what should we do before the money arrives?": {
+  "pass": false,
+  "top1": "FSSA: Medicaid StrategiesIN.gov",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "My father gets $3,400 a month from a pension and Social Security, which puts him over the Medicaid income limit. He lives in Indiana. Is there anything that can be done so he can qualify?": {
+  "pass": false,
+  "top1": "FSSA: Resource GuideIN.gov",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "I got a $5,000 backpay check from Social Security. Does it count against my Medicaid?": {
+  "pass": true,
+  "top1": "FSSA: Resource GuideIN.gov",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "My wife and I have $190,000 in savings and I am applying for Medicaid nursing home care. How much of our assets can my wife keep?": {
+  "pass": true,
+  "top1": "Indiana Long Term Care Insurance Program: Spousal Impoverishment Protection Law",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What is the maximum monthly maintenance needs allowance in Indiana?": {
+  "pass": true,
+  "top1": "IHCPPM 3010.20.10 and 3455.15.10.10: Spousal Impoverishment Standards and Excess Shelter A",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "How often are eye exams covered for adults on Indiana Medicaid fee-for-service?": {
+  "pass": true,
+  "top1": "Indiana Medicaid for Members: Health Plan Comparisons",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "How often are dental exams covered for adults under Indiana Medicaid?": {
+  "pass": true,
+  "top1": "IHCP Provider Reference Module: Dental Services (PROMOD00022)",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What was Indiana's transfer penalty divisor for applications filed in 2025?": {
+  "pass": true,
+  "top1": "IHCPPM 3006.00.00: Average Monthly Cost of Private Nursing Facility Care (Transfer Penalty",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What was the ABLE account contribution limit in 2025?": {
+  "pass": true,
+  "top1": "People paying disability-related expenses consider an ABLE savings account and Savers Cred",
+  "corpus": "federal",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What is the resource limit for SNAP in Indiana?": {
+  "pass": true,
+  "top1": "DFR: SNAP (Food Assistance)IN.gov",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What is the asset limit for Medicaid in Indiana?": {
+  "pass": true,
+  "top1": "DMHA: Behavioral and Primary Healthcare CoordinationIN.gov",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What is sturctured family caregiving and who qualifies?": {
+  "pass": true,
+  "top1": "DFR Policy Manual Ch 2800: Income",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "How does Indiana's transfer penalty devisor work when someone gives away assets?": {
+  "pass": true,
+  "top1": "IHCPPM 3006.00.00: Average Monthly Cost of Private Nursing Facility Care (Transfer Penalty",
+  "corpus": "indiana",
+  "source": "retrieval_cases.jsonl"
+ },
+ "What was the maximum able account contribution for 2025?": {
+  "pass": false,
+  "top1": "HIP: Am I EligibleIN.gov",
+  "corpus": "in",
+  "source": "retrieval_cases.jsonl"
+ },
+ "If I go into a nursing home how much of our savings can my wife keep?": {
+  "pass": true,
+  "top1": "Indiana Long Term Care Insurance Program: Spousal Impoverishment Protection Law",
+  "corpus": "in",
+  "source": "retrieval_cases.jsonl"
+ }
+}

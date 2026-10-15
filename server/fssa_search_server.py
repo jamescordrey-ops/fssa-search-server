@@ -539,6 +539,29 @@ ASK_TIME_CAP_S = 600
 # cap — _run_job joins its daemon child for cap + this many
 # seconds before abandoning the job (see _run_job).
 JOB_BACKSTOP_SLACK_S = 60
+# v23.2 (BUG-11 / F1+F2): the class budgets, named once. ONE
+# clock per ask is anchored at ask start (see _ask_clock_begin
+# / _ask_clock_class): every unit, rescue re-run, and branch
+# re-run of the ask shares the SAME class deadline instead of
+# re-arming a fresh budget per _run_unit invocation (the
+# v23.1 defect: deadline = min(ask cap, now + budget) at
+# every _run_unit entry, so the ladder + rescue path could
+# burn a full class budget per invocation and budget_cut
+# never engaged on the 416.9s CSRA ask). The 600s ask cap
+# (ASK_TIME_CAP_S) stays the outer bound.
+ASK_BUDGET_SIMPLE_S = 150
+ASK_BUDGET_HARD_S = 285
+# v23.2 (F2): absolute cap on drafting calls per ask, shared
+# by the ladder, the lead micro-repair, and every re-run
+# (rescue / branch). At the cap the best judged draft on hand
+# ships through normal finalization.
+DRAFT_CALL_CAP = 4
+# v23.2 (F1): a provider call may start only when at least
+# this much budget remains; below it the call cannot produce
+# a usable result inside its bounded (deadline-clamped)
+# timeout, so the stage is treated as spent and the budget
+# cut is recorded instead of starting the call.
+MIN_CALL_START_S = 2.0
 # v18 (§B remainder): the per-ask OpenRouter cost ceiling. Past
 # this line the ladder stops spending on redrafts and ships the
 # best capped Partial from the claims already judged (or IDKs);
@@ -4817,11 +4840,13 @@ def _numbered_context(hits):
                        for i, h in enumerate(hits or ()))
 
 
-def gemini_ask(model, question, hits, instructions=""):
+def gemini_ask(model, question, hits, instructions="", deadline=None):
     """Ask the Gemini API, best model first, downgrading down GEMINI_CHAIN
     only when a model is unavailable. Returns (answer, prompt, served_model,
     downgraded). Raises if every Gemini model fails; the caller then falls
-    back to the local model."""
+    back to the local model. v23.2 (BUG-11 F1): `deadline` (the ask's one
+    deadline) clamps every attempt via _gemini_call; through v23.1 this
+    drafting path called _gemini_call with NO deadline at all."""
     if not GEMINI_API_KEY:
         raise RuntimeError("Gemini API key not configured (gemini_key.txt missing)")
     context = _numbered_context(hits)
@@ -4839,7 +4864,8 @@ def gemini_ask(model, question, hits, instructions=""):
     errors = []
     for api_model in chain:
         try:
-            content = _gemini_call(api_model, payload)
+            content = _gemini_call(api_model, payload,
+                                   deadline=deadline)
             return (content, sys_prompt + "\n\n" + user_msg,
                     api_model, api_model != start)
         except Exception as e:
@@ -4847,7 +4873,13 @@ def gemini_ask(model, question, hits, instructions=""):
     raise RuntimeError("All Gemini models unavailable: " + "; ".join(errors))
 
 
-def ollama_ask(model, question, hits, instructions=""):
+def ollama_ask(model, question, hits, instructions="", timeout=300):
+    # v23.2 (BUG-11 F1): `timeout` is the caller's deadline-
+    # clamped bound. Through v23.1 the socket timeout was a
+    # hardcoded 300s with no deadline parameter at all, so a
+    # local fallback draft starting near the budget edge
+    # could run a full 300s past it (the pest-control ask's
+    # local fallback leg).
     context = _numbered_context(hits)
     user_msg = f"Question: {question}\n\nDocument excerpts:\n{context}"
     sys_prompt = _system_prompt_for(question) + (("\n\n" + instructions) if instructions
@@ -4873,7 +4905,8 @@ def ollama_ask(model, question, hits, instructions=""):
     }).encode()
     req = urllib.request.Request(OLLAMA + "/api/chat", data=payload,
                                  headers={"Content-Type": "application/json"})
-    data = json.loads(urllib.request.urlopen(req, timeout=300).read())
+    data = json.loads(urllib.request.urlopen(
+        req, timeout=max(1.0, float(timeout))).read())
     msg = data.get("message", {})
     content = (msg.get("content") or "").strip()
     if not content:
@@ -5118,6 +5151,103 @@ def _leg_timeout(base):
     return min(float(base), remaining)
 
 
+# --- v23.2 (BUG-11): ONE clock per ask + the shared draft cap ----
+# F1: the ask clock is anchored ONCE, at ask start (do_POST's
+# prologue, via _ask_clock_begin), and the class deadline is
+# fixed the moment the ask's class is known (_ask_clock_class).
+# Every later stage — the drafting ladder, the post-IDK rescue
+# re-run, the branch re-run, claim extraction/checking, and
+# finalization — consults THESE anchors. Nothing re-arms a
+# budget from its own start ever again: through v23.1,
+# _run_unit computed deadline = min(ask cap, now + budget)
+# at every entry, so the rescue re-run of the CSRA ask got a
+# fresh 285s window after the ladder's ~228s, the ask ran
+# 416.9s, and budget_cut stayed False because no single
+# invocation ever crossed its own private deadline.
+# F2: draft_calls lives on the same context, so the ladder,
+# the lead micro-repair, the rescue re-run, and the branch
+# re-run all draw from the one counter.
+
+def _ask_clock_begin(t0=None):
+    """Anchor the ask's clock at ask start: t0 + the 600s
+    outer cap. Idempotent within an ask (the first anchor
+    wins). Returns the ask (outer) deadline."""
+    ctx = _ask_ctx()
+    if ctx.ask_t0 is None:
+        ctx.ask_t0 = time.monotonic() if t0 is None else t0
+        ctx.ask_deadline = ctx.ask_t0 + ASK_TIME_CAP_S
+    return ctx.ask_deadline
+
+
+def _ask_clock_class(hard):
+    """Fix the ask's class deadline (150s simple / 285s hard
+    from ASK START, not from any unit's start) once the class
+    is known. Returns the class deadline."""
+    ctx = _ask_ctx()
+    _ask_clock_begin()
+    if ctx.class_deadline is None:
+        ctx.class_deadline = ctx.ask_t0 + (
+            ASK_BUDGET_HARD_S if hard else ASK_BUDGET_SIMPLE_S)
+    return ctx.class_deadline
+
+
+def _ask_deadline():
+    """The ask's ONE effective deadline: the earlier of the
+    class deadline and the outer ask cap. None when no clock
+    has been anchored (outside an ask)."""
+    ctx = _ask_ctx()
+    cands = [d for d in (ctx.class_deadline, ctx.ask_deadline)
+             if d is not None]
+    return min(cands) if cands else None
+
+
+def _budget_remaining(deadline=None):
+    """Seconds left on the ask clock (or on `deadline` when
+    given). +inf when no deadline exists."""
+    dl = _ask_deadline() if deadline is None else deadline
+    if dl is None:
+        return float("inf")
+    return dl - time.monotonic()
+
+
+def _call_may_start(deadline=None):
+    """F1's start gate: a new provider call may start only
+    when the remaining budget can cover a bounded attempt —
+    at least MIN_CALL_START_S left (the call's own timeout is
+    separately clamped to what remains, so a call in flight
+    ends AT the deadline and is abandoned there)."""
+    return _budget_remaining(deadline) >= MIN_CALL_START_S
+
+
+def _note_budget_cut(phase=None):
+    """Record the ask-level budget cut truthfully: the FIRST
+    cut wins (its phase is where the budget actually ran
+    out), later marks never rewrite it."""
+    ctx = _ask_ctx()
+    with ctx.lock:
+        if not ctx.budget_cut:
+            ctx.budget_cut = True
+            if phase is None:
+                _open = ctx.phase_open
+                phase = _open[0] if _open else None
+            ctx.cut_phase = phase
+
+
+def _claim_draft_call():
+    """F2: claim one drafting call from the ask's shared
+    counter (ladder rungs, lead micro-repairs, rescue and
+    branch re-runs all claim here). Returns False at the
+    absolute cap — the caller must not start the call; the
+    best judged draft on hand ships instead."""
+    ctx = _ask_ctx()
+    with ctx.lock:
+        if ctx.draft_calls >= DRAFT_CALL_CAP:
+            ctx.draft_capped = True
+            return False
+        ctx.draft_calls += 1
+        return True
+
+
 def _roster_health_block():
     """GET /health's roster block (v23.1): the ask path's
     configured servers, stated plainly so a health read shows
@@ -5157,7 +5287,17 @@ class _AskContext:
                  "served_models", "draft_family",
                  "lock", "unit_deadline", "retr_pools", "ask_id",
                  "phase_ms", "phase_open",
-                 "judge_backup_used")
+                 "judge_backup_used",
+                 # v23.2 (BUG-11 F1/F2): the ONE ask clock
+                 # (monotonic anchors; None until _ask_clock_
+                 # begin runs), the shared per-ask drafting
+                 # call counter, and the ask-level budget-cut
+                 # record (first cut wins, so a cut in a unit
+                 # whose re-run is later discarded still lands
+                 # truthfully on the ask record).
+                 "ask_t0", "ask_deadline", "class_deadline",
+                 "draft_calls", "draft_capped",
+                 "budget_cut", "cut_phase")
 
     def __init__(self):
         self.cost = 0.0
@@ -5189,7 +5329,19 @@ class _AskContext:
         # _run_unit per unit (units run sequentially inside an
         # ask); chain legs clamp their timeouts to what is
         # left of it via _leg_timeout. None outside a unit.
+        # v23.2: _run_unit publishes the ask's ONE effective
+        # deadline here (min of the class deadline and the ask
+        # cap), never a per-invocation re-arm.
         self.unit_deadline = None
+        # v23.2 (BUG-11 F1/F2): one ask clock + shared draft
+        # counter + ask-level cut record (see __slots__ note).
+        self.ask_t0 = None
+        self.ask_deadline = None
+        self.class_deadline = None
+        self.draft_calls = 0
+        self.draft_capped = False
+        self.budget_cut = False
+        self.cut_phase = None
 
 
 _ASK_CTX_VAR = contextvars.ContextVar("fssa_ask_ctx", default=None)
@@ -7175,7 +7327,8 @@ def _remove_sentence(text, sentence):
     return text[:h] + text[j:]
 
 
-def _strip_uncited_asides(draft, parsed, claims, lead_sentence=None):
+def _strip_uncited_asides(draft, parsed, claims, lead_sentence=None,
+                          flagged=None):
     """The v17.3 strip. Candidates are the draft's uncited
     load-bearing sentences (parsed['uncited_lb']). A candidate
     is strippable only when it maps to no extracted claim and
@@ -7188,7 +7341,15 @@ def _strip_uncited_asides(draft, parsed, claims, lead_sentence=None):
     Verification: the stripped draft's sentence list must be
     exactly the original list minus the removed sentences,
     byte-identical and in order; on any mismatch the strip is
-    abandoned and the draft fails closed as before."""
+    abandoned and the draft fails closed as before.
+    v23.2 (BUG-11 F3): `flagged` is the set of sentences the
+    deterministic checks or the judge actually flagged for
+    THIS draft (the citation parser's uncited list, sentences
+    carrying an ungrounded figure, sentences mapping to a
+    claim whose final is not "supported"). When the caller
+    supplies it, a candidate outside the flagged set is
+    NEVER stripped: the strip may remove only what a check
+    flagged, never unflagged content."""
     uncited = list(parsed.get("uncited_lb") or ())
     if not uncited or not claims:
         return None, []
@@ -7199,6 +7360,8 @@ def _strip_uncited_asides(draft, parsed, claims, lead_sentence=None):
         if s in seen:
             continue
         seen.add(s)
+        if flagged is not None and s not in flagged:
+            continue  # v23.2 F3: unflagged sentences never strip
         if lead_sentence is not None and s == lead_sentence:
             continue
         # v18 (F7): a sentence carrying limiting language or a
@@ -7370,6 +7533,10 @@ def _empty_checks_block():
             "citations": {"failed": []},
             "judge": {"served_by": None, "model": None,
                       "backup_used": False,
+                      # v23.2: why the backup was not attempted
+                      # when it was not (e.g. "budget spent");
+                      # None when it ran or Lite served.
+                      "backup_skip": None,
                       "verdicts": {"supported": 0,
                                    "contradicted": 0,
                                    "not_addressed": 0}},
@@ -7519,8 +7686,15 @@ def _check_round(question, hits, answer, hard, mech_block="",
         admitted = []
 
     def _spent():
-        return deadline is not None \
-            and time.monotonic() >= deadline
+        # v23.2 (BUG-11 F1): the round consults the ask's ONE
+        # deadline — its argument when the caller threaded
+        # one, else the ask clock — and a stage is spent when
+        # too little budget remains to start another provider
+        # call (MIN_CALL_START_S), not merely at the edge.
+        _dl = deadline if deadline is not None \
+            else _ask_deadline()
+        return _dl is not None \
+            and (_dl - time.monotonic()) < MIN_CALL_START_S
 
     def _claim_backup():
         """Atomically claim this ask's single backup-judge use."""
@@ -7544,28 +7718,59 @@ def _check_round(question, hits, answer, hard, mech_block="",
             primary = _primary_judgment("local", question, hits,
                                         answer, mech_block,
                                         deadline=deadline)
+        else:
+            _note_budget_cut("extracting")
         if primary["available"]:
             engine = "local"
             served_model = primary.get("model") or LOCAL_MODEL
             engines_used.append("local")
         else:
-            errors.append("local judge: "
-                          + str(primary.get("error")))
+            _perr = str(primary.get("error"))
+            if _perr == "not run" and _spent():
+                _perr = "judge leg budget spent " \
+                        "(round started past the deadline)"
+            errors.append("local judge: " + _perr)
     else:
         _set_check_line("Fact check: Gemini Lite")
         if not _spent():
             primary = _primary_judgment("lite", question, hits,
                                         answer, mech_block,
                                         deadline=deadline)
+        else:
+            _note_budget_cut("extracting")
         if primary["available"]:
             engine = "lite"
             served_model = primary.get("model") or GEMINI_CHAIN[0]
             engines_used.append("lite")
         else:
             if primary.get("error"):
-                errors.append("lite judge: "
-                              + str(primary["error"]))
-            if _claim_backup() and not _spent():
+                # v23.2 (ABLE ask 87f5d6c5db39): a round that
+                # started SPENT keeps the placeholder error
+                # "not run" — recorded verbatim in v23.1 as
+                # "lite judge: not run", which reads as a Lite
+                # failure when in fact no leg was ever tried.
+                # Name the real reason.
+                _perr = str(primary["error"])
+                if _perr == "not run" and _spent():
+                    _perr = "judge leg budget spent " \
+                            "(round started past the deadline)"
+                errors.append("lite judge: " + _perr)
+            # v23.2 (ABLE ask): the v23.1 condition
+            # `_claim_backup() and not _spent()` evaluated the
+            # CLAIM first — a spent round burned the ask's
+            # single backup use without attempting it, and
+            # nothing recorded why the backup never engaged
+            # (backup_used false, no error, no skip reason).
+            # Now: spent rounds record the skip explicitly and
+            # never claim the backup; a live round claims it
+            # only when the attempt will actually run.
+            if _spent():
+                _note_budget_cut("extracting")
+                checks["judge"]["backup_skip"] = \
+                    "budget spent"
+                errors.append("backup judge: not attempted "
+                              "(budget spent)")
+            elif _claim_backup():
                 backup_used = True
                 _set_check_line(
                     "Fact check: backup judge (DeepSeek V3.1)")
@@ -7823,8 +8028,11 @@ def _generate(engine, model, question, hits, instructions):
     """One draft generation with v13's fallback honesty. Returns
     (answer, prompt, served_label, downgraded, fallback)."""
     if engine == "gemini":
+        # v23.2 (F1): the Gemini drafting path consults the
+        # ask's one deadline like every other drafting leg.
         answer, prompt, gserved, dg = gemini_ask(
-            model, question, hits, instructions=instructions)
+            model, question, hits, instructions=instructions,
+            deadline=_ask_ctx().unit_deadline)
         label = gserved + " (API)"
         if dg:
             label += " (downgraded: best Gemini unavailable)"
@@ -7904,16 +8112,33 @@ def _generate(engine, model, question, hits, instructions):
             job, "every drafting tier down")
         raise RuntimeError(
             f"{job}: every drafting tier down")
+    # v23.2 (F1): the local drafting branch consults the ask
+    # clock too — its timeout clamps to the unit's remaining
+    # budget via _leg_timeout, and it does not start when the
+    # budget cannot cover a bounded attempt.
+    _ot = _leg_timeout(300)
+    if _ot < MIN_CALL_START_S:
+        _note_budget_cut()
+        raise RuntimeError(
+            "local drafting leg budget spent (ask deadline)")
     try:
         answer, prompt = ollama_ask(model, question, hits,
-                                    instructions=instructions)
+                                    instructions=instructions,
+                                    timeout=_ot)
         return answer, prompt, model, False, False
     except Exception:
         if model == LOCAL_MODEL:
             raise
         _note_local_load("local-model-fallback")
+        _ot2 = _leg_timeout(300)
+        if _ot2 < MIN_CALL_START_S:
+            _note_budget_cut()
+            raise RuntimeError(
+                "local drafting fallback budget spent "
+                "(ask deadline)")
         answer, prompt = ollama_ask(LOCAL_MODEL, question, hits,
-                                    instructions=instructions)
+                                    instructions=instructions,
+                                    timeout=_ot2)
         return (answer, prompt,
                 LOCAL_MODEL + f" (fallback: routed {model} unavailable)",
                 False, True)
@@ -8161,11 +8386,39 @@ def _run_unit(ctx):
     # 300s wall, and the ask-level 600s cap stays as the
     # outer safety net. The deadline is published on the ask
     # context so chain legs clamp to it (_leg_timeout).
-    budget_s = ASK_TIME_CAP_S
+    # v23.2 (BUG-11 F1 — THE re-arming fix): the class budget
+    # is a deadline anchored at ASK START, shared by every
+    # unit and re-run of the ask. Through v23.1 this block
+    # computed deadline = min(ask cap, NOW + budget) at every
+    # _run_unit entry, so each invocation — the ladder, then
+    # the post-IDK rescue re-run, then the branch re-run —
+    # received a FRESH 150/285s window bounded only by the
+    # 600s outer cap; the CSRA ask burned ~228s in unit 1 and
+    # ~189s in the rescue unit, no invocation crossed its own
+    # private deadline, and budget_cut recorded False at
+    # 416.9s. Now: when the ask clock is anchored (do_POST
+    # anchors it), the unit's deadline IS the ask's one
+    # deadline (class deadline, outer-capped), further
+    # bounded by any tighter ctx deadline the caller passed.
+    # Standalone callers (offline suites, no anchored clock)
+    # anchor a unit-local clock at entry, preserving the
+    # pre-v23.2 standalone semantics exactly.
+    budget_s = ASK_BUDGET_HARD_S if hard else ASK_BUDGET_SIMPLE_S
+    _actx0 = _ask_ctx()
+    if _actx0.ask_t0 is not None:
+        _ask_clock_class(hard)
+        _cands = [d for d in (_actx0.class_deadline,
+                              _actx0.ask_deadline, deadline,
+                              ctx.get("class_deadline"))
+                  if d is not None]
+        deadline = min(_cands) if _cands else None
+    elif deadline is not None:
+        deadline = min(deadline,
+                         time.monotonic() + budget_s)
     if deadline is not None:
-        budget_s = 285 if hard else 150
-        deadline = min(deadline, time.monotonic() + budget_s)
-        _ask_ctx().unit_deadline = deadline
+        _actx0.unit_deadline = deadline
+    else:
+        budget_s = ASK_TIME_CAP_S
     # v18 (F13): the checking round sees the FULL
     # question for a bundled part, with the part scope stated;
     # through v17.3 a part was drafted and judged as if it were
@@ -8198,6 +8451,10 @@ def _run_unit(ctx):
     gen_error = None
     cap_hit = False
     cut_phase = None
+    # v23.2 (F2/F3): the ladder stopped on the shared draft
+    # cap, and the assembly guard's firing record.
+    draft_capped = False
+    assembly_guard = None
     cost_capped = False
     conflict_fail = False
     judged_draft = None       # last draft that went through judging
@@ -8256,11 +8513,15 @@ def _run_unit(ctx):
 
     def _mark_cap():
         """v23.1 (WS-A): record a budget cut + the phase the
-        unit was in when the budget ran out."""
+        unit was in when the budget ran out. v23.2: the cut is
+        ALSO noted on the ask context (first cut wins), so the
+        ask record stays truthful even when the cutting unit
+        is a re-run whose result is later discarded."""
         nonlocal cap_hit, cut_phase
         cap_hit = True
         _open = _ask_ctx().phase_open
         cut_phase = _open[0] if _open else None
+        _note_budget_cut(cut_phase)
 
     for rung in range(3):  # draft + two redrafts (operator decision)
         if deadline and time.monotonic() > deadline:
@@ -8282,6 +8543,18 @@ def _run_unit(ctx):
         instr = (instr + "\n\n" + CITATION_CONTRACT).strip()
         if objections:
             instr = (instr + "\n\n" + objections).strip()
+        # v23.2 (F1): no new drafting call starts when the
+        # remaining budget cannot cover a bounded attempt.
+        if deadline and not _call_may_start(deadline):
+            _mark_cap()
+            break
+        # v23.2 (F2): every ladder rung draws from the ask's
+        # ONE draft-call counter (shared with lead repairs
+        # and every re-run). At the cap the ladder stops and
+        # the best judged draft on hand finalizes below.
+        if not _claim_draft_call():
+            draft_capped = True
+            break
         eng, mdl = _draft_choice(rung)
         try:
             res = _try_generate(eng, mdl, instr)
@@ -8373,9 +8646,23 @@ def _run_unit(ctx):
             # normal judging and every other gate re-runs on
             # it. Code never attaches the citation itself and
             # the gate is not loosened.
-            lead_repairs += 1
-            new_lead = _repair_lead(ctx, draft, lead_sentence,
-                                    eng, mdl, instr)
+            # v23.2 (BUG-11 F1+F2): a lead repair IS a drafting
+            # call — through v23.1 it called _generate directly,
+            # uncounted by the rung loop and ungated by the
+            # budget, which is how the CSRA ask's 3 rungs became
+            # 6 draft calls in the first unit alone (3 rungs +
+            # 3 repairs). It now claims from the shared counter
+            # and starts only when the budget can cover it.
+            if deadline and not _call_may_start(deadline):
+                _mark_cap()
+                new_lead = None
+            elif not _claim_draft_call():
+                draft_capped = True
+                new_lead = None
+            else:
+                lead_repairs += 1
+                new_lead = _repair_lead(ctx, draft, lead_sentence,
+                                        eng, mdl, instr)
             if new_lead and new_lead != lead_sentence:
                 draft2 = draft.replace(lead_sentence, new_lead, 1)
                 parsed2 = _parse_citations(draft2, ctx["hits"])
@@ -8441,6 +8728,14 @@ def _run_unit(ctx):
     # stripped_sentences (the v23.1 checks record's strip log).
     # Claim-bearing uncited sentences are untouched: they fail
     # closed below exactly as before.
+    # v23.2 (F1): the strip's re-check is a provider stage
+    # too — when the budget cannot cover it, the cut is marked
+    # here and the strip (whose outer condition excludes
+    # cap_hit) does not run.
+    if uncited_lb and judged_draft is not None and jr is not None \
+            and not cap_hit and deadline \
+            and not _call_may_start(deadline):
+        _mark_cap()
     if uncited_lb and judged_draft is not None and jr is not None \
             and jr["mode"] != "none" and jr["claims"] \
             and not cap_hit and not gen_error and not cost_capped:
@@ -8455,8 +8750,25 @@ def _run_unit(ctx):
                 if s["factual"]:
                     lead_now = s["text"]
                     break
+        # v23.2 (F3): the flagged set for THIS draft — the
+        # citation parser's uncited sentences, sentences
+        # mapping to a claim the checks/judge did not support,
+        # and sentences carrying an ungrounded figure. The
+        # strip may remove only flagged sentences.
+        _flagged = set(uncited_lb)
+        for _c in jr["claims"]:
+            if _c.get("final") != "supported":
+                for _s in parsed["sentences"]:
+                    if _sentence_maps_to_claim(_s["text"], [_c]):
+                        _flagged.add(_s["text"])
+        if ungrounded:
+            _ung = {round(float(v), 2) for v in ungrounded}
+            for _s in parsed["sentences"]:
+                if _claim_money(_s["text"]) & _ung:
+                    _flagged.add(_s["text"])
         stripped_draft, stripped_sentences = _strip_uncited_asides(
-            judged_draft, parsed, jr["claims"], lead_now)
+            judged_draft, parsed, jr["claims"], lead_now,
+            flagged=_flagged)
         if stripped_draft is not None:
             draft = stripped_draft
             judged_draft = stripped_draft
@@ -8514,6 +8826,12 @@ def _run_unit(ctx):
             "budget_cut": cap_hit,
             "cut_phase": cut_phase,
             "cost_capped": cost_capped,
+            # v23.2 (F2/F3): the ask's shared draft-call count
+            # at this unit's end, whether this unit stopped on
+            # the draft cap, and the assembly guard's record.
+            "draft_calls": _ask_ctx().draft_calls,
+            "draft_capped": draft_capped,
+            "assembly_guard": assembly_guard,
             "draft_text": judged_draft,
             "figure_check": {"ungrounded": list(ungrounded),
                              "regenerated": rungs > 1},
@@ -8557,6 +8875,71 @@ def _run_unit(ctx):
             ctx["allowed_extra"])
         if assembled:
             _atext, _min_cov = assembled
+            # v23.2 (BUG-11 F3 — SHIP WHAT PASSED): the
+            # assembly guard. "The draft that passed checks"
+            # = a judged draft whose check round passed
+            # (jr["pass"]: every substantive claim supported)
+            # with clean deterministic blocks (no figure
+            # failures, no citation failures in jr["checks"])
+            # — the CSRA ask's exact state (figures 5/5,
+            # citations clean, judge 8 supported / 0
+            # contradicted), which v23.1 nevertheless shipped
+            # as a ONE-sentence fragment: the assembly's
+            # exact-key allow-list matched only 1 of the
+            # draft's 24 sentences. MATERIAL LOSS (the guard's
+            # concrete definition): the assembled text carries
+            # fewer sentences than the passing round's
+            # supported-claim count, OR fewer than three
+            # quarters of the passing draft's sentences (the
+            # round passed in full, so the draft's sentences
+            # are supported content; losing a quarter of them
+            # to an allow-list mismatch is material — the
+            # ABLE ask's 5-of-10 shape sits exactly here). On
+            # material loss the
+            # checked draft ships VERBATIM (badge from the
+            # round's judge coverage, as in the shipped exit)
+            # and the guard's firing is logged on the record.
+            _chk = jr.get("checks") or {}
+            _passed_checks = bool(jr.get("pass")) and not (
+                (_chk.get("figures") or {}).get("failed")) \
+                and not ((_chk.get("citations") or {}).get(
+                    "failed"))
+            if _passed_checks:
+                _supp_n = len([c for c in jr["claims"]
+                               if not c.get("meta")
+                               and c["final"] == "supported"])
+                _draft_sents = [
+                    s for s in _split_sentences(judged_draft)
+                    if not s.lower().startswith("confidence:")]
+                _ship_sents = [
+                    s for s in _split_sentences(_atext)
+                    if not s.lower().startswith("confidence:")]
+                if len(_ship_sents) < _supp_n \
+                        or len(_ship_sents) * 4 \
+                        < len(_draft_sents) * 3:
+                    assembly_guard = {
+                        "fired": True,
+                        "supported_claims": _supp_n,
+                        "draft_sentences": len(_draft_sents),
+                        "assembled_sentences": len(_ship_sents),
+                        "action": "shipped the checked draft "
+                                  "verbatim instead of the "
+                                  "materially-lossy assembly"}
+                    _g_answer, _g_fixes = _check_arithmetic(
+                        judged_draft)
+                    _g_badge = "checked" \
+                        if jr.get("judge_complete") \
+                        else "checked_det"
+                    return dict(
+                        base, answer=_g_answer, badge=_g_badge,
+                        assembly_guard=assembly_guard,
+                        judging={"mode": jr["mode"],
+                                 "errors": jr["errors"],
+                                 "annotation":
+                                     _checks_annotation(jr),
+                                 "checks": jr.get("checks")},
+                        claims=jr["claims"], missing=[],
+                        gate=None)
             if cost_capped and not cap_hit:
                 _why = ("the ask reached its per-ask cost "
                         f"ceiling (${PER_ASK_CEILING_USD:.2f}); "
@@ -8566,6 +8949,11 @@ def _run_unit(ctx):
                 _why = ("the ask reached its time budget "
                         f"({budget_s} seconds); only claims "
                         "that passed the checks are shown")
+            elif draft_capped:
+                _why = ("the ask reached its draft-call cap "
+                        f"({DRAFT_CALL_CAP} drafting calls); "
+                        "only claims that passed the checks "
+                        "are shown")
             else:
                 _why = ("verification left some claims "
                         "unverified; only claims that passed "
@@ -8583,6 +8971,46 @@ def _run_unit(ctx):
                                  *[f"not verified: \"{t}\""
                                    for t in cut[:4]]],
                         gate=None)
+    # v23.2 (F3, second placement — the ABLE-ask shape): the
+    # judged draft PASSED its check round (every substantive
+    # claim supported, deterministic blocks clean) but the
+    # supported-core assembly returned NOTHING, so the unit
+    # would IDK a draft that passed checks. Ship the checked
+    # draft verbatim instead (checked when the judge covered
+    # every claim, checked_det when it did not — e.g. a det
+    # round after both judge legs were budget-spent, the
+    # ABLE ask 87f5d6c5db39's exact state) and log the guard.
+    if judged_draft is not None and jr is not None \
+            and jr["mode"] != "none" and jr["claims"]:
+        _chk2 = jr.get("checks") or {}
+        if jr.get("pass") and not (
+                (_chk2.get("figures") or {}).get("failed")) \
+                and not ((_chk2.get("citations") or {}).get(
+                    "failed")):
+            assembly_guard = {
+                "fired": True,
+                "supported_claims": len([
+                    c for c in jr["claims"] if not c.get("meta")
+                    and c["final"] == "supported"]),
+                "draft_sentences": len([
+                    s for s in _split_sentences(judged_draft)
+                    if not s.lower().startswith("confidence:")]),
+                "assembled_sentences": 0,
+                "action": "shipped the checked draft verbatim "
+                          "instead of an IDK (the assembly "
+                          "returned no supported core)"}
+            _g2_answer, _g2_fixes = _check_arithmetic(
+                judged_draft)
+            _g2_badge = "checked" if jr.get("judge_complete") \
+                else "checked_det"
+            return dict(
+                base, answer=_g2_answer, badge=_g2_badge,
+                assembly_guard=assembly_guard,
+                judging={"mode": jr["mode"],
+                         "errors": jr["errors"],
+                         "annotation": _checks_annotation(jr),
+                         "checks": jr.get("checks")},
+                claims=jr["claims"], missing=[], gate=None)
     # IDK: assemble what is missing from the failed gates.
     missing, gate = [], "checking"
     if cap_hit:
@@ -8597,6 +9025,11 @@ def _run_unit(ctx):
         missing.append("the ask reached its per-ask cost ceiling "
                        f"(${PER_ASK_CEILING_USD:.2f}) before a "
                        "verified answer could be assembled")
+    if draft_capped:
+        missing.append("the ask reached its draft-call cap "
+                       f"({DRAFT_CALL_CAP} drafting calls) "
+                       "before a verified answer could be "
+                       "assembled")
     if jr is not None and jr["mode"] == "none":
         missing.append("no judge could run and no claims "
                        "could be checked "
@@ -9275,6 +9708,13 @@ class Handler(BaseHTTPRequestHandler):
             # ASK_TIME_CAP_S); the ladder and the units loop
             # consult this deadline and never ship unverified.
             deadline = t_start + ASK_TIME_CAP_S
+            # v23.2 (BUG-11 F1): anchor the ask's ONE clock
+            # HERE, at ask start. The class deadline is fixed
+            # later, the moment `hard` is known
+            # (_ask_clock_class at the unit-spec build), and
+            # every unit / rescue / branch re-run consults
+            # these anchors — no stage re-arms its own budget.
+            _ask_clock_begin(t_start)
             retr_split = None
             ask_web = {"attempted": False, "queries": [],
                        "urls": [], "credits": 0, "fetched": None}
@@ -9298,6 +9738,13 @@ class Handler(BaseHTTPRequestHandler):
                 if model and model != LOCAL_MODEL:
                     return []
                 if time.monotonic() > deadline - 60:
+                    return []
+                # v23.2 (F1): the branch also consults the
+                # class deadline — past it, no branch search
+                # (and no branch re-run) starts at all.
+                _cd = _ask_ctx().class_deadline
+                if _cd is not None \
+                        and time.monotonic() > _cd - 60:
                     return []
                 web_hits_b, rec = _branch_out_hits(question, claims)
                 ask_web["attempted"] = True
@@ -9564,7 +10011,12 @@ class Handler(BaseHTTPRequestHandler):
                     "budget_cut": bool(cap_hit),
                     "cut_phase": next(
                         (u.get("cut_phase") for u in _units_now
-                         if u.get("budget_cut")), None),
+                         if u.get("budget_cut")), None)
+                    or _ask_ctx().cut_phase,
+                    # v23.2 (F2): the ask's shared drafting
+                    # call count + cap flag, on the ask record.
+                    "draft_calls": _ask_ctx().draft_calls,
+                    "draft_capped": _ask_ctx().draft_capped,
                     "checks": (judging or {}).get("checks"),
                     "annotation": (judging or {}).get("annotation"),
                     # v20.2 (observability): the ask's full
@@ -9612,6 +10064,14 @@ class Handler(BaseHTTPRequestHandler):
                         # strings (previously response-only),
                         # and any retrieval pools it ran.
                         "rescue": u.get("rescue"),
+                        # v23.2 (F2/F3): the shared draft-call
+                        # count, the draft-cap flag, and the
+                        # assembly guard's record, per unit.
+                        "draft_calls": u.get("draft_calls"),
+                        "draft_capped": bool(
+                            u.get("draft_capped")),
+                        "assembly_guard": u.get(
+                            "assembly_guard"),
                         "events": u.get("events"),
                         "judge_errors": (u.get("judging")
                                           or {}).get("errors"),
@@ -9715,6 +10175,11 @@ class Handler(BaseHTTPRequestHandler):
                 # (v14.1: every other resident chat model goes too).
                 _unload_others(ROUTED_MODEL)
             hard = bool(route_reason) or bool(mechanisms_all)
+            # v23.2 (F1): fix the ask's class deadline NOW
+            # (150s simple / 285s hard from ask start). The
+            # units below carry it in their ctx, and _run_unit
+            # reads the same anchor from the ask context.
+            class_deadline = _ask_clock_class(hard)
             unit_specs = []
             if parts and not discovery:
                 part_reg_ids = []
@@ -9803,6 +10268,11 @@ class Handler(BaseHTTPRequestHandler):
                        # guard. (v23: the divergence-eligibility
                        # key died with the oracle.)
                        "corp": corp, "deadline": deadline,
+                       # v23.2 (F1): the ask's class deadline
+                       # rides the ctx alongside the outer cap;
+                       # _run_unit takes the earlier of the two
+                       # (plus the ask-context anchor).
+                       "class_deadline": class_deadline,
                        "explicit_model": bool(
                            model and not use_gemini
                            and model != LOCAL_MODEL),
@@ -9818,7 +10288,13 @@ class Handler(BaseHTTPRequestHandler):
 
             def _run_prepared(pc):
                 _spec, _ctx = pc
-                if time.monotonic() > deadline:
+                # v23.2 (F1): between parts the CLASS deadline
+                # binds too, not only the 600s outer cap — a
+                # part that would start past its class budget
+                # is a time-gated IDK, exactly as at the cap.
+                if time.monotonic() > min(
+                        deadline, _ctx.get("class_deadline")
+                        or deadline):
                     # Cap reached between parts: this part is an
                     # IDK with a time gate, never a rushed answer.
                     return {
@@ -9908,30 +10384,94 @@ class Handler(BaseHTTPRequestHandler):
                         _ctx_r = dict(ctx)
                         _ctx_r["hits"] = (list(spec["hits"])
                                           + _rescue_r)
-                        _unit_r = _run_unit(_ctx_r)
-                        _unit_r["rescue"] = {
-                            "terms": _rterms_r[:6],
-                            "injected": len(_rescue_r),
-                            "urls": [h["url"]
-                                     for h in _rescue_r]}
-                        _BADGE_RANK_R = {
-                            "idk": 0, "partial": 1,
-                            "checked_det": 4,
-                            "verified_web_reduced": 4,
-                            "checked": 6, "verified_web": 6}
-                        if _BADGE_RANK_R.get(
-                                _unit_r["badge"], 0) \
-                                > _BADGE_RANK_R.get(
-                                    unit["badge"], 0):
-                            unit = _unit_r
-                            unit_hits = _ctx_r["hits"]
+                        # v23.2 (BUG-11 F1+F2): the rescue
+                        # re-run lives INSIDE the ask's one
+                        # clock and the shared draft cap.
+                        # Through v23.1 it started unconditionally
+                        # and _run_unit re-armed it a fresh class
+                        # budget — the CSRA ask's rescue unit
+                        # drafted 5 more times after the ladder's
+                        # 6, none of it bounded by the 285s the
+                        # ask was supposed to cost. When the
+                        # budget or the draft cap is spent, the
+                        # re-run does not start; the cut is
+                        # recorded on the surviving unit.
+                        _skip_r = None
+                        if not _call_may_start(class_deadline):
+                            _note_budget_cut("rescue")
+                            unit["cap_hit"] = True
+                            unit["budget_cut"] = True
+                            if not unit.get("cut_phase"):
+                                unit["cut_phase"] = "rescue"
+                            _skip_r = "the ask's time budget " \
+                                      "is spent"
+                        elif _ask_ctx().draft_calls \
+                                >= DRAFT_CALL_CAP:
+                            unit["draft_capped"] = True
+                            _skip_r = "the ask's draft-call " \
+                                      "cap is reached"
+                        _unit_r = None
+                        if _skip_r is not None:
+                            unit["rescue"] = {
+                                "terms": _rterms_r[:6],
+                                "injected": len(_rescue_r),
+                                "urls": [h["url"]
+                                         for h in _rescue_r],
+                                "skipped": "rescue re-run not "
+                                           "started: "
+                                           + _skip_r}
                         else:
-                            unit["rescue"] = _unit_r["rescue"]
+                            _unit_r = _run_unit(_ctx_r)
+                        if _unit_r is not None:
+                            _unit_r["rescue"] = {
+                                "terms": _rterms_r[:6],
+                                "injected": len(_rescue_r),
+                                "urls": [h["url"]
+                                         for h in _rescue_r]}
+                            _BADGE_RANK_R = {
+                                "idk": 0, "partial": 1,
+                                "checked_det": 4,
+                                "verified_web_reduced": 4,
+                                "checked": 6, "verified_web": 6}
+                            if _BADGE_RANK_R.get(
+                                    _unit_r["badge"], 0) \
+                                    > _BADGE_RANK_R.get(
+                                        unit["badge"], 0):
+                                unit = _unit_r
+                                unit_hits = _ctx_r["hits"]
+                            else:
+                                unit["rescue"] = \
+                                    _unit_r["rescue"]
                     if unit["badge"] == "idk":
                         web_b = _branch_attempt(failed_claims)
                     else:
                         web_b = []
-                    if web_b:
+                    if web_b and (not _call_may_start(
+                            class_deadline)
+                            or _ask_ctx().draft_calls
+                            >= DRAFT_CALL_CAP):
+                        # v23.2 (F1+F2): the branch re-run is
+                        # governed by the same one clock + draft
+                        # cap; it does not start when either is
+                        # spent (the branch search itself was
+                        # already gated in _branch_attempt).
+                        if not _call_may_start(class_deadline):
+                            _note_budget_cut("branch")
+                            unit["cap_hit"] = True
+                            unit["budget_cut"] = True
+                            if not unit.get("cut_phase"):
+                                unit["cut_phase"] = "branch"
+                        else:
+                            unit["draft_capped"] = True
+                        unit["web"] = {
+                            "branched": True,
+                            "urls": [h["url"] for h in web_b],
+                            "fetched": web_b[0]["fetched"],
+                            "skipped": "branch re-run not "
+                                       "started: the ask's "
+                                       "budget / draft cap is "
+                                       "spent"}
+                    elif web_b:
                         ctx2 = dict(ctx)
                         ctx2["hits"] = list(spec["hits"]) + web_b
                         unit2 = _run_unit(ctx2)
@@ -10127,7 +10667,11 @@ class Handler(BaseHTTPRequestHandler):
                      sum(u["judge_ms"] for u in units),
                      refute_ms=sum(u.get("refute_ms", 0)
                                    for u in units),
-                     cap_hit=any(u.get("cap_hit") for u in units))
+                     # v23.2 (F1): the ask-level cut record
+                     # counts too — a cut in a discarded re-run
+                     # or a skipped rescue still cut THIS ask.
+                     cap_hit=any(u.get("cap_hit") for u in units)
+                     or _ask_ctx().budget_cut)
         except Exception as e:
             if _inf_entry is not None:
                 _inflight_release(_inf_key)

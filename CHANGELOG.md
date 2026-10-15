@@ -5,6 +5,26 @@ each version are in `docs/`. Corpus updates are manual: new documents
 are collected, verified against their sources, and merged alongside a
 version bump rather than synced automatically.
 
+## v23.2 — 2026-10-15
+
+BUG-11 fix release. One clock per ask: the class budget
+(150s simple / 285s hard, 600s outer cap) is anchored at
+ask start and consulted by every stage — the drafting
+ladder, the lead micro-repair, the post-IDK rescue, and
+the branch re-run (through v23.1 each `_run_unit` entry
+re-armed a fresh window, so a live CSRA ask ran 416.9s
+with budget_cut never recording). A hard per-ask cap of
+4 drafting calls is shared by the ladder, repairs, and
+re-runs; at the cap the best judged draft ships. Ship
+what passed: the sentence strip may remove only
+check-flagged sentences, and an assembly guard ships
+the checked draft verbatim when assembly materially
+loses a passing round's content. Judge-leg fix: a spent
+round no longer burns the once-per-ask DeepSeek V3.1
+backup unattempted — the skip is recorded explicitly.
+Generation g0004 (WS-E + mmmna carrier enrichment;
+live-base registry vocab audit 14/14 + 5/5).
+
 ## v23.1 — 2026-10-15
 
 Checks stack + budget enforcement. The two-seat judge
