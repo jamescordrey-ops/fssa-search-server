@@ -1333,8 +1333,12 @@ def _registry_pin_hits(question, corpus, on_date=None):
 # ---------------------------------------------------------------------------
 # v22 retrieval: generation-backed, in-process (SQLite FTS5 weighted
 # BM25F + the existing nomic vectors + synthetic-question vectors),
-# behind the RETRIEVAL env flag (v2|legacy, default legacy = the
-# v21 path below, intact). Design: ~/workspace/fssa-qa/v22/PLAN.md
+# behind the RETRIEVAL env flag (v2|legacy; v22.1: the default
+# is v2 when the variable is ABSENT — the v22 deploy found the
+# logon task does not inherit the user environment, so the code
+# default is what makes v2 restart-proof; RETRIEVAL=legacy in
+# the environment still selects the v21 path below, intact).
+# Design: ~/workspace/fssa-qa/v22/PLAN.md
 # and CONSULT_RAW.md. Fail-soft throughout: if the flag is off, the
 # generation store is missing, or FTS5 is unavailable in this
 # Python's sqlite3, the effective engine is legacy and /health
@@ -1451,7 +1455,7 @@ def _v2_open():
         if _V2["requested"] is not None:
             return _V2["effective"] == "v2"
         _V2["requested"] = os.environ.get(
-            "RETRIEVAL", "legacy").strip().lower()
+            "RETRIEVAL", "v2").strip().lower()
         _V2["fts5"] = _v2_fts5_ok()
         if _V2["requested"] != "v2":
             return False
@@ -3950,7 +3954,15 @@ VERIFIED_FIGURES = [
                          "retroactive benefit", "retroactive ssi",
                          "retroactive social security",
                          "retroactive payment", "past-due",
-                         "past due")},
+                         "past due",
+                         # v22.1: lay phrasing (registry trigger
+                         # audit) — money the agency owed from
+                         # earlier months, paid all at once.
+                         "owed me money",
+                         "owed me money from earlier months",
+                         "money from earlier months",
+                         "social security owed me",
+                         "paid it all at once")},
         ],
         "statement": (
             "Retroactive (past-due) SSI or Social Security benefits, "
@@ -3976,7 +3988,17 @@ VERIFIED_FIGURES = [
                          "529a", "investable")},
             {"tokens": set(),
              "phrases": ("onset age", "onset of disability",
-                         "age of onset", "became disabled")},
+                         "age of onset", "became disabled",
+                         # v22.1: lay phrasing (registry trigger
+                         # audit) — the age the disability
+                         # started, asked without the word
+                         # "onset".
+                         "oldest age",
+                         "disability could have started",
+                         "age my disability could have started",
+                         "disability started",
+                         "when my disability started",
+                         "disability began")},
         ],
         "statement": (
             "ABLE account eligibility requires the disability's "
@@ -4014,10 +4036,17 @@ VERIFIED_FIGURES = [
         "id": "snap_resource_limit_in",
         "title": "Indiana SNAP resource limit ($5,000 under BBCE)",
         "groups": [
-            {"tokens": {"snap"},
-             "phrases": ("food stamps", "food assistance")},
+            {"tokens": {"snap", "ebt"},
+             "phrases": ("food stamps", "food assistance",
+                         # v22.1: lay phrasing (registry trigger
+                         # audit) — the card and the grocery help
+                         # itself, never the program's initials.
+                         "grocery help", "help buying groceries",
+                         "food help", "help with groceries")},
             {"tokens": {"resource", "resources", "asset", "assets",
-                        "limit", "lump"},
+                        "limit", "lump",
+                        # v22.1: where laypeople keep the money.
+                        "bank", "money", "savings", "saving"},
              "phrases": ("resource limit", "asset limit")},
         ],
         "statement": (
@@ -4036,8 +4065,20 @@ VERIFIED_FIGURES = [
             {"tokens": set(),
              "phrases": ("community spouse", "csra",
                          "spousal resource",
-                         "community spouse resource")},
-            {"tokens": {"savings", "assets", "resources", "countable"},
+                         "community spouse resource",
+                         # v22.1: lay phrasing (registry trigger
+                         # audit) — askers say "my wife" / "my
+                         # husband", never "community spouse"
+                         # (the 2026-10-14 live CSRA failure).
+                         "my wife", "my husband", "my spouse",
+                         "wife can keep", "husband can keep",
+                         "spouse can keep", "spouse resource",
+                         "spouse resources")},
+            # v22.1: singular/plural pairs — the matcher is
+            # exact-token, so "resource" never matched the
+            # token "resources" (and vice versa).
+            {"tokens": {"savings", "saving", "assets", "asset",
+                        "resources", "resource", "countable"},
              "phrases": ()},
         ],
         "statement": (
@@ -4059,11 +4100,22 @@ VERIFIED_FIGURES = [
                          "monthly maintenance needs",
                          "spouse of a medicaid applicant",
                          "spousal income",
-                         "how much income can the spouse")},
-            {"tokens": {"income"},
+                         "how much income can the spouse",
+                         # v22.1: lay phrasing (registry trigger
+                         # audit) — the spouse named plainly.
+                         "my wife", "my husband", "my spouse",
+                         "husband's check", "wife's check",
+                         "spouse's check", "husband's income",
+                         "wife's income", "spouse's income")},
+            {"tokens": {"income", "check", "checks"},
              "phrases": ("keep each month",
                          "maintenance needs allowance",
-                         "maximum monthly maintenance")},
+                         "maximum monthly maintenance",
+                         # v22.1: the monthly benefit check is
+                         # how askers name the income.
+                         "monthly check",
+                         "his monthly check", "her monthly check",
+                         "keep to live on")},
         ],
         "statement": (
             "The community spouse may keep between $2,705.00 and "
@@ -4089,7 +4141,15 @@ VERIFIED_FIGURES = [
         "id": "home_equity_limit",
         "title": "Medicaid home equity limit (2026)",
         "groups": [
-            {"tokens": set(), "phrases": ("home equity",)},
+            {"tokens": set(), "phrases": ("home equity",
+                         # v22.1: lay phrasing (registry trigger
+                         # audit) — askers ask what the house is
+                         # WORTH, never its "equity".
+                         "house is worth", "my house is worth",
+                         "our house is worth", "home is worth",
+                         "how much my house is worth",
+                         "value of my house", "value of our house",
+                         "my home's value", "worth of my house")},
         ],
         "statement": (
             "Indiana's Medicaid home equity limit is $752,000 "
@@ -4110,7 +4170,19 @@ VERIFIED_FIGURES = [
         "title": "The $2,000 individual asset limit",
         "groups": [
             {"tokens": set(),
-             "phrases": ("$2,000", "asset limit", "resource limit")},
+             "phrases": ("$2,000", "asset limit", "resource limit",
+                         # v22.1: lay phrasing (registry trigger
+                         # audit) — money in the bank + Medicaid,
+                         # kept Medicaid-specific so the SNAP
+                         # bank question cannot cross-match.
+                         "money can i have in the bank and still "
+                         "get medicaid",
+                         "have in the bank and still get medicaid",
+                         "money in the bank and still get medicaid",
+                         "in the bank and still qualify for medicaid",
+                         "bank account and still get medicaid",
+                         "how much savings can i have and still "
+                         "get medicaid")},
         ],
         "statement": (
             "The individual resource (asset) limit for SSI and most "
@@ -4126,9 +4198,20 @@ VERIFIED_FIGURES = [
         "title": "HCBS waiver income cap ($2,982/mo)",
         "groups": [
             {"tokens": {"waiver"},
-             "phrases": ("medicaid waiver",)},
-            {"tokens": set(),
-             "phrases": ("income limit", "income cap")},
+             "phrases": ("medicaid waiver",
+                         # v22.1: lay phrasing (registry trigger
+                         # audit) — askers describe the help at
+                         # home, never the word "waiver".
+                         "help at home", "care at home",
+                         "home care", "in-home care", "in-home help",
+                         "help in my home", "care in my home")},
+            {"tokens": {"earn", "earns", "make", "makes",
+                        "earning", "earnings"},
+             "phrases": ("income limit", "income cap",
+                         "how much money can i make",
+                         "money can i make each month",
+                         "make each month and still qualify",
+                         "earn each month and still qualify")},
         ],
         "statement": (
             "The Indiana HCBS waiver income cap is $2,982 per month "
@@ -4176,7 +4259,17 @@ VERIFIED_FIGURES = [
         "groups": [
             {"tokens": {"caregiver", "caregiving"},
              "phrases": ("caregiver pay", "paid caregiver",
-                         "difficulty of care")},
+                         "difficulty of care",
+                         # v22.1: lay phrasing (registry trigger
+                         # audit) — the arrangement described,
+                         # never the word "caregiver".
+                         "gets paid to take care",
+                         "paid to take care",
+                         "take care of me at home",
+                         "care for me at home",
+                         "paid to care for",
+                         "wife gets paid", "husband gets paid",
+                         "spouse gets paid")},
             {"tokens": {"hip", "magi"},
              "phrases": ("healthy indiana", "household income")},
         ],
@@ -4347,7 +4440,18 @@ _DIVISOR_GROUPS = [
     {"tokens": set(),
      "phrases": ("transfer penalty", "penalty divisor",
                  "transfer divisor", "penalty period",
-                 "asset transfer")},
+                 "asset transfer",
+                 # v22.1: lay phrasing (registry trigger
+                 # audit) — askers describe giving property to
+                 # their kids and being penalized, never the
+                 # manual's "transfer penalty divisor".
+                 "give property to my kids",
+                 "gave property to my kids",
+                 "give away property", "gave away property",
+                 "giving away property", "property to my kids",
+                 "how long will i be penalized",
+                 "how long would i be penalized",
+                 "penalty for giving away property")},
 ]
 VERIFIED_FIGURES += [
     {
@@ -9690,11 +9794,26 @@ def _generate(engine, model, question, hits, instructions):
         # v16: an explicit NIM model on the drafting key slot
         # (the divergence oracle's B draft). No seat machinery:
         # the caller chose this model deliberately.
+        # v22.1 (secondary fix a): thread the leg deadline like
+        # every other draft leg. Through v22 this branch called
+        # nim_ask with NO deadline, so _nim_text's internal
+        # retry ran at the full NIM_DRAFTER_TIMEOUT again after
+        # a first read timeout — the WS4a bug class, surviving
+        # on this one path (found by the 2026-10-14 CSRA live
+        # diagnosis: NIM draft legs at the full transport
+        # timeout). _leg_timeout clamps to the unit's remaining
+        # budget; a spent budget sheds the leg instead of
+        # starting it.
+        _lt = _leg_timeout(NIM_DRAFTER_TIMEOUT)
+        if _lt <= 0:
+            raise RuntimeError(
+                "nimx draft leg shed: unit budget spent")
         key_env, key_file = SEAT_SLOTS[2]
         answer, prompt = nim_ask(model, question, hits,
                                  instructions=instructions,
                                  key_env=key_env, key_file=key_file,
-                                 timeout=NIM_DRAFTER_TIMEOUT)
+                                 timeout=_lt,
+                                 deadline=time.monotonic() + _lt)
         return answer, prompt, model + " (NIM API)", False, False
     try:
         answer, prompt = ollama_ask(model, question, hits,
@@ -9709,6 +9828,43 @@ def _generate(engine, model, question, hits, instructions):
         return (answer, prompt,
                 LOCAL_MODEL + f" (fallback: routed {model} unavailable)",
                 False, True)
+
+
+# --- v22.1: draft shape guard --------------------------------------
+# The local fallback drafter receives the redraft instructions
+# verbatim, CORRECTIONS REQUIRED block included, but never the
+# previous draft itself (the draft user message is question +
+# excerpts only). A weak local model can answer the MEMO instead
+# of the question: meta text about corrections and citations
+# that then sits in draft_text while the gates burn the unit's
+# remaining budget judging a non-answer (2026-10-14 CSRA live
+# diagnosis: the local fallback drafted a corrections-and-
+# citations memo about MMMNA for a CSRA question, and the unit
+# IDK'd at the time gate). The guard is deliberately narrow: a
+# draft is memo-shaped only when it carries NO citation marker
+# and at least two meta markers, or when its first line is a
+# corrections heading. A real answer is never rejected for
+# merely being uncited (the citation gate owns that failure).
+_MEMO_DRAFT_MARKERS = (
+    "correction", "previous draft", "this draft", "the draft",
+    "citation", "citations", "uncited", "revised draft",
+    "here are the changes")
+
+
+def _is_memo_shaped_draft(text):
+    """True when a draft is meta text ABOUT an answer (a
+    corrections / citations memo) rather than an answer."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    first_line = low.split("\n", 1)[0]
+    if "correction" in first_line:
+        return True
+    if re.search(r"\[\d+\]|\[registry\]", t):
+        return False
+    markers = sum(1 for m in _MEMO_DRAFT_MARKERS if m in low)
+    return markers >= 2
 
 
 def _build_objections(jr, mech_failures, ungrounded, uncited=(),
@@ -10135,6 +10291,20 @@ def _run_unit(ctx):
             draft = None
             break
         draft, prompt, served, dg, fb = res
+        if _is_memo_shaped_draft(draft):
+            # v22.1 shape guard: a memo about corrections and
+            # citations is not a draft. Reject it as a generation
+            # failure (the unit IDKs on the generation gate with
+            # the reason recorded) instead of spending the
+            # unit's remaining budget judging a non-answer. A
+            # prior rung's judged draft, when one exists, stays
+            # in judged_draft for the record.
+            gen_error = ("drafter returned a memo-shaped "
+                         "non-answer (meta text about corrections "
+                         "and citations); rejected by the draft "
+                         "shape guard")
+            draft = None
+            break
         if served:
             # §C: the drafting model's family is excluded from
             # every verdict path for the rest of this ask (a

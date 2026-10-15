@@ -1,0 +1,71 @@
+{
+ "staging_generation": "g0001_staging",
+ "purpose": "Staging copy for the g0001 deploy: a fresh build_generation.py run (identical corpus counts and content-hash IDs to g0000) with the COMPLETED fleet enrichment applied. Consume this directory as generation g0001. generations/CURRENT was NOT flipped by the enrichment lane.",
+ "built_against_server_file": {
+  "path": "fssa-qa/v22/fssa_search_server.py",
+  "lines": 12017,
+  "md5": "1a0e9c6517471dabce6df23022cd9e1d"
+ },
+ "internal_generation_id": "g0000 (build tool naming; DB file corpus_g0000.db, build manifest manifest_g0000.json in this directory)",
+ "docs": 5241,
+ "chunks": 73454,
+ "sections": 6095,
+ "fleet_coverage": "6095/6095 sections fleet-written (100%)",
+ "questions_total": 55593,
+ "questions_per_section_avg": 9.12,
+ "deterministic_qa": {
+  "figure_failures": 0,
+  "question_failures": 0,
+  "alias_failures": 0
+ },
+ "judgment_qa": {
+  "sample_sections": 381,
+  "sample_questions": 3510,
+  "offtopic_final": 0,
+  "note": "First pass flagged 4 questions in 2 sections (90b6526dc28f513f9b2525957d5818eea1f90529, 8a0aefccb061818ac68967b0e192345d8870c89e); both sections were regenerated from their excerpt text and re-graded clean. Full grades: enrichment_judgment_grades.json in this directory."
+ },
+ "registry_lint_entries": 14,
+ "registry_able_pair": {
+  "able_contribution_limit": {
+   "status": "ok",
+   "doc_id": 4936,
+   "carrier": "SSA POMS SI 01130.740 (secure.ssa.gov/poms.nsf/lnx/0501130740)",
+   "figures_found": [
+    20000.0
+   ],
+   "figures_missing": []
+  },
+  "able_contribution_limit_legacy": {
+   "status": "ok",
+   "doc_id": 5236,
+   "carrier": "IRS newsroom ABLE page (irs.gov/newsroom/people-paying-disability-related-expenses-consider-an-able-savings-account-and-sa...)",
+   "figures_found": [
+    19000.0
+   ],
+   "figures_missing": []
+  },
+  "able_onset_age_after_split": {
+   "status": "ok",
+   "doc_id": 717,
+   "figures_found": [
+    100000.0,
+    500.0
+   ],
+   "figures_missing": []
+  }
+ },
+ "vectors_state": "ready",
+ "garbled_sections": {
+  "writer_flagged": "about 53 sections were flagged by the enrichment writers while reading their excerpts as raw binary / no readable content (45 by full section_id, verified present in the DB; 8 more medicare.gov booklet sections by ID prefix in wave 4)",
+  "hard_signature_count": 21,
+  "method": "No clean automated count exists for this corpus (ordinary extracted text also carries control characters from PDF extraction, so character-class detectors over-count). Hard evidence: 21 sections literally begin with the PK zip signature (unextracted EPUB files); writer inspection during the run flagged about 53 sections of the same class (medicare.gov booklets, ssa.gov and choosework.ssa.gov pages); spot checks of flagged sections confirmed raw EPUB/PDF binary end to end. Pre-existing corpus defect: the stored text itself is binary, so these sections carry title-level topic questions, the best enrichment possible without re-extracting the source files."
+ },
+ "enrichment_jsonl": "enrichment.jsonl in this directory and in the v22 root is the portable record of the same completed enrichment (6095 rows); the generation DB in this directory is the artifact the g0001 deploy should consume.",
+ "vector_reconciliation_measured": {
+  "matched": 0,
+  "vector_canonical": 0,
+  "embedded": 5241,
+  "orphan_rows_dropped": 0
+ },
+ "embedding_digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f"
+}

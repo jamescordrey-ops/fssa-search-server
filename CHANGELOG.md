@@ -5,6 +5,44 @@ each version are in `docs/`. Corpus updates are manual: new documents
 are collected, verified against their sources, and merged alongside a
 version bump rather than synced automatically.
 
+## v22.1 — 2026-10-15
+
+The registry-trigger release, plus the completed enrichment
+and a full re-embed. Deployed with generation g0001; see
+docs/STATUS-v22.1.md for the full record.
+
+- Registry triggers rewritten in asker vocabulary: every one
+  of the 14 verified-figures entries got a plain-language
+  audit question; before, 3 of 14 engaged on plain phrasing,
+  after, 14 of 14, each alone (no cross-matches). Lay aliases
+  only — no figures, dates, or rule statements changed. The
+  two live failures that motivated this are permanent
+  regression cases now. Full audit:
+  docs/REGISTRY_TRIGGER_AUDIT-v22.1.md.
+- ABLE contribution limit split into its own dated registry
+  pair ($20,000 from 2026-01-01; $19,000 for 2025), pinned
+  to the SSA POMS year table and the IRS newsroom page
+  (inherited from the v22 fix).
+- Enrichment completed: all 6,095 sections carry
+  fleet-written plain-language questions (55,593 total),
+  substring-validated figures, aliases, and scope tags —
+  generation g0001, with chunk/section ids identical to
+  g0000.
+- Full re-embed under the current embedder build: every
+  chunk and question vector freshly embedded, so the boot
+  canary passes (cosine 1.000000 on its picks) and the
+  V1/V2 vector channels are live. In v22 they stayed dark
+  by design after the canary measured drift (0.9330)
+  against the old-build vectors.
+- Restart-proofing: retrieval v2 is the code default when
+  the RETRIEVAL variable is absent (the v22 deploy found
+  the logon task does not inherit it); RETRIEVAL=legacy
+  still selects the v21 path.
+- Two drafting fixes from the same diagnosis: the
+  divergence oracle's B draft leg now honors its deadline,
+  and a memo-shaped local-fallback draft is rejected as a
+  generation failure instead of consuming judging budget.
+
 ## v22 — 2026-10-14
 
 Retrieval rebuilt in-process around corpus enrichment (the

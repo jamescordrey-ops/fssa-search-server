@@ -101,26 +101,138 @@ def main():
           ids == ["transfer_penalty_divisor_legacy"],
           f"{ids}")
 
+    # v22 registry fix: the contribution figures moved out
+    # of able_onset_age into the dated pair
+    # able_contribution_limit (+ _legacy). The first question
+    # is this suite's original (it smuggles onset words). In
+    # v21 it matched able_onset_age ONLY because the
+    # contribution history was squatting in that entry; with
+    # the history moved, the legacy pair entry serves the
+    # 2025 figure and the onset entry is silent for a
+    # 2025-dated question by design (its onset rule is a 2026
+    # rule). The rest are natural phrasings only, including
+    # the operator's verbatim 2026-10-14 live failure
+    # question.
     able_q = ("For an ABLE account, the onset age question: "
               "what was the annual contribution limit in "
               "2025?")
     entries = mod._registry_matches(able_q)
-    check("WS2 ABLE 2025 question matches via history",
-          [e["id"] for e in entries] == ["able_onset_age"],
+    check("WS2 ABLE 2025 mixed question -> legacy pair entry",
+          [e["id"] for e in entries] == [
+              "able_contribution_limit_legacy"],
           f"{[e['id'] for e in entries]}")
     vals_2025 = mod._registry_values(
         entries, on_date=mod._question_date(able_q))
     check("WS2 ABLE values for 2025 include $19,000",
           19000.0 in vals_2025, f"{vals_2025}")
+    check("WS2 ABLE values for 2025 exclude $20,000",
+          20000.0 not in vals_2025, f"{vals_2025}")
+
+    james_q = ("What was the maximum able account "
+               "contribution for 2025?")
+    entries = mod._registry_matches(james_q)
+    check("WS2 ABLE contribution 2025 (natural) -> legacy only",
+          [e["id"] for e in entries] == [
+              "able_contribution_limit_legacy"],
+          f"{[e['id'] for e in entries]}")
+    vals = mod._registry_values(
+        entries, on_date=mod._question_date(james_q))
+    check("WS2 ABLE contribution 2025 values = $19,000 only",
+          19000.0 in vals and 20000.0 not in vals, f"{vals}")
+    entries = mod._registry_matches(
+        "What is the ABLE account contribution limit?")
+    check("WS2 ABLE contribution no-date -> current only",
+          [e["id"] for e in entries] == ["able_contribution_limit"],
+          f"{[e['id'] for e in entries]}")
     vals_today = mod._registry_values(entries)
-    check("WS2 ABLE values today exclude $19,000",
-          19000.0 not in vals_today, f"{vals_today}")
+    check("WS2 ABLE values today include $20,000, exclude $19,000",
+          20000.0 in vals_today and 19000.0 not in vals_today,
+          f"{vals_today}")
+    onset_q = ("How old can someone be when they became "
+               "disabled and still open an ABLE account?")
+    entries = mod._registry_matches(onset_q)
+    check("WS2 onset question -> able_onset_age only",
+          [e["id"] for e in entries] == ["able_onset_age"],
+          f"{[e['id'] for e in entries]}")
+    vals = mod._registry_values(entries)
+    check("WS2 onset values keep disregard/credit, no cap",
+          100000.0 in vals and 500.0 in vals
+          and 20000.0 not in vals and 19000.0 not in vals,
+          f"{vals}")
 
     ids = [e["id"] for e in mod._registry_matches(
         "How much can my community spouse keep in savings "
         "in 2027?")]
     check("WS2 CSRA (2026 window) silent for a 2027 question",
           "csra" not in ids, f"{ids}")
+
+    # ---------------- v22.1: registry trigger audit ------------
+    # One plain-language question per registry entry, the way a
+    # layperson asks it (spouse = "my wife"/"my husband", no
+    # source-document jargon, never the entry's own trigger
+    # phrases). EVERY entry must hit, and hit ALONE: a widened
+    # group that cross-matches a neighboring entry's question
+    # fails here. Full record: REGISTRY_TRIGGER_AUDIT.md. (In
+    # the v22 base, 11 of these 14 questions matched NOTHING —
+    # the two live failures, ABLE contribution and CSRA, were
+    # this same disease.)
+    audit_cases = {
+        "backpay_exclusion":
+            "Social Security owed me money from earlier months "
+            "and just paid it all at once. How long before that "
+            "money counts against me?",
+        "able_onset_age":
+            "What is the oldest age my disability could have "
+            "started for me to open an ABLE account?",
+        "snap_resource_limit_in":
+            "How much can I have in the bank and still get EBT "
+            "in Indiana?",
+        "csra":
+            "If I go into a nursing home how much of our "
+            "savings can my wife keep?",
+        "mmmna":
+            "If my husband is in a nursing home, how much of "
+            "his monthly check can I keep to live on?",
+        "home_equity_limit":
+            "If our house is worth a lot, can I still get "
+            "Medicaid help to pay for a nursing home?",
+        "asset_limit_2000":
+            "How much money can I have in the bank and still "
+            "get Medicaid?",
+        "waiver_income_cap":
+            "I get help at home through Medicaid. How much "
+            "money can I make each month and still qualify?",
+        "ssa_2027_figures":
+            "How much will my Social Security check go up "
+            "next year?",
+        "difficulty_of_care":
+            "My wife gets paid to take care of me at home. "
+            "Does that money count if she applies for Healthy "
+            "Indiana?",
+        "transfer_penalty_divisor_current":
+            "If I give property to my kids now and apply for "
+            "Medicaid after July 2026, how long will I be "
+            "penalized?",
+        "transfer_penalty_divisor_legacy":
+            "If I gave property to my kids and applied for "
+            "Medicaid in March 2026, how long would I be "
+            "penalized?",
+        "able_contribution_limit":
+            "How much money can I contribute to an ABLE "
+            "account each year?",
+        "able_contribution_limit_legacy":
+            "How much money could I contribute to an ABLE "
+            "account in 2025?",
+    }
+    for eid, q in audit_cases.items():
+        got = [e["id"] for e in mod._registry_matches(q)]
+        check(f"v22.1 audit: {eid} hits alone on its plain "
+              f"question", got == [eid], f"{got}")
+    got = [e["id"] for e in mod._registry_matches(
+        "What is the community spouse resource allowance "
+        "for 2026?")]
+    check("v22.1 audit: CSRA stemming probe (singular "
+          "'resource' token)", got == ["csra"], f"{got}")
 
     # ---------------- WS3a: gap log ------------------------
     gap_path = os.path.join(tmp, "gap_test.jsonl")
@@ -233,6 +345,68 @@ def main():
     check("WS4a retry survives when budget remains",
           len(calls) == 2 and all(c == 0.2 for c in calls),
           f"calls={calls}")
+
+    # ---------------- v22.1 secondary (a): nimx deadline -------
+    # The divergence oracle's B draft (engine "nimx") called
+    # nim_ask with NO deadline through v22, so _nim_text's
+    # retry ran at the full NIM_DRAFTER_TIMEOUT again after a
+    # first timeout (the WS4a bug class on a path WS4a did not
+    # thread). Prove the threading with a capturing stub: the
+    # leg's timeout clamps to the unit budget and a deadline
+    # is passed; a spent budget sheds the leg with no call.
+    captured = {}
+    _real_nim_ask = mod.nim_ask
+
+    def fake_nim_ask(model, question, hits, instructions="",
+                     key_env=None, key_file=None, timeout=None,
+                     deadline=None):
+        captured.update(timeout=timeout, deadline=deadline)
+        return "draft text", "prompt"
+
+    mod.nim_ask = fake_nim_ask
+    try:
+        mod._ask_ctx().unit_deadline = time.monotonic() + 5
+        mod._generate("nimx", "some-model", "q?", [],
+                      instructions="")
+        check("v22.1 nimx draft leg is deadline-threaded",
+              captured.get("deadline") is not None
+              and captured.get("timeout") is not None
+              and captured["timeout"] <= 5.01
+              and captured["deadline"] <= time.monotonic() + 5.01,
+              f"captured={captured}")
+        mod._ask_ctx().unit_deadline = time.monotonic() - 1
+        captured.clear()
+        shed = False
+        try:
+            mod._generate("nimx", "some-model", "q?", [],
+                          instructions="")
+        except RuntimeError:
+            shed = True
+        check("v22.1 nimx leg sheds on a spent budget "
+              "(no call started)", shed and not captured,
+              f"captured={captured}")
+    finally:
+        mod.nim_ask = _real_nim_ask
+        mod._ask_ctx().unit_deadline = None
+
+    # ---------------- v22.1 secondary (b): shape guard ---------
+    memo = ("Corrections and citations: the previous draft "
+            "stated the monthly maintenance needs allowance "
+            "without a citation. The draft should add citations "
+            "for each claim and correct the figures.")
+    check("v22.1 shape guard rejects a corrections memo",
+          mod._is_memo_shaped_draft(memo))
+    cited = ("The community spouse may keep one half of the "
+             "couple's countable savings, clamped between "
+             "$32,532 and $162,660 [1].")
+    check("v22.1 shape guard accepts a normal cited answer",
+          not mod._is_memo_shaped_draft(cited))
+    plain = ("The community spouse may keep one half of the "
+             "couple's countable savings, no less than $32,532 "
+             "and no more than $162,660.")
+    check("v22.1 shape guard accepts an uncited plain answer "
+          "(citation gate owns that failure)",
+          not mod._is_memo_shaped_draft(plain))
 
     # --- Cap raise (operator decision, 2026-10-14) --------------
     check("caps: daily ledger cap is $10.00 (v21 raise)",

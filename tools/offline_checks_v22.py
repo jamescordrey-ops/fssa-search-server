@@ -18,8 +18,10 @@
     for 'devisor' is reported as measured; pins serve the Vision
     module for the eyeglasses question; the three anchor
     questions put the expected doc in the top 3.
- 8. Legacy path intact with RETRIEVAL unset (separate process,
-    run by this script's --legacy-phase mode).
+ 8. Legacy path intact with RETRIEVAL=legacy set explicitly
+    (separate process, run by this script's legacy phase; the
+    v22.1 server default is v2 when the variable is absent, so
+    this phase pins the variable rather than relying on unset).
 """
 import json
 import logging
