@@ -501,6 +501,14 @@ def _cosine(a, b):
 
 # Config: single model for all local LLM work to avoid VRAM thrashing
 LOCAL_MODEL = "qwen3.5:9b"
+# v24 (§8.2): the Models panel's local picks are an ALLOWLIST,
+# not the installed list — a benefits tool does not offer every
+# model that happens to be on the PC. Offered: the two aligned
+# qwen3.5 chat models. Never offered: nomic-embed-text
+# (embeddings only), qwen2.5-coder:7b (code-tuned), and the
+# abliterated 8Bs (safety tuning removed by design). New models
+# join only by a deliberate edit here (e.g. after a bake-off).
+LOCAL_SEAT_ALLOWLIST = ("qwen3.5:9b", "qwen3.5:4b")
 # v13: contested-figure and bundled questions asked of the local default
 # route to the 14B (strongest local reasoner in the v12 bake-off). The 9B
 # is unloaded before a routed call so the two never share the 8GB VRAM.
@@ -717,6 +725,12 @@ def _set_phase(name, round=None):
         ctx.phase_open = (name, now)
     elif cur is None:
         ctx.phase_open = (name, now)
+    # v24 (§6.4): the same phase events drive the progress
+    # tracker's section states for the current unit.
+    try:
+        _trk_phase(name, round)
+    except Exception:
+        pass
 
 
 def _phase_ms_snapshot():
@@ -743,6 +757,9 @@ _JOBS_MAX = 50
 def _job_create():
     job_id = uuid.uuid4().hex[:16]
     rec = {"id": job_id, "status": "running", "stage": "retrieving",
+           # v24 (§5.2): the Stop button's flag; the pipeline
+           # reads it at its clock seams via the ask context.
+           "cancel": False,
            "phase": {"name": "retrieving", "round": None,
                      "check": None},
            "result": None, "error": None, "ts": time.time()}
@@ -5282,6 +5299,12 @@ def _roster_health_block():
 # deadline, and (v23.1) whether the ask's single backup-judge
 # use has been claimed.
 
+class _AskCancelled(Exception):
+    """v24 (§5.2): cooperative cancellation. Raised at the
+    pipeline's clock seams when the job's cancel flag is set;
+    do_POST converts it into the cancelled result + record."""
+
+
 class _AskContext:
     __slots__ = ("cost", "events", "retr",
                  "served_models", "draft_family",
@@ -5297,7 +5320,12 @@ class _AskContext:
                  # truthfully on the ask record).
                  "ask_t0", "ask_deadline", "class_deadline",
                  "draft_calls", "draft_capped",
-                 "budget_cut", "cut_phase")
+                 "budget_cut", "cut_phase",
+                 # v24: the progress tracker's shared state
+                 # (per-unit section states for the job
+                 # snapshot, §6.4) and the job record whose
+                 # "cancel" flag the Stop button sets (§5.2).
+                 "tracker", "cancel_rec")
 
     def __init__(self):
         self.cost = 0.0
@@ -5342,6 +5370,9 @@ class _AskContext:
         self.draft_capped = False
         self.budget_cut = False
         self.cut_phase = None
+        # v24: see __slots__ note.
+        self.tracker = None
+        self.cancel_rec = None
 
 
 _ASK_CTX_VAR = contextvars.ContextVar("fssa_ask_ctx", default=None)
@@ -5362,6 +5393,201 @@ def _submit(pool, fn, *args, **kwargs):
     context into the worker thread (F10)."""
     return pool.submit(contextvars.copy_context().run,
                        fn, *args, **kwargs)
+
+
+# --- v24 (§6): the progress tracker ---------------------------------
+# Per-unit section states for the job snapshot. The tracker lives
+# on the ask context (shared across the ask's threads exactly the
+# way phase_ms is); do_POST creates one unit tracker per answering
+# unit, _run_unit/_check_round update the CURRENT unit's tracker
+# (carried in a ContextVar set at _run_unit entry), and do_POST
+# finalizes the optional sections from the unit records (the
+# decision points: a redraft that never ran is not-needed the
+# moment its unit closes, a rescue the record marks skipped is
+# skipped with the record's own reason). The page never guesses:
+# a state the pipeline did not stamp stays "waiting".
+_TRK_SECTIONS = (
+    ("retrieving", "Retrieving"),
+    ("drafting", "Drafting"),
+    ("redraft2", "Redraft 2"),
+    ("redraft3", "Redraft 3"),
+    ("extracting", "Extracting claims"),
+    ("checking", "Checking"),
+    ("lead_repair", "Lead repair"),
+    ("final_checks", "Final checks"),
+    ("rescue", "Rescue"),
+    ("web_branch", "Web branch"))
+_TRK_VAR = contextvars.ContextVar("fssa_trk_unit", default=None)
+
+
+def _trk_new_unit(index, part):
+    return {"index": index, "part": part, "status": "waiting",
+            "t0": None, "elapsed": None, "pass": 1,
+            "caption": "Pass 1",
+            "sections": {name: {"state": "waiting",
+                                "seconds": None, "detail": "",
+                                "t0": None}
+                         for name, _label in _TRK_SECTIONS}}
+
+
+def _trk_set(unit, name, state, detail=None):
+    """Stamp one section of one unit tracker. Seconds are
+    derived from the section's own active stamp, never counted."""
+    if unit is None:
+        return
+    sec = unit["sections"].get(name)
+    if sec is None:
+        return
+    now = time.monotonic()
+    if state == "active" and sec["state"] != "active":
+        sec["t0"] = now
+    if state in ("done", "not-needed", "skipped", "failed"):
+        if sec.get("t0") is not None:
+            sec["seconds"] = round(now - sec["t0"], 1)
+        sec["t0"] = None
+    sec["state"] = state
+    if detail is not None:
+        sec["detail"] = detail
+
+
+def _trk_current():
+    return _TRK_VAR.get()
+
+
+def _trk_phase(name, rnd):
+    """Drive section states from the pipeline's own phase
+    events (§6.4: states derive from phase facts, never from
+    the client's guesses). Called from _set_phase."""
+    unit = _TRK_VAR.get()
+    if unit is None:
+        return
+    if name == "drafting":
+        if rnd and rnd >= 3:
+            _trk_set(unit, "redraft2", "done")
+            _trk_set(unit, "redraft3", "active")
+        elif rnd and rnd == 2:
+            _trk_set(unit, "drafting", "done")
+            _trk_set(unit, "redraft2", "active")
+        else:
+            _trk_set(unit, "drafting", "active")
+    elif name == "extracting":
+        for sec_name in ("drafting", "redraft2", "redraft3"):
+            if unit["sections"][sec_name]["state"] == "active":
+                _trk_set(unit, sec_name, "done")
+        if unit["sections"]["lead_repair"]["state"] == "active":
+            _trk_set(unit, "lead_repair", "done")
+        _trk_set(unit, "extracting", "active")
+    elif name == "checking":
+        _trk_set(unit, "extracting", "done")
+        if unit["sections"]["lead_repair"]["state"] == "active":
+            _trk_set(unit, "lead_repair", "done")
+        _trk_set(unit, "checking", "active",
+                 detail=f"round {rnd}" if rnd else None)
+    elif name == "final checks":
+        _trk_set(unit, "checking", "done")
+        _trk_set(unit, "extracting", "done")
+        _trk_set(unit, "final_checks", "active")
+
+
+def _sections_snapshot(job):
+    """The /ask/result snapshot's sections block (§6.4): the
+    per-unit trackers as the client renders them, plus the
+    ask-wide draft-call count. Returns None when the job has no
+    tracker (a job that predates the ask's unit build)."""
+    ctx = job.get("_ask_ctx")
+    trk = getattr(ctx, "tracker", None) if ctx is not None else None
+    if not trk:
+        return None
+    now = time.monotonic()
+    units = []
+    for u in trk["units"]:
+        secs = []
+        for name, label in _TRK_SECTIONS:
+            sec = u["sections"][name]
+            st = sec["state"]
+            seconds = sec["seconds"]
+            if st == "active" and sec.get("t0") is not None:
+                seconds = round(now - sec["t0"], 1)
+            secs.append({"id": name, "label": label, "state": st,
+                         "seconds": seconds,
+                         "detail": sec["detail"]})
+        el = u["elapsed"]
+        if el is None and u["t0"] is not None:
+            el = round(now - u["t0"], 1)
+        units.append({"index": u["index"], "part": u["part"],
+                      "status": u["status"], "elapsed_s": el,
+                      "caption": u["caption"], "sections": secs})
+    return {"units": units,
+            "draft_calls": getattr(ctx, "draft_calls", 0),
+            "draft_cap": DRAFT_CALL_CAP,
+            "parts": trk.get("parts", len(units))}
+
+
+def _progress_summary(units):
+    """v24 (§6.5): the post-run progress facts for the /ask
+    response, derived from the unit RECORDS (never guessed):
+    the unusual-path pills and one summary line per part for
+    the "How this was checked" disclosure."""
+    pills = []
+    parts = []
+    _rungs_max = 0
+    for u in units or ():
+        _rungs_max = max(_rungs_max, u.get("rungs") or 0)
+        _rs = u.get("rescue")
+        _wb = u.get("web")
+        _rstate = None
+        if isinstance(_rs, dict) and _rs.get("skipped"):
+            _rstate = "skipped \u00b7 " + (
+                "budget spent" if "time budget" in _rs["skipped"]
+                else "draft limit reached")
+            _p = "Rescue skipped \u00b7 " + (
+                "budget spent" if "time budget" in _rs["skipped"]
+                else "draft limit reached")
+            if _p not in pills:
+                pills.append(_p)
+        elif _rs:
+            _rstate = "used"
+            if "Rescue used" not in pills:
+                pills.append("Rescue used")
+        _wstate = None
+        if isinstance(_wb, dict) and _wb.get("skipped"):
+            _wstate = "skipped"
+            _p = "Web branch skipped \u00b7 " + (
+                "budget spent" if "time budget" in _wb["skipped"]
+                else "draft limit reached")
+            if _p not in pills:
+                pills.append(_p)
+        elif (_wb and _wb.get("branched")) or u.get("web_used"):
+            _wstate = "used"
+            if "Web branch used" not in pills:
+                pills.append("Web branch used")
+        parts.append({
+            "part": u.get("part"), "badge": u.get("badge"),
+            "rungs": u.get("rungs") or 0,
+            "lead_repairs": u.get("lead_repairs") or 0,
+            "rescue": _rstate, "web": _wstate,
+            "budget_cut": bool(u.get("budget_cut")),
+            "draft_capped": bool(u.get("draft_capped"))})
+    if _rungs_max >= 2:
+        pills.insert(0, "Redraft 2 used")
+    if _rungs_max >= 3:
+        pills.insert(1, "Redraft 3 used")
+    return {"pills": pills, "parts": parts}
+
+
+def _cancel_requested():
+    """v24 (§5.2): has the Stop button fired for this ask? The
+    flag lives on the job record; the ask context holds the
+    reference (set in do_POST). Sync asks have no job and can
+    never be cancelled."""
+    ctx = _ask_ctx()
+    rec = ctx.cancel_rec
+    return bool(rec is not None and rec.get("cancel"))
+
+
+def _check_cancel():
+    if _cancel_requested():
+        raise _AskCancelled()
 
 
 def _model_family(model):
@@ -6900,7 +7126,7 @@ def _judge_excerpts(hits, cap=3000):
 
 
 def _primary_judgment(engine, question, hits, answer, mech_block,
-                      deadline=None):
+                      deadline=None, local_model=None):
     """Extract the draft's claims AND verdict them in one call.
     engine is 'lite' (the judge: Gemini 3.5 Flash Lite),
     'backup' (Lite down: DeepSeek Chat V3.1 on OpenRouter — the
@@ -6932,8 +7158,12 @@ def _primary_judgment(engine, question, hits, answer, mech_block,
         '{"claims": [{"text": "...", "load_bearing": true, '
         '"verdict": "supported", "note": "...", '
         '"sources": [1]}]}')
+    # v24 (§8): a seat pick names the local model explicitly;
+    # without one the local engine keeps its v23.2 default
+    # (ROUTED_MODEL), so every pre-v24 caller is unchanged.
     model = {"lite": GEMINI_CHAIN[0],
-             "backup": JUDGE_BACKUP_MODEL}.get(engine, ROUTED_MODEL)
+             "backup": JUDGE_BACKUP_MODEL}.get(
+                 engine, local_model or ROUTED_MODEL)
     try:
         if engine == "lite":
             if _judge_leg_timeout(deadline, 45) <= 0:
@@ -6957,7 +7187,7 @@ def _primary_judgment(engine, question, hits, answer, mech_block,
                 return {"available": False, "claims": [],
                         "model": model,
                         "error": "judge leg budget spent"}
-            text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM,
+            text = _ollama_chat_raw(model, _JUDGE_SYSTEM,
                                     user, timeout=_lt)
         obj = _parse_judge_json(text)
         if not obj or not isinstance(obj.get("claims"), list):
@@ -7049,7 +7279,7 @@ def _scoped_evidence(hits, claims, labels=None):
 
 
 def _second_verdicts(engine, question, hits, claims, mech_block,
-                     deadline=None):
+                     deadline=None, local_model=None):
     """Verdicts for a numbered claim list from ONE judge engine
     ('lite', 'backup', or 'local'), for the claims the primary
     pass did not cover. The judge may also flag substantive
@@ -7101,7 +7331,8 @@ def _second_verdicts(engine, question, hits, claims, mech_block,
             if _lt <= 0:
                 raise RuntimeError("judge leg budget spent")
             _note_local_load("local-verdicts")
-            text = _ollama_chat_raw(ROUTED_MODEL, _JUDGE_SYSTEM,
+            text = _ollama_chat_raw(local_model or ROUTED_MODEL,
+                                    _JUDGE_SYSTEM,
                                     user, timeout=_lt,
                                     num_predict=1024)
         obj = _parse_judge_json(text)
@@ -7631,6 +7862,85 @@ def _det_claim_check(claim, hits, question, mech_block, admitted):
     return bad, cited_ok
 
 
+def _extract_claims_only(engine, question, hits, answer, mech_block,
+                         deadline=None, local_model=None):
+    """v24 (§8): the extraction half of the fused judge pass,
+    for asks whose extract and judge seats differ — one fused
+    call cannot serve two picks. Same claim rules as
+    _primary_judgment, but no verdicts: the judge seat rules
+    the extracted claims through _second_verdicts. engine is
+    'lite' (the hosted chain head) or 'local' (the picked
+    model). Returns the _primary_judgment shape minus
+    verdicts."""
+    user = (
+        f"Question: {question}\n\nDocument excerpts:\n"
+        f"{_judge_excerpts(hits)}\n\n{mech_block}\n\n"
+        f"Draft answer:\n{answer}\n\n"
+        "Extract the draft's substantive factual claims (at most 14; "
+        "merge duplicates; mark load_bearing=true for claims the "
+        "answer's conclusion rests on). Claims about the documents "
+        "or excerpts themselves (what they provide, cover, or say) "
+        "are framing, never facts: always mark them "
+        "load_bearing=false. Do NOT verdict the claims. In sources, "
+        "list the numbers of the excerpts (from the numbered list "
+        "above) the claim rests on; use an empty list when it rests "
+        "only on the verified-figures or mechanism blocks. Reply "
+        "with ONLY this JSON:\n"
+        '{"claims": [{"text": "...", "load_bearing": true, '
+        '"sources": [1]}]}')
+    model = GEMINI_CHAIN[0] if engine == "lite" \
+        else (local_model or ROUTED_MODEL)
+    try:
+        if engine == "lite":
+            if _judge_leg_timeout(deadline, 45) <= 0:
+                return {"available": False, "claims": [],
+                        "model": model,
+                        "error": "judge leg budget spent"}
+            text = _gemini_text(GEMINI_CHAIN[0], _JUDGE_SYSTEM,
+                                user, deadline=deadline)
+        else:
+            _lt = _judge_leg_timeout(deadline, 300)
+            if _lt <= 0:
+                return {"available": False, "claims": [],
+                        "model": model,
+                        "error": "judge leg budget spent"}
+            _note_local_load("local-extract")
+            text = _ollama_chat_raw(model, _JUDGE_SYSTEM,
+                                    user, timeout=_lt)
+        obj = _parse_judge_json(text)
+        if not obj or not isinstance(obj.get("claims"), list):
+            return {"available": False, "claims": [], "model": model,
+                    "error": "extraction reply was not usable JSON"}
+        claims = []
+        for c in obj["claims"][:14]:
+            t = str(c.get("text") or "").strip()
+            if not t:
+                continue
+            srcs = []
+            for sv in c.get("sources") or []:
+                try:
+                    j = int(sv) - 1
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= j < len(hits or ()) and j not in srcs:
+                    srcs.append(j)
+                if len(srcs) >= 4:
+                    break
+            claims.append({
+                "text": t,
+                "load_bearing": bool(c.get("load_bearing"))
+                and not _is_meta_claim(t),
+                "sources": srcs})
+        if not claims:
+            return {"available": False, "claims": [], "model": model,
+                    "error": "extraction found no claims"}
+        return {"available": True, "claims": claims,
+                "model": model, "error": None}
+    except Exception as e:
+        return {"available": False, "claims": [], "model": model,
+                "error": str(e)[:200]}
+
+
 _JUDGE_LABELS = {"lite": "Gemini Lite",
                  "backup": "DeepSeek V3.1 backup",
                  "local": "local model"}
@@ -7638,7 +7948,8 @@ _JUDGE_LABELS = {"lite": "Gemini Lite",
 
 def _check_round(question, hits, answer, hard, mech_block="",
                  corp=None, mechanisms=None, extra_claims=None,
-                 local_only=False, use_cache=True, deadline=None):
+                 local_only=False, use_cache=True, deadline=None,
+                 judge_model=None, extract_model=None):
     """One checking round over a draft (v23.1 WS-B). ONE judge
     pass — Gemini 3.5 Flash Lite extracts the claims and
     verdicts them in a single call — with deterministic figure
@@ -7663,6 +7974,16 @@ def _check_round(question, hits, answer, hard, mech_block="",
     "none" (no judge AND no claims to check)."""
     errors = []
     checks = _empty_checks_block()
+    # v24 (§8): per-seat picks. judge_model / extract_model are
+    # None for the hosted chain or a local model name (the
+    # Models panel's allowlist, or the legacy local mapping).
+    # The legacy local_only flag with no seat picks keeps its
+    # v23.2 meaning exactly: both halves of the fused pass run
+    # on the local engine's default model (ROUTED_MODEL).
+    if judge_model is None and extract_model is None and local_only:
+        judge_model = extract_model = ROUTED_MODEL
+    checks["seats"] = {"extract": extract_model or "hosted",
+                       "judge": judge_model or "hosted"}
     ctx = _ask_ctx()
     _set_phase("extracting")
     _set_check_line("Fact check: starting")
@@ -7711,13 +8032,13 @@ def _check_round(question, hits, answer, hard, mech_block="",
     engines_used = []
     primary = {"available": False, "claims": [],
                "model": None, "error": "not run"}
-    if local_only:
+    if extract_model is not None and extract_model == judge_model:
         _note_local_load("local-ask-judge")
         _set_check_line("Fact check: local model")
         if not _spent():
-            primary = _primary_judgment("local", question, hits,
-                                        answer, mech_block,
-                                        deadline=deadline)
+            primary = _primary_judgment(
+                "local", question, hits, answer, mech_block,
+                deadline=deadline, local_model=judge_model)
         else:
             _note_budget_cut("extracting")
         if primary["available"]:
@@ -7730,7 +8051,7 @@ def _check_round(question, hits, answer, hard, mech_block="",
                 _perr = "judge leg budget spent " \
                         "(round started past the deadline)"
             errors.append("local judge: " + _perr)
-    else:
+    elif extract_model is None and judge_model is None:
         _set_check_line("Fact check: Gemini Lite")
         if not _spent():
             primary = _primary_judgment("lite", question, hits,
@@ -7784,7 +8105,82 @@ def _check_round(question, hits, answer, hard, mech_block="",
                 else:
                     errors.append("backup judge: "
                                   + str(primary.get("error")))
-    if engine is None and not extra_claims:
+    else:
+        # v24 (§8): the seats differ, so the fused one-call
+        # pass cannot serve both picks. Extraction runs on the
+        # extract seat; verdicts run on the judge seat through
+        # the verdict transport; the two merge into the same
+        # `primary` shape the rest of the round consumes.
+        # Hosted halves keep their chains (a hosted verdict
+        # gets the once-per-ask V3.1 backup behind Lite).
+        _x_eng = "local" if extract_model else "lite"
+        _j_eng = "local" if judge_model else "lite"
+        _set_check_line("Fact check: seats ("
+                        + (extract_model or "hosted")
+                        + " / " + (judge_model or "hosted") + ")")
+        if not _spent():
+            _ext = _extract_claims_only(
+                _x_eng, question, hits, answer, mech_block,
+                deadline=deadline, local_model=extract_model)
+        else:
+            _note_budget_cut("extracting")
+            _ext = {"available": False, "claims": [],
+                    "model": extract_model or GEMINI_CHAIN[0],
+                    "error": "judge leg budget spent "
+                             "(round started past the deadline)"}
+        checks["extract"] = {"seat": _x_eng,
+                             "model": _ext.get("model")}
+        if not _ext["available"]:
+            errors.append("extract: " + str(_ext.get("error")))
+            primary = {"available": False, "claims": [],
+                       "model": None, "error": _ext.get("error")}
+        else:
+            _fake = [{"text": c["text"]} for c in _ext["claims"]]
+            _vres = {"available": False, "verdicts": {},
+                     "missed": [], "error": "not run"}
+            if not _spent():
+                _vres = _second_verdicts(
+                    _j_eng, question, hits, _fake, mech_block,
+                    deadline=deadline, local_model=judge_model)
+            if not _vres["available"] and _j_eng == "lite" \
+                    and not _spent() and _claim_backup():
+                backup_used = True
+                _j_eng = "backup"
+                _set_check_line(
+                    "Fact check: backup judge (DeepSeek V3.1)")
+                _vres = _second_verdicts(
+                    "backup", question, hits, _fake, mech_block,
+                    deadline=deadline)
+            _merged = []
+            for _i, _c in enumerate(_ext["claims"]):
+                _v = _vres["verdicts"].get(_i) or {}
+                _merged.append({
+                    "text": _c["text"],
+                    "load_bearing": _c["load_bearing"],
+                    "verdict": _v.get("verdict"),
+                    "note": _v.get("note", ""),
+                    "sources": _c.get("sources")})
+            if _vres["available"]:
+                engine = _j_eng
+                served_model = judge_model or {
+                    "lite": GEMINI_CHAIN[0],
+                    "backup": JUDGE_BACKUP_MODEL}[_j_eng]
+                engines_used.append(_j_eng)
+                primary = {"available": True, "claims": _merged,
+                           "model": served_model, "error": None}
+            else:
+                # The verdict seat could not serve: the
+                # extracted claims ride the deterministic
+                # checks alone (the det path), exactly as
+                # citation-derived claims do when no judge
+                # serves.
+                errors.append("verdicts: "
+                              + str(_vres.get("error")))
+                primary = {"available": True, "claims": _merged,
+                           "model": None,
+                           "error": _vres.get("error")}
+    if engine is None and not extra_claims \
+            and not primary.get("claims"):
         # No judge could serve and there are no citation-derived
         # claims to check deterministically: nothing can be
         # verified this round.
@@ -7813,15 +8209,16 @@ def _check_round(question, hits, answer, hard, mech_block="",
                 "coverage": [], "models": {}}
 
     claims = []
-    if engine is not None:
+    if primary.get("claims"):
         claims = [_new_claim(c["text"], c["load_bearing"],
                              "extracted", c.get("sources"))
                   for c in primary["claims"]]
         for i, c in enumerate(primary["claims"]):
-            claims[i][engine] = c["verdict"]
-            claims[i]["judge"] = c["verdict"]
-            claims[i]["judge_model"] = served_model
-            if c["note"]:
+            if engine is not None and c.get("verdict") is not None:
+                claims[i][engine] = c["verdict"]
+                claims[i]["judge"] = c["verdict"]
+                claims[i]["judge_model"] = served_model
+            if c.get("note"):
                 claims[i]["notes"].append(c["note"])
     seen_norm = {_norm_claim_text(c["text"]) for c in claims}
     for ec in extra_claims or ():
@@ -7896,7 +8293,8 @@ def _check_round(question, hits, answer, hard, mech_block="",
                 break
             res = _second_verdicts(verd_engine, question, hits,
                                    batch, mech_block,
-                                   deadline=deadline)
+                                   deadline=deadline,
+                                   local_model=judge_model)
             if not res["available"] and verd_engine == "lite" \
                     and not local_only and _claim_backup():
                 backup_used = True
@@ -8005,12 +8403,15 @@ def _checks_annotation(jr):
     Replaces _panel_annotation (the panel is gone)."""
     chk = (jr or {}).get("checks") or {}
     j = chk.get("judge") or {}
+    # v24 (§7 item 9): the page's shorter plain forms. Who
+    # served still rides the record (checks.judge.served_by);
+    # the note says what ran.
     if (jr or {}).get("mode") == "local":
-        return "Checks: figures + citations + local judge"
+        return "Checked by figures, citations, and the local judge."
     if j.get("served_by"):
-        return "Checks: figures + citations + " \
-            + j["served_by"] + " judge"
-    return "Checks: figures + citations only (judge unavailable)"
+        return "Checked by figures, citations, and the " \
+            + j["served_by"] + " judge."
+    return "Checked by figures and citations only."
 
 
 # --- v14: the escalation ladder ----------------------------------------------
@@ -8433,6 +8834,22 @@ def _run_unit(ctx):
                    + "\n\n(This unit answers only this part: "
                    + ctx["unit_q"] + ")")
     ev0 = len(_events())
+    # v24 (§6): bind this unit's progress tracker for the
+    # phase hooks, and stamp the unit live. On a re-run
+    # (rescue / web branch) the sections reset for the new
+    # pass; the tracker keeps the pass count + caption the
+    # caller set.
+    _trk = ctx.get("trk")
+    _TRK_VAR.set(_trk)
+    if _trk is not None:
+        _trk["status"] = "active"
+        if _trk["t0"] is None:
+            _trk["t0"] = time.monotonic()
+        if _trk["pass"] > 1:
+            for _sec in _trk["sections"].values():
+                _sec.update({"state": "waiting", "seconds": None,
+                             "detail": "", "t0": None})
+        _trk_set(_trk, "retrieving", "done")
     # v20.2: this unit's retrieval-pool snapshots (any
     # ask-mode hybrid_search that runs inside the unit).
     rp0 = len(_ask_ctx().retr_pools)
@@ -8468,6 +8885,11 @@ def _run_unit(ctx):
         owns its model choice in _generate; the model named
         here is the ladder's primary (v23.1: xAI Grok 4.7),
         for the record. Gemini units are unchanged."""
+        if ctx.get("draft_seat_model"):
+            # v24 (§8): a Models-panel drafting pick serves
+            # EVERY rung (the v14 routed-redraft rule below
+            # governs the routed default, not a user's pick).
+            return "local", ctx["draft_seat_model"]
         if ctx["engine"] == "gemini" or ctx.get("explicit_model"):
             if rung > 0 and ctx["engine"] == "local":
                 return "local", ROUTED_MODEL  # v14 redraft rule
@@ -8524,6 +8946,7 @@ def _run_unit(ctx):
         _note_budget_cut(cut_phase)
 
     for rung in range(3):  # draft + two redrafts (operator decision)
+        _check_cancel()  # v24 (§5.2): the Stop seam
         if deadline and time.monotonic() > deadline:
             _mark_cap()
             break
@@ -8627,6 +9050,8 @@ def _run_unit(ctx):
                           mechanisms=ctx["mechanisms"],
                           extra_claims=extra_claims,
                           local_only=bool(ctx.get("local_mode")),
+                          judge_model=ctx.get("judge_model"),
+                          extract_model=ctx.get("extract_model"),
                           use_cache=not ctx.get("fresh"),
                           deadline=deadline)
         judge_ms += int((time.monotonic() - jt0) * 1000)
@@ -8661,6 +9086,7 @@ def _run_unit(ctx):
                 new_lead = None
             else:
                 lead_repairs += 1
+                _trk_set(_trk_current(), "lead_repair", "active")
                 new_lead = _repair_lead(ctx, draft, lead_sentence,
                                         eng, mdl, instr)
             if new_lead and new_lead != lead_sentence:
@@ -8676,6 +9102,8 @@ def _run_unit(ctx):
                         mechanisms=ctx["mechanisms"],
                         extra_claims=extra_claims,
                         local_only=bool(ctx.get("local_mode")),
+                          judge_model=ctx.get("judge_model"),
+                          extract_model=ctx.get("extract_model"),
                         use_cache=not ctx.get("fresh"),
                         deadline=deadline)
                     judge_ms += int((time.monotonic() - jt1) * 1000)
@@ -8795,6 +9223,8 @@ def _run_unit(ctx):
                 extra_claims=[dict(cc, span=cc["text"])
                               for cc in parsed["cited_claims"]],
                 local_only=bool(ctx.get("local_mode")),
+                          judge_model=ctx.get("judge_model"),
+                          extract_model=ctx.get("extract_model"),
                 use_cache=not ctx.get("fresh"), deadline=deadline)
             judge_ms += int((time.monotonic() - _jt2) * 1000)
             refute_ms += jr.get("refute_ms", 0)
@@ -8816,6 +9246,19 @@ def _run_unit(ctx):
             shipped = True
         elif deadline and time.monotonic() > deadline:
             _mark_cap()
+    # v24 (§6.3): the ladder has closed — the optional
+    # sections' decision points are now known for THIS pass.
+    # A redraft that never ran is not-needed from this moment;
+    # lead repair likewise. (Rescue / web branch finalize in
+    # do_POST, where their outcomes live.)
+    if _trk is not None:
+        _trk_set(_trk, "final_checks", "done")
+        _trk_set(_trk, "redraft2",
+                 "done" if rungs >= 2 else "not-needed")
+        _trk_set(_trk, "redraft3",
+                 "done" if rungs >= 3 else "not-needed")
+        _trk_set(_trk, "lead_repair",
+                 "done" if lead_repairs else "not-needed")
     base = {"served": ctx.get("_served"), "fallback": ctx.get("_fb", False),
             "downgraded": ctx.get("_dg", False),
             "prompt": ctx.get("_prompt", ""), "rungs": rungs,
@@ -9085,7 +9528,7 @@ PAGE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FSSA Medicaid Q&A</title>
+<title>FSSA SARA</title>
 <link rel="icon" href="/icon.png">
 <style>
 :root{
@@ -9105,31 +9548,72 @@ PAGE = """<!DOCTYPE html>
 *{box-sizing:border-box; margin:0; padding:0;}
 body{
   font-family:Inter,-apple-system,"Segoe UI",sans-serif; background:var(--bg); color:var(--ink-secondary);
-  line-height:1.6; min-height:100vh; display:flex; flex-direction:column; align-items:center;
-  padding:48px 16px;
+  line-height:1.6; min-height:100dvh; display:flex; flex-direction:column; align-items:center;
+  padding:24px 16px;
 }
 .wrap{width:100%; max-width:720px;}
-header{display:flex; align-items:center; gap:16px; margin-bottom:32px;}
-header img{width:48px; height:48px; border-radius:12px;}
-header h1{font-size:24px; font-weight:600; letter-spacing:-0.02em; color:var(--ink);}
-header p{font-size:14px; color:var(--ink-tertiary);}
-.card{background:var(--surface-1); border:1px solid var(--hairline); border-radius:12px; padding:24px;}
-label{display:block; font-size:12px; font-weight:500; letter-spacing:0.05em; text-transform:uppercase;
-  color:var(--ink-tertiary); margin-bottom:8px;}
-select, textarea{
+header{display:flex; align-items:center; gap:12px; margin-bottom:20px;}
+header img{width:40px; height:40px; border-radius:10px;}
+header h1{font-size:24px; font-weight:600; letter-spacing:-0.02em; color:var(--ink); line-height:1.2;}
+header p{font-size:14px; color:var(--ink-tertiary); line-height:1.3;}
+.card{background:var(--surface-1); border:1px solid var(--hairline); border-radius:12px; padding:20px;}
+.askrow{display:flex; gap:12px; align-items:flex-start;}
+.askrow textarea{flex:1;}
+textarea{
   width:100%; background:var(--surface-2); border:1px solid var(--hairline-strong);
   border-radius:6px; color:var(--ink); font-size:16px; padding:12px; font-family:inherit;
+  min-height:84px; resize:vertical;
 }
-select{margin-bottom:16px;}
-textarea{min-height:96px; resize:vertical; margin-bottom:16px;}
-select:focus, textarea:focus{outline:2px solid var(--accent); border-color:var(--accent);}
+select{
+  background:var(--surface-2); border:1px solid var(--hairline-strong);
+  border-radius:6px; color:var(--ink); font-size:15px; padding:10px; font-family:inherit; min-height:44px;
+}
+textarea:focus, select:focus{outline:2px solid var(--accent); border-color:var(--accent);}
 button{
   background:var(--accent); color:#fff; border:none; border-radius:6px; padding:12px 24px;
-  font-size:16px; font-weight:500; cursor:pointer; font-family:inherit;
+  font-size:16px; font-weight:500; cursor:pointer; font-family:inherit; min-height:44px;
 }
 button:hover{background:var(--accent-hover);}
 button:disabled{background:var(--ink-disabled); cursor:default;}
-#answer{margin-top:24px; display:none;}
+button.secondary{background:var(--surface-2); color:var(--ink); border:1px solid var(--hairline-strong); white-space:nowrap;}
+button.secondary:hover{background:var(--surface-3);}
+#askBtn{width:100%; height:52px; font-size:17px; margin-top:12px;}
+.freshrow{margin-top:10px; font-size:14px; color:var(--ink-secondary);}
+.freshrow label{display:inline-flex; align-items:center; gap:8px; cursor:pointer; min-height:32px;}
+.freshrow input{width:18px; height:18px;}
+#panel{display:none; margin-top:16px; border-top:1px solid var(--hairline); padding-top:14px;}
+#panel .why{font-size:13px; color:var(--ink-tertiary); margin-bottom:12px;}
+.seatrow{display:flex; align-items:center; gap:12px; margin-bottom:10px;}
+.seatrow label{flex:0 0 128px; font-size:14px; color:var(--ink-secondary);}
+.seatrow select{flex:1;}
+.seatrow.static span{font-size:14px; color:var(--ink-tertiary);}
+#seatWarn{display:none; margin-top:6px; font-size:13px; color:var(--warning);}
+#runCard{display:none; margin-top:16px;}
+.timerRow{display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px;}
+#timerText{font-size:20px; color:var(--ink); font-variant-numeric:tabular-nums; font-weight:600;}
+#stopBtn{padding:8px 18px; font-size:14px; min-height:40px;}
+#passCaption{font-size:13px; color:var(--ink-tertiary); margin-bottom:8px;}
+.partline{font-size:13px; color:var(--ink-secondary); padding:2px 0;}
+.partline.dim{color:var(--ink-tertiary);}
+.secrow{display:flex; align-items:center; gap:8px; font-size:13px; min-height:20px; padding:1px 0;}
+.secrow .glyph{flex:0 0 18px; text-align:center; font-size:12px;}
+.secrow .slabel{color:var(--ink-secondary);}
+.secrow.active .slabel{color:var(--ink); font-weight:600;}
+.secrow .sdetail{margin-left:auto; color:var(--ink-tertiary); font-size:12px; font-variant-numeric:tabular-nums; text-align:right;}
+.st-waiting .glyph{color:var(--hairline-strong);}
+.st-active .glyph{color:var(--accent); animation:pulse 1.6s ease-in-out infinite;}
+.st-done .glyph{color:var(--success);}
+.st-notneeded .glyph{color:var(--ink-tertiary);}
+.st-notneeded .slabel{color:var(--ink-tertiary);}
+.st-skipped .glyph{color:var(--warning);}
+.st-skipped .slabel{color:var(--ink-tertiary);}
+.st-failed .glyph{color:var(--error);}
+@keyframes pulse{0%,100%{opacity:1;} 50%{opacity:0.35;}}
+@media (prefers-reduced-motion: reduce){ .st-active .glyph{animation:none;} }
+.ifneeded{margin-top:8px; border-top:1px dashed var(--hairline); padding-top:8px;}
+.ifneeded .glabel{font-size:12px; color:var(--ink-tertiary); margin-bottom:4px;}
+#draftCalls{margin-top:8px; font-size:12px; color:var(--ink-tertiary);}
+#answer{margin-top:16px; display:none;}
 #answer .card h2{font-size:16px; font-weight:600; color:var(--ink); margin-bottom:12px;}
 #answerText{white-space:pre-wrap; font-size:16px; max-width:65ch;}
 #sources{margin-top:16px;}
@@ -9142,228 +9626,558 @@ button:disabled{background:var(--ink-disabled); cursor:default;}
 .badge.ok{background:var(--surface-3); color:var(--success);}
 .badge.no{background:var(--surface-3); color:var(--warning);}
 .badge.err{background:var(--surface-3); color:var(--error);}
+#answeredIn{font-size:13px; color:var(--ink-tertiary); margin-left:10px;}
+#idkNote{display:none; margin-top:8px; font-size:14px; color:var(--ink-secondary);}
 #verifyNote{margin-top:12px; font-size:13px; color:var(--ink-tertiary);}
-.spinner{display:none; margin-top:16px; color:var(--ink-tertiary); font-size:14px;}
-.steps{display:none; margin-top:14px;}
-.steps ol{list-style:none; margin:0; padding:0; display:flex; flex-wrap:wrap; gap:6px;}
-.steps li{font-size:13px; padding:5px 11px; border-radius:999px; border:1px solid var(--surface-3); color:var(--ink-disabled); background:var(--surface-2);}
-.steps li.done{color:var(--ink-secondary); border-color:var(--ink-disabled);}
-.steps li.now{color:var(--ink); border-color:var(--ink-secondary); font-weight:600;}
-.steps .checkline{margin-top:8px; font-size:13px; color:var(--ink-tertiary);}
-.steps .elapsed{margin-top:4px; font-size:12px; color:var(--ink-disabled);}
-footer{margin-top:48px; font-size:12px; color:var(--ink-disabled); text-align:center; max-width:65ch;}
+#pills{margin-top:10px;}
+.pill{display:inline-block; font-size:12px; padding:2px 10px; border-radius:999px;
+  background:var(--surface-3); color:var(--ink-secondary); margin:0 6px 6px 0;}
+details#howChecked{margin-top:12px; font-size:13px; color:var(--ink-tertiary);}
+details#howChecked summary{cursor:pointer; min-height:32px; display:flex; align-items:center;}
+details#howChecked .hline{padding:2px 0 2px 12px; white-space:pre-wrap;}
+#goneLine{display:none; margin-top:16px; font-size:14px; color:var(--ink-tertiary);}
+footer{margin-top:24px; font-size:12px; color:var(--ink-tertiary); max-width:65ch;}
+.sr-only{position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap;}
+@media (max-width: 767px){
+  body{padding:16px;}
+  header img{width:32px; height:32px;}
+  header h1{font-size:20px;}
+  .askrow{flex-direction:column;}
+  .askrow textarea{font-size:17px;}
+  #modelsBtn{width:100%;}
+  .seatrow label{flex-basis:104px;}
+}
+@media (max-width: 479px){
+  header p{display:none;}
+}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <img src="/icon.png" alt="FSSA Q&A icon">
+    <img src="/icon.png" alt="FSSA SARA icon">
     <div>
-      <h1>FSSA Medicaid Q&A</h1>
-      <p>Ask questions about Indiana Medicaid, FSSA benefits, and the HCBS waiver. Answers come from 5,234 documents (Indiana FSSA/Medicaid plus federal, including SSA and its POMS operations manual), on your PC.</p>
+      <h1>FSSA SARA</h1>
+      <p>Search And Retrieval Assistant</p>
     </div>
   </header>
   <div class="card">
-    <label style="display:inline-block; text-transform:none; letter-spacing:0; font-size:14px; margin:0 0 16px 0;"><input type="checkbox" id="runLocal" onchange="toggleLocal()"> Run fully locally (drafting, judging and utilities all on your PC; no hosted calls, no web branch-out)</label>
-    <div id="localPick" style="display:none;">
-      <label for="localModel">Local model</label>
-      <select id="localModel">
-        <option value="qwen3.5:9b" selected>qwen3.5:9b (fast)</option>
-        <option value="qwen3:14b">qwen3:14b (stronger, slower)</option>
-      </select>
+    <div class="askrow">
+      <textarea id="q" aria-label="Your question" placeholder="Ask about Medicaid, waivers, SNAP…"></textarea>
+      <button id="modelsBtn" class="secondary" onclick="togglePanel()">Models</button>
     </div>
-    <label for="corpus">Search</label>
-    <select id="corpus">
-      <option value="in">Indiana (FSSA/Medicaid)</option>
-      <option value="federal">Federal</option>
-      <option value="both" selected>Both</option>
-    </select>
-    <label for="q">Your question</label>
-    <textarea id="q" placeholder="e.g. What does the HCBS waiver say about structured family caregiving?"></textarea>
-    <button id="ask" onclick="ask()">Ask</button>
-    <label style="display:inline-block; text-transform:none; letter-spacing:0; font-size:14px; margin:0 0 0 12px;"><input type="checkbox" id="fresh"> Fresh answer (skip cache)</label>
-    <button id="copyBtn" onclick="copyPrompt()" style="display:none; margin-left:8px; background:var(--surface-3); color:var(--ink);">Copy full prompt</button>
-    <div class="spinner" id="spin">Searching documents and asking the model...</div>
-    <div class="steps" id="steps"><ol id="stepList"></ol><div class="checkline" id="checkLine"></div><div class="elapsed" id="elapsedLine"></div></div>
+    <div id="panel">
+      <div class="why">Pick a model per task. Hosted is the standard pipeline.</div>
+      <div class="seatrow"><label for="seatDraft">Drafting</label><select id="seatDraft"></select></div>
+      <div class="seatrow"><label for="seatExtract">Extracting claims</label><select id="seatExtract"></select></div>
+      <div class="seatrow"><label for="seatJudge">Judging</label><select id="seatJudge"></select></div>
+      <div class="seatrow static"><label>Final checks</label><span>automatic (no model)</span></div>
+      <div class="seatrow"><label for="searchHelp">Search help</label>
+        <select id="searchHelp"><option value="hosted" selected>Hosted</option><option value="off">Off</option></select></div>
+      <div class="seatrow"><label for="webBranch">Web branch</label>
+        <select id="webBranch"><option value="allow" selected>Allow</option><option value="never">Never</option></select></div>
+      <div id="seatWarn"></div>
+    </div>
+    <button id="askBtn" onclick="ask()">Ask</button>
+    <div class="freshrow"><label><input type="checkbox" id="fresh"> Fresh answer</label></div>
+    <div id="goneLine">That run is no longer available.</div>
+    <div class="card" id="runCard" style="margin-top:16px; padding:16px;">
+      <div class="timerRow">
+        <span id="timerText" role="timer" aria-live="off">Elapsed 0:00</span>
+        <button id="stopBtn" class="secondary" onclick="stopRun()">Stop</button>
+      </div>
+      <div id="passCaption"></div>
+      <div id="partLines"></div>
+      <div id="sectionList" aria-live="polite" aria-atomic="false"></div>
+      <div class="ifneeded" id="ifNeeded" style="display:none;">
+        <div class="glabel">If needed</div>
+        <div id="chipList"></div>
+      </div>
+      <div id="draftCalls"></div>
+      <div class="sr-only" id="liveLine" aria-live="polite"></div>
+    </div>
   </div>
   <div id="answer">
     <div class="card">
-      <h2>Answer<span id="answerBadge"></span></h2>
+      <h2>Answer<span id="answerBadge"></span><span id="answeredIn"></span></h2>
       <div id="answerText"></div>
+      <div id="idkNote">No answer in the sources could be verified.</div>
+      <div id="pills"></div>
       <div id="verifyNote"></div>
+      <details id="howChecked"><summary>How this was checked</summary><div id="howLines"></div></details>
       <div id="sources"><h3>Sources</h3><div id="sourceList"></div></div>
     </div>
   </div>
-  <footer>Corpus updated 2026-10-12. Confirm anything affecting benefits or eligibility with your caseworker or FSSA.</footer>
+  <footer>Corpus updated 2026-10-12 · 5,234 documents (Indiana + federal). Check anything affecting benefits or eligibility with your caseworker or FSSA.</footer>
 </div>
 <script>
-function toggleLocal(){
-  const on = document.getElementById('runLocal').checked;
-  document.getElementById('localPick').style.display = on ? 'block' : 'none';
+const $ = function(id){ return document.getElementById(id); };
+// v24 (§6): the progress display's sections — five main-path
+// rows in true time order, plus the "If needed" group. States
+// come from the server's sections snapshot only; the page
+// renders what the snapshot says and never guesses a state.
+const MAIN_SECTIONS = ['retrieving','drafting','extracting','checking','final_checks'];
+const OPT_SECTIONS = ['redraft2','redraft3','lead_repair','rescue','web_branch'];
+const GLYPHS = {waiting:'○', active:'●', done:'✓', 'not-needed':'⊘', skipped:'▲', failed:'✕'};
+let startStamp = null, timerInt = null, anchored = false;
+let currentJob = null, lastSnapshot = null, prevStates = {};
+let seatBlock = null;  // {seat, model} while a pick is unavailable
+
+function fmtT(sec){
+  if(sec === null || sec === undefined || isNaN(sec)) return '';
+  sec = Math.max(0, Math.round(sec));
+  return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
 }
-// v23 (WS1): the progress stepper, rendered from the job's
-// structured phase field. Step states + ONE fact-check line
-// naming who is checking (v23.1 WS-F; the panel era's per-seat
-// widgets are gone) + elapsed seconds only: no percentage and
-// no ETA (an ask's length is not predictable, so the page
-// never guesses).
-const STEP_DEFS = [['retrieving','Retrieving'],['drafting','Drafting'],['extracting','Extracting claims'],['checking','Checking'],['final checks','Final checks']];
-function renderPhase(jp){
-  const box = document.getElementById('steps');
-  if(!jp || !jp.phase){ box.style.display = 'none'; return; }
-  box.style.display = 'block';
-  const name = jp.phase.name || 'retrieving';
-  const cur = STEP_DEFS.findIndex(function(s){ return s[0] === name; });
-  const ol = document.getElementById('stepList');
-  ol.innerHTML = '';
-  STEP_DEFS.forEach(function(s, i){
-    const li = document.createElement('li');
-    let label = s[1];
-    if(s[0] === name && jp.phase.round && (s[0] === 'drafting' || s[0] === 'checking')) label += ' · round ' + jp.phase.round;
-    const isDone = (name === 'done' || i < cur);
-    li.textContent = isDone ? '✓ ' + label : label;
-    li.className = isDone ? 'done' : (i === cur ? 'now' : '');
-    ol.appendChild(li);
+function fmtSecs(sec){
+  if(sec === null || sec === undefined) return '';
+  return sec >= 60 ? fmtT(sec) : (Math.round(sec) + 's');
+}
+function tickTimer(){
+  if(!startStamp) return;
+  $('timerText').textContent = 'Elapsed ' + fmtT((Date.now() - startStamp) / 1000);
+}
+function startTimer(){
+  startStamp = Date.now(); anchored = false;
+  tickTimer();
+  if(timerInt) clearInterval(timerInt);
+  timerInt = setInterval(tickTimer, 500);
+}
+function stopTimer(){ if(timerInt) clearInterval(timerInt); timerInt = null; }
+
+// ---------- Models panel (§8) ----------
+function seatPicks(){
+  return {draft: $('seatDraft').value || 'hosted',
+          extract: $('seatExtract').value || 'hosted',
+          judge: $('seatJudge').value || 'hosted'};
+}
+function togglePanel(){
+  const p = $('panel');
+  p.style.display = (p.style.display === 'block') ? 'none' : 'block';
+}
+function modelsSummary(){
+  const picks = seatPicks();
+  const n = ['draft','extract','judge'].filter(k => picks[k] !== 'hosted').length;
+  $('modelsBtn').textContent = n ? ('Models · ' + n + ' local') : 'Models';
+}
+async function loadModels(){
+  try{
+    const r = await fetch('/models');
+    const d = await r.json();
+    const fill = function(sel, opts){
+      sel.innerHTML = '';
+      (opts || []).forEach(function(o){
+        const op = document.createElement('option');
+        op.value = o.value; op.textContent = o.label;
+        sel.appendChild(op);
+      });
+    };
+    if(d.seats){
+      fill($('seatDraft'), d.seats.draft);
+      fill($('seatExtract'), d.seats.extract);
+      fill($('seatJudge'), d.seats.judge);
+    }
+    window._installedModels = d.installed || [];
+  }catch(e){ /* panel stays hosted-only; the server still guards */ }
+  ['seatDraft','seatExtract','seatJudge'].forEach(function(id){
+    $(id).addEventListener('change', onSeatChange);
   });
-  document.getElementById('checkLine').textContent =
-    (name === 'checking' || name === 'extracting') ? (jp.phase.check || '') : '';
-  document.getElementById('elapsedLine').textContent =
-    (typeof jp.elapsed_s === 'number') ? ('Elapsed: ' + Math.round(jp.elapsed_s) + 's') : '';
+  modelsSummary();
+}
+async function onSeatChange(ev){
+  modelsSummary();
+  const sel = ev.target;
+  const model = sel.value;
+  seatBlock = null;
+  $('seatWarn').style.display = 'none';
+  if(model === 'hosted') return;
+  // §8.5: validate + pre-warm at pick time. A model that does
+  // not answer blocks Ask, naming the seat and the model.
+  const seatName = sel.id === 'seatDraft' ? 'Drafting'
+    : sel.id === 'seatExtract' ? 'Extracting claims' : 'Judging';
+  sel.disabled = true;
+  try{
+    const r = await fetch('/models/warm', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({model: model})
+    });
+    const d = await r.json();
+    if(!d.ok) throw new Error('unavailable');
+  }catch(e){
+    seatBlock = {seat: seatName, model: model};
+    const w = $('seatWarn');
+    w.textContent = seatName + ': ' + model + ' is not available right now. Pick another model for that seat.';
+    w.style.display = 'block';
+  }
+  sel.disabled = false;
+}
+
+// ---------- Progress display (§6) ----------
+function blankSnapshot(){
+  const secs = {};
+  MAIN_SECTIONS.concat(OPT_SECTIONS).forEach(function(id){
+    secs[id] = {id:id, label:id, state:'waiting', seconds:null, detail:''};
+  });
+  secs.retrieving.state = 'active';
+  const labels = {retrieving:'Retrieving', drafting:'Drafting', redraft2:'Redraft 2',
+    redraft3:'Redraft 3', extracting:'Extracting claims', checking:'Checking',
+    lead_repair:'Lead repair', final_checks:'Final checks', rescue:'Rescue', web_branch:'Web branch'};
+  Object.keys(secs).forEach(function(k){ secs[k].label = labels[k]; });
+  return {units:[{index:0, part:null, status:'active', elapsed_s:null,
+                   caption:'Pass 1', sections:MAIN_SECTIONS.concat(OPT_SECTIONS).map(k => secs[k])}],
+          draft_calls:0, draft_cap:4, parts:1};
+}
+function sectionMap(unit){
+  const m = {};
+  (unit.sections || []).forEach(function(s){ m[s.id] = s; });
+  return m;
+}
+function announceFlips(snap){
+  // Screen-reader announcements on state flips only (§6.2).
+  const notes = [];
+  (snap.units || []).forEach(function(u){
+    (u.sections || []).forEach(function(s){
+      const key = u.index + ':' + s.id;
+      const prev = prevStates[key];
+      if(prev && prev !== s.state){
+        if(s.state === 'active') notes.push(s.label + ' started');
+        else if(s.state === 'not-needed') notes.push(s.label + ' not needed');
+        else if(s.state === 'done') notes.push(s.label + ' done');
+        else if(s.state === 'skipped') notes.push(s.label + ' skipped');
+      }
+      prevStates[key] = s.state;
+    });
+  });
+  if(notes.length) $('liveLine').textContent = notes[notes.length - 1];
+}
+function renderRun(jp){
+  const snap = jp.sections || lastSnapshot || blankSnapshot();
+  lastSnapshot = snap;
+  announceFlips(snap);
+  const units = snap.units || [];
+  let active = units.filter(u => u.status === 'active')[0]
+    || units[units.length - 1] || blankSnapshot().units[0];
+  // Caption: the pass, plus the part when bundled (§6.1).
+  let cap = active.caption || '';
+  if((snap.parts || units.length) > 1){
+    cap = 'Part ' + (active.index + 1) + ' of ' + (snap.parts || units.length)
+        + (cap ? ' · ' + cap : '');
+  }
+  $('passCaption').textContent = cap;
+  // The other parts as one-liners (§6.1).
+  const pl = $('partLines');
+  pl.innerHTML = '';
+  if(units.length > 1){
+    units.forEach(function(u){
+      if(u === active) return;
+      const div = document.createElement('div');
+      if(u.status === 'done'){
+        div.className = 'partline';
+        div.textContent = 'Part ' + (u.index + 1) + ' · done · ' + fmtT(u.elapsed_s);
+      } else if(u.status === 'active'){
+        div.className = 'partline';
+        div.textContent = 'Part ' + (u.index + 1) + ' · running';
+      } else {
+        div.className = 'partline dim';
+        div.textContent = 'Part ' + (u.index + 1) + ' · waiting';
+      }
+      pl.appendChild(div);
+    });
+  }
+  // Main-path rows.
+  const m = sectionMap(active);
+  const list = $('sectionList');
+  list.innerHTML = '';
+  MAIN_SECTIONS.forEach(function(id){
+    const s = m[id]; if(!s) return;
+    list.appendChild(sectionRow(s, jp));
+  });
+  // If-needed chips.
+  const chips = $('chipList');
+  chips.innerHTML = '';
+  let anyOpt = false;
+  OPT_SECTIONS.forEach(function(id){
+    const s = m[id]; if(!s) return;
+    anyOpt = true;
+    chips.appendChild(sectionRow(s, jp));
+  });
+  $('ifNeeded').style.display = anyOpt ? 'block' : 'none';
+  if(typeof snap.draft_calls === 'number'){
+    $('draftCalls').textContent = 'Draft calls: ' + snap.draft_calls + ' of ' + (snap.draft_cap || 4);
+  }
+}
+function sectionRow(s, jp){
+  const div = document.createElement('div');
+  div.className = 'secrow st-' + s.state;
+  const g = document.createElement('span');
+  g.className = 'glyph';
+  g.textContent = GLYPHS[s.state] || '○';
+  const lab = document.createElement('span');
+  lab.className = 'slabel';
+  lab.textContent = s.label;
+  const det = document.createElement('span');
+  det.className = 'sdetail';
+  let txt = '';
+  if(s.state === 'done') txt = fmtSecs(s.seconds);
+  else if(s.state === 'not-needed') txt = 'Not needed';
+  else if(s.state === 'skipped') txt = 'Skipped' + (s.detail ? ' · ' + s.detail : '');
+  else if(s.state === 'active'){
+    txt = s.detail || '';
+    // The fact-check line rides the Checking row (§6.2).
+    if(s.id === 'checking' && jp && jp.phase && jp.phase.check) txt = jp.phase.check;
+    if(s.id === 'extracting' && jp && jp.phase && jp.phase.check) txt = jp.phase.check;
+  }
+  det.textContent = txt;
+  div.appendChild(g); div.appendChild(lab); div.appendChild(det);
+  return div;
+}
+
+// ---------- Run lifecycle (§5) ----------
+async function stopRun(){
+  if(!currentJob) return;
+  const b = $('stopBtn');
+  b.disabled = true; b.textContent = 'Stopping…';
+  try{ await fetch('/ask/cancel/' + currentJob, {method:'POST'}); }
+  catch(e){ /* the poll will surface the outcome either way */ }
+}
+function buildPayload(q){
+  const payload = {question:q, model:'qwen3.5:9b',
+                   fresh: $('fresh').checked};
+  const picks = seatPicks();
+  if(picks.draft !== 'hosted' || picks.extract !== 'hosted' || picks.judge !== 'hosted'){
+    payload.seat_models = picks;
+  }
+  if($('searchHelp').value !== 'hosted') payload.search_help = $('searchHelp').value;
+  if($('webBranch').value !== 'allow') payload.web_branch = $('webBranch').value;
+  return payload;
 }
 async function ask(){
-  // v18 (F18): a second submit while an ask is running is
-  // ignored outright — through v17.3 the button state was the
-  // only guard, and a re-entrant call doubled the spend.
+  // A second submit while an ask is running is ignored (v18).
   if(window._asking) return;
+  const q = $('q').value.trim();
+  if(!q) return;
+  if(seatBlock){
+    $('panel').style.display = 'block';
+    $('seatWarn').style.display = 'block';
+    return;
+  }
   window._asking = true;
-  const q = document.getElementById('q').value.trim();
-  if(!q){ window._asking = false; return; }
-  // v16: no model dropdown. The default ask names the local
-  // default model, which the server treats as "no explicit
-  // pick" (hosted NIM drafting + the remote judge panel). The
-  // run-locally toggle is the only way to pick a local model.
-  const runLocal = document.getElementById('runLocal').checked;
-  const model = runLocal
-    ? document.getElementById('localModel').value : 'qwen3.5:9b';
-  const corpus = document.getElementById('corpus').value;
-  const btn = document.getElementById('ask');
-  btn.disabled = true;
-  document.getElementById('spin').style.display = 'block';
-  document.getElementById('answer').style.display = 'none';
-  const spin = document.getElementById('spin');
+  $('askBtn').disabled = true;
+  $('answer').style.display = 'none';
+  $('goneLine').style.display = 'none';
+  $('runCard').style.display = 'block';
+  $('stopBtn').disabled = false;
+  $('stopBtn').textContent = 'Stop';
+  prevStates = {}; lastSnapshot = null;
+  renderRun({sections: blankSnapshot()});
+  startTimer();
+  const payload = buildPayload(q);
+  let d = null, jobId = null;
   try{
-    // v15: job-based flow — submit the ask as a job and poll for
-    // the result, showing the server's live stage. Falls back to
-    // the synchronous request ONLY when no job was created.
-    // v18 (F19): the local selection is sent as local=true; the
-    // server runs the whole pipeline on-device for it.
-    const payload = {question:q, model:model, corpus:corpus, fresh:document.getElementById('fresh').checked, local:runLocal};
-    if(runLocal) spin.textContent = 'Running locally on ' + model + '...';
-    let d = null;
-    let jobId = null;
     try{
       const r0 = await fetch('/ask?async=1', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
+        method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify(payload)
       });
       const j0 = await r0.json();
       if(!j0.job_id) throw new Error('no job id');
-      jobId = j0.job_id;
-      spin.textContent = 'Working: ' + (j0.stage || 'retrieving') + '...';
-      renderPhase(j0);
-      for(let i = 0; i < 400 && !d; i++){
-        await new Promise(res => setTimeout(res, 2000));
-        // v18 (F18): a failed POLL is tolerated and polling
-        // continues — the job is still running server-side.
-        let jp = null;
-        try{
-          const rp = await fetch('/ask/result/' + jobId);
-          jp = await rp.json();
-        }catch(pollErr){ continue; }
-        if(jp.status === 'done'){ d = jp.result; }
-        else if(jp.status === 'error'){ throw new Error(jp.error || 'job failed'); }
-        else { spin.textContent = 'Working: ' + (jp.stage || 'retrieving') + '...'; renderPhase(jp); }
-      }
-      if(!d) throw new Error('timed out waiting for the answer');
+      jobId = j0.job_id; currentJob = jobId;
+      sessionStorage.setItem('sara_job', jobId);
+      d = await pollJob(jobId);
     }catch(jobErr){
-      // v18 (F18): once a job exists, NEVER re-POST the question
-      // synchronously — that re-ran (and re-billed) the whole
-      // pipeline while the job also finished: the Miller
-      // triple-submission shape. The error is shown instead.
+      // Once a job exists, NEVER re-POST synchronously (v18:
+      // that re-ran and re-billed the whole pipeline).
       if(jobId || d) throw jobErr;
       const r = await fetch('/ask', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
+        method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify(payload)
       });
       d = await r.json();
-    }
-    document.getElementById('answerText').textContent = d.answer || ('Error: ' + (d.error||'unknown'));
-    const badgeMap = {
-      checked: ['ok', 'Checked'],
-      verified_web: ['ok', 'Checked · web sources'],
-      checked_det: ['no', 'Checked · deterministic checks only'],
-      verified_web_reduced: ['no', 'Checked web · deterministic only'],
-      partial: ['no', 'Partial · some parts could not be verified'],
-      idk: ['err', 'IDK · not verified']
-    };
-    const bm = badgeMap[d.badge];
-    document.getElementById('answerBadge').innerHTML = bm
-      ? '<span class="badge ' + bm[0] + '">' + bm[1] + '</span>' : '';
-    const vn = document.getElementById('verifyNote');
-    if(d.judging){
-      // v23.1: the annotation names the checks that ran and
-      // who judged ("Checks: figures + citations + ..."),
-      // built server-side from the round's checks record; the
-      // mode line is the fallback.
-      let note = d.judging.annotation || ('Verification: ' + d.judging.mode);
-      if(d.timing && d.timing.rungs) note += ' · ' + d.timing.rungs + ' ladder rung(s)';
-      vn.textContent = note;
-    } else { vn.textContent = ''; }
-    const sl = document.getElementById('sourceList');
-    sl.innerHTML = '';
-    (d.hits||[]).forEach(h=>{
-      const a = document.createElement('a');
-      a.href = h.url; a.target = '_blank'; a.rel = 'noopener';
-      a.textContent = h.title;
-      const b = document.createElement('span');
-      if(h.web){
-        // v16 branch-out evidence: live-fetched official page,
-        // with the fetch date shown beside it.
-        b.className = 'badge ' + (h.verified ? 'ok' : 'no');
-        b.textContent = 'web · fetched ' + (h.fetched || '');
-      } else {
-        b.className = 'badge ' + (h.verified ? 'ok' : 'no');
-        b.textContent = h.verified ? 'verified' : 'unverified';
-      }
-      a.appendChild(b);
-      sl.appendChild(a);
-    });
-    document.getElementById('answer').style.display = 'block';
-    if(d.prompt){
-      window._lastPrompt = d.prompt;
-      document.getElementById('copyBtn').style.display = 'inline-block';
+      if(d && d.error) throw new Error(d.error);
+      finishRun(d, null);
+      return;
     }
   }catch(e){
-    document.getElementById('answerText').textContent = 'Error: ' + e.message;
-    document.getElementById('answer').style.display = 'block';
+    showError(e.message);
+    return;
   }
-  btn.disabled = false;
+}
+async function pollJob(jobId){
+  for(let i = 0; i < 400; i++){
+    await new Promise(res => setTimeout(res, 2000));
+    let jp = null;
+    try{
+      const rp = await fetch('/ask/result/' + jobId);
+      jp = await rp.json();
+    }catch(pollErr){ continue; }  // a failed poll is tolerated (v18)
+    if(jp.error && !jp.status){ showGone(); return null; }
+    if(!anchored && typeof jp.elapsed_s === 'number'){
+      // Anchor the timer to the SERVER's start (§5.1): the
+      // displayed elapsed is the server's truth, and a
+      // reloaded page re-anchors the same way.
+      startStamp = Date.now() - jp.elapsed_s * 1000;
+      anchored = true; tickTimer();
+    }
+    if(jp.status === 'done'){ finishRun(jp.result, jp); return jp.result; }
+    if(jp.status === 'cancelled'){ finishCancelled(jp.result); return jp.result; }
+    if(jp.status === 'error'){ throw new Error(jp.error || 'job failed'); }
+    renderRun(jp);
+  }
+  throw new Error('timed out waiting for the answer');
+}
+function endRunChrome(){
+  stopTimer();
   window._asking = false;
-  document.getElementById('spin').style.display = 'none';
-  document.getElementById('steps').style.display = 'none';
+  currentJob = null;
+  sessionStorage.removeItem('sara_job');
+  $('askBtn').disabled = false;
+  $('runCard').style.display = 'none';
 }
-async function copyPrompt(){
-  if(!window._lastPrompt) return;
+function finishRun(d, jp){
+  endRunChrome();
+  if(!d){ showGone(); return; }
+  const wall = (typeof d.wall_s === 'number') ? d.wall_s
+    : (startStamp ? (Date.now() - startStamp) / 1000 : null);
+  $('answeredIn').textContent = wall !== null ? ('· Answered in ' + fmtT(wall)) : '';
+  $('answerText').textContent = d.answer || ('Error: ' + (d.error || 'unknown'));
+  // §7.5: the six badge strings.
+  const badgeMap = {
+    checked: ['ok', 'Checked'],
+    verified_web: ['ok', 'Checked · web sources'],
+    checked_det: ['no', 'Checked · figures and citations'],
+    verified_web_reduced: ['no', 'Checked · web · figures and citations'],
+    partial: ['no', 'Partial · partly verified'],
+    idk: ['err', 'No verified answer']
+  };
+  const bm = badgeMap[d.badge];
+  $('answerBadge').innerHTML = bm
+    ? '<span class="badge ' + bm[0] + '">' + bm[1] + '</span>' : '';
+  $('idkNote').style.display = (d.badge === 'idk') ? 'block' : 'none';
+  const vn = $('verifyNote');
+  vn.textContent = (d.judging && d.judging.annotation) ? d.judging.annotation
+    : (d.judging ? ('Verification: ' + d.judging.mode) : '');
+  // §6.5: unusual-path pills.
+  const pills = $('pills');
+  pills.innerHTML = '';
+  ((d.progress && d.progress.pills) || []).forEach(function(t){
+    const sp = document.createElement('span');
+    sp.className = 'pill'; sp.textContent = t;
+    pills.appendChild(sp);
+  });
+  // §6.5: the "How this was checked" disclosure.
+  const hl = $('howLines');
+  hl.innerHTML = '';
+  const snap = (jp && jp.sections) || lastSnapshot;
+  if(snap && snap.units && snap.units.length){
+    snap.units.forEach(function(u){
+      const div = document.createElement('div');
+      div.className = 'hline';
+      const states = (u.sections || []).map(function(s){
+        return s.label + ' ' + (GLYPHS[s.state] || s.state);
+      }).join(' · ');
+      div.textContent = (snap.units.length > 1
+        ? ('Part ' + (u.index + 1) + ' — ') : '') + states;
+      hl.appendChild(div);
+    });
+    if(typeof snap.draft_calls === 'number'){
+      const div = document.createElement('div');
+      div.className = 'hline';
+      div.textContent = 'Draft calls: ' + snap.draft_calls + ' of ' + (snap.draft_cap || 4);
+      hl.appendChild(div);
+    }
+  } else if(d.progress && d.progress.parts){
+    d.progress.parts.forEach(function(pt, i){
+      const div = document.createElement('div');
+      div.className = 'hline';
+      div.textContent = (d.progress.parts.length > 1 ? ('Part ' + (i + 1) + ' — ') : '')
+        + 'badge: ' + (pt.badge || '—') + ' · ' + pt.rungs + ' ladder rung(s)'
+        + (pt.rescue ? ' · rescue ' + pt.rescue : '')
+        + (pt.web ? ' · web branch ' + pt.web : '')
+        + (pt.budget_cut ? ' · budget cut' : '');
+      hl.appendChild(div);
+    });
+  }
+  $('howChecked').style.display = hl.children.length ? 'block' : 'none';
+  // Sources (§7 item 10 strings).
+  const sl = $('sourceList');
+  sl.innerHTML = '';
+  (d.hits || []).forEach(function(h){
+    const a = document.createElement('a');
+    a.href = h.url; a.target = '_blank'; a.rel = 'noopener';
+    a.textContent = h.title;
+    const b = document.createElement('span');
+    if(h.web){
+      b.className = 'badge ' + (h.verified ? 'ok' : 'no');
+      b.textContent = 'live page · ' + (h.fetched || '');
+    } else {
+      b.className = 'badge ' + (h.verified ? 'ok' : 'no');
+      b.textContent = h.verified ? 'verified' : 'not checked';
+    }
+    a.appendChild(b);
+    sl.appendChild(a);
+  });
+  $('answer').style.display = 'block';
+}
+function finishCancelled(d){
+  endRunChrome();
+  const wall = (d && typeof d.wall_s === 'number') ? d.wall_s
+    : (startStamp ? (Date.now() - startStamp) / 1000 : 0);
+  $('answerBadge').innerHTML = '';
+  $('answeredIn').textContent = '· Stopped after ' + fmtT(wall);
+  $('answerText').textContent = 'Stopped. No answer was sent.';
+  $('idkNote').style.display = 'none';
+  $('verifyNote').textContent = '';
+  $('pills').innerHTML = '';
+  $('howChecked').style.display = 'none';
+  $('sourceList').innerHTML = '';
+  $('answer').style.display = 'block';
+}
+function showError(msg){
+  endRunChrome();
+  $('answerBadge').innerHTML = '<span class="badge err">Error</span>';
+  $('answeredIn').textContent = startStamp
+    ? ('· Ran for ' + fmtT((Date.now() - startStamp) / 1000)) : '';
+  $('answerText').textContent = 'Error: ' + msg;
+  $('idkNote').style.display = 'none';
+  $('verifyNote').textContent = '';
+  $('pills').innerHTML = '';
+  $('howChecked').style.display = 'none';
+  $('sourceList').innerHTML = '';
+  $('answer').style.display = 'block';
+}
+function showGone(){
+  endRunChrome();
+  $('goneLine').style.display = 'block';
+}
+// §5.3: reload / resume — a stored job id re-polls on load.
+window.addEventListener('DOMContentLoaded', async function(){
+  loadModels();
+  const jid = sessionStorage.getItem('sara_job');
+  if(!jid) return;
   try{
-    await navigator.clipboard.writeText(window._lastPrompt);
-    const b = document.getElementById('copyBtn');
-    b.textContent = 'Copied!';
-    setTimeout(()=>{ b.textContent = 'Copy full prompt'; }, 2000);
-  }catch(e){ alert('Copy failed: ' + e.message); }
-}
-document.getElementById('q').addEventListener('keydown', e=>{
+    const r = await fetch('/ask/result/' + jid);
+    const jp = await r.json();
+    if(jp.status === 'running'){
+      window._asking = true;
+      $('askBtn').disabled = true;
+      $('runCard').style.display = 'block';
+      currentJob = jid;
+      startTimer();
+      if(typeof jp.elapsed_s === 'number'){
+        startStamp = Date.now() - jp.elapsed_s * 1000;
+        anchored = true; tickTimer();
+      }
+      renderRun(jp);
+      pollJob(jid).catch(function(e){ showError(e.message); });
+    } else if(jp.status === 'done'){
+      startStamp = Date.now(); finishRun(jp.result, jp);
+    } else if(jp.status === 'cancelled'){
+      startStamp = Date.now(); finishCancelled(jp.result);
+    } else {
+      showGone();
+    }
+  }catch(e){ showGone(); }
+});
+$('q').addEventListener('keydown', function(e){
   if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); ask(); }
 });
 </script>
@@ -9481,6 +10295,11 @@ def _run_job(rec, raw_body, headers):
                 rec["result"] = captured.get("obj")
                 code = captured.get("code", 200)
                 rec["status"] = "done" if code < 400 else "error"
+                # v24 (§5.2): a stopped ask is its own
+                # terminal status, not a done and not an error.
+                if isinstance(rec["result"], dict) \
+                        and rec["result"].get("cancelled"):
+                    rec["status"] = "cancelled"
                 if rec["status"] == "error":
                     rec["error"] = str(captured.get("obj"))[:300]
         except Exception as e:
@@ -9584,25 +10403,54 @@ class Handler(BaseHTTPRequestHandler):
                                  "check": None},
                        "elapsed_s": round(time.time()
                                           - job["ts"], 1)}
-                if job["status"] == "done":
+                # v24 (§6.4): the per-section progress states,
+                # derived from the ask context's tracker.
+                _secs = None
+                try:
+                    _secs = _sections_snapshot(job)
+                except Exception:
+                    _secs = None
+                if _secs is not None:
+                    out["sections"] = _secs
+                if job["status"] in ("done", "cancelled"):
                     out["result"] = job["result"]
                 elif job["status"] == "error":
                     out["error"] = job["error"]
                 self._json(out)
         elif u.path == "/models":
-            # Q&A dropdown is deliberately limited to the 9b local model
-            # plus Gemini (operator call, 2026-10-12); Ollama may host many
-            # more models for other uses.
-            models = [m for m in ollama_models() if m == "qwen3.5:9b"]
-            # Add Gemini options if API key is configured
+            # v24 (§8.3): the Models panel's option structure —
+            # per seat: the hosted entry plus (allowlist n
+            # installed). The hosted entries stay (the panel's
+            # judging seat is Gemini-faced); what changed from
+            # v23.2 is the Ollama side: the qwen3.5:9b-only
+            # filter became the §8.2 allowlist. The legacy
+            # "models" list keeps its v23.2 shape for any
+            # older client.
+            installed = ollama_models()
+            local_opts = [m for m in LOCAL_SEAT_ALLOWLIST
+                          if m in installed]
+            seats = {}
+            for _seat in ("draft", "extract", "judge"):
+                seats[_seat] = (
+                    [{"value": "hosted",
+                      "label": "Hosted (standard)"}]
+                    + [{"value": m, "label": "Local · " + m}
+                       for m in local_opts])
+            models = [m for m in installed if m == "qwen3.5:9b"]
             if GEMINI_API_KEY:
                 models = ["gemini-3.5-flash-lite (API)",
                           "gemini-3.8-flash (API)"] + models
-            self._json({"models": models})
+            self._json({"models": models, "seats": seats,
+                        "allowlist": list(LOCAL_SEAT_ALLOWLIST),
+                        "installed": installed})
         elif u.path == "/search":
             qs = parse_qs(u.query)
             q = qs.get("q", [""])[0]
-            corp = get_corpus(qs.get("corpus", ["in"])[0])
+            # v24 (§10): the corpus control is gone — every
+            # search runs both corpora. The request field stays
+            # ACCEPTED (and ignored) for one version so old
+            # clients do not break.
+            corp = get_corpus("both")
             # v23: plain search rides the same v2 engine as the
             # ask path. If the generation store is down the box
             # degrades to the keyword scan; the ASK path never
@@ -9630,6 +10478,51 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        if u.path.startswith("/ask/cancel/"):
+            # v24 (§5.2): the Stop button. Sets the job's
+            # cancel flag; the pipeline unwinds at its next
+            # clock seam and the job ends "cancelled".
+            job = _job_get(u.path.rsplit("/", 1)[-1])
+            if job is None:
+                self._json({"error": "unknown job"}, 404)
+            else:
+                job["cancel"] = True
+                self._json({"ok": True, "job_id": job["id"],
+                            "status": job["status"]})
+            return
+        if u.path == "/models/warm":
+            # v24 (§8.5): picking a local model in the panel
+            # fires this — a minimal Ollama call that loads the
+            # model NOW (while the user is still typing), so
+            # the load cost does not land inside the ask clock.
+            # Allowlist only; best effort; the reply says
+            # whether the model answered.
+            try:
+                _wl = int(self.headers.get("Content-Length", 0))
+                _wb = json.loads(self.rfile.read(_wl) or b"{}")
+            except Exception:
+                _wb = {}
+            _wm = str(_wb.get("model") or "")
+            if _wm not in LOCAL_SEAT_ALLOWLIST:
+                self._json({"ok": False,
+                            "error": "model not in the seat "
+                                     "allowlist"}, 400)
+                return
+            _wok = False
+            try:
+                _wp = json.dumps(
+                    {"model": _wm, "prompt": " ",
+                     "stream": False, "keep_alive": "10m",
+                     "options": {"num_predict": 1}}).encode()
+                _wr = urllib.request.Request(
+                    OLLAMA + "/api/generate", data=_wp,
+                    headers={"Content-Type": "application/json"})
+                urllib.request.urlopen(_wr, timeout=120).read()
+                _wok = True
+            except Exception:
+                _wok = False
+            self._json({"ok": _wok, "model": _wm})
+            return
         if u.path != "/ask":
             self.send_response(404)
             self.end_headers()
@@ -9666,11 +10559,35 @@ class Handler(BaseHTTPRequestHandler):
                 return
             question = req.get("question", "").strip()
             model = req.get("model", "").strip()
-            corpus_name = req.get("corpus", "in")
+            # v24 (§10): the corpus dropdown is gone — every
+            # ask searches BOTH corpora (today's default
+            # experience, now the only one). The request field
+            # stays accepted (and ignored) for one version.
+            corpus_name = "both"
             # Feature toggles
             use_rewrite = req.get("rewrite", REWRITE_ENABLED)
             use_rerank = req.get("rerank", RERANK_ENABLED)
             corp = get_corpus(corpus_name)
+            # v24 (§8): the Models panel's per-seat picks. Each
+            # seat is "hosted" or an allowlisted local model;
+            # anything else in the payload is ignored — a
+            # benefits tool does not run unlisted models as
+            # drafters or judges, whatever a client sends.
+            seat_models = {"draft": "hosted",
+                           "extract": "hosted", "judge": "hosted"}
+            _sm = req.get("seat_models")
+            if isinstance(_sm, dict):
+                for _sk in seat_models:
+                    _sv = _sm.get(_sk)
+                    if _sv == "hosted" \
+                            or _sv in LOCAL_SEAT_ALLOWLIST:
+                        seat_models[_sk] = _sv
+            search_help = req.get("search_help")
+            if search_help not in ("hosted", "off"):
+                search_help = None
+            web_branch_pick = req.get("web_branch")
+            if web_branch_pick not in ("allow", "never"):
+                web_branch_pick = None
             if not question:
                 self._json({"error": "empty question"}, 400)
                 return
@@ -9689,6 +10606,27 @@ class Handler(BaseHTTPRequestHandler):
             if local_mode:
                 use_rewrite = False
                 use_rerank = False
+                # v24 (§8.3): the legacy local=true + model
+                # payload maps to all three seats on that
+                # model, search help off, web branch never —
+                # the old mode's exact shape, one version of
+                # transition for old clients.
+                _lm = model or LOCAL_MODEL
+                seat_models = {"draft": _lm, "extract": _lm,
+                               "judge": _lm}
+                search_help = "off"
+                web_branch_pick = "never"
+            if search_help == "off":
+                use_rewrite = False
+                use_rerank = False
+            seat_local = {k: (None if v == "hosted" else v)
+                          for k, v in seat_models.items()}
+            any_seat_local = any(seat_local.values())
+            # v24 (§8.4): the Web branch line — Allow is
+            # today's hosted behavior; the legacy local mode
+            # forced Never, and the panel makes it a pick.
+            branch_allowed = (web_branch_pick != "never") \
+                and not local_mode
             t_start = time.monotonic()
             # v16: per-ask records (seat events + local loads,
             # retrieval sub-timings, branch-out accounting).
@@ -9704,6 +10642,16 @@ class Handler(BaseHTTPRequestHandler):
             _or_reset_ask()
             _set_stage("retrieving")
             _set_phase("retrieving")
+            # v24 (§5.2/§6.4): wire the job's cancel flag and
+            # the progress tracker into the ask context, and
+            # publish the context on the job record so the
+            # /ask/result snapshot reads live section states.
+            _actx = _ask_ctx()
+            _actx.tracker = {"units": [], "parts": 0}
+            _job_rec = getattr(_STAGE_TLS, "job", None)
+            if _job_rec is not None:
+                _actx.cancel_rec = _job_rec
+                _job_rec["_ask_ctx"] = _actx
             # v15: the per-ask wall-clock cap (config
             # ASK_TIME_CAP_S); the ladder and the units loop
             # consult this deadline and never ship unverified.
@@ -9733,8 +10681,8 @@ class Handler(BaseHTTPRequestHandler):
                 nonlocal n_gaps
                 if discovery or use_gemini:
                     return []
-                if local_mode:
-                    return []  # v18 (F19): local asks never branch out
+                if not branch_allowed:
+                    return []  # v24 (§8.4): Web branch: Never
                 if model and model != LOCAL_MODEL:
                     return []
                 if time.monotonic() > deadline - 60:
@@ -9808,7 +10756,10 @@ class Handler(BaseHTTPRequestHandler):
                 routed_model, route_reason = route_local_model(
                     question, model)
             ask_key = (question, routed_model, corpus_name,
-                       use_rewrite, use_rerank, local_mode)
+                       use_rewrite, use_rerank, local_mode,
+                       seat_models["draft"], seat_models["extract"],
+                       seat_models["judge"], search_help or "",
+                       web_branch_pick or "")
             if not fresh:
                 cached_answer = _cache_get(_ASK_CACHE, ask_key)
                 if cached_answer:
@@ -9973,6 +10924,15 @@ class Handler(BaseHTTPRequestHandler):
                           else None,
                           "cost_usd": _or_ask_cost(),
                           "mechanisms": [m["id"] for m in mechanisms_all]}
+                # v24 (§5.1): the frozen total rides the
+                # response — the page's "Answered in m:ss" is
+                # the server's wall time, not a client clock.
+                result["wall_s"] = round(t_end - t_start, 3)
+                # v24 (§6.5): post-run pills + per-part lines.
+                try:
+                    result["progress"] = _progress_summary(units)
+                except Exception:
+                    result["progress"] = {"pills": [], "parts": []}
                 # v18 (F17): only top-tier answers enter the
                 # replay cache. Through v17.3 partials and IDKs
                 # cached too, so a transient failure froze into
@@ -10002,7 +10962,15 @@ class Handler(BaseHTTPRequestHandler):
                     # measurement.
                     "phase_ms": _phase_ms_snapshot(),
                     "question": question, "corpus": corpus_name,
-                    "local": local_mode, "badge": badge,
+                    "local": bool(local_mode or any_seat_local),
+                    # v24 (§8): the seat picks + the two panel
+                    # lines, as served for this ask.
+                    "seat_models": dict(seat_models),
+                    "search_help": search_help
+                    or ("off" if local_mode else "hosted"),
+                    "web_branch": web_branch_pick
+                    or ("never" if local_mode else "allow"),
+                    "badge": badge,
                     "cost_usd": result["cost_usd"],
                     "served": served,
                     # v23.1 (WS-A/BUG-10): whether the ask was
@@ -10170,7 +11138,8 @@ class Handler(BaseHTTPRequestHandler):
             # under its survey instructions.
             engine = "gemini" if use_gemini else "local"
             draft_model = model if use_gemini else routed_model
-            if not use_gemini and route_reason:
+            if not use_gemini and route_reason \
+                    and not seat_local["draft"]:
                 # v13: free the 9B's VRAM before the 14B loads
                 # (v14.1: every other resident chat model goes too).
                 _unload_others(ROUTED_MODEL)
@@ -10281,12 +11250,28 @@ class Handler(BaseHTTPRequestHandler):
                        # read the answer cache), and the full
                        # question for part checking (F13).
                        "local_mode": local_mode,
+                       # v24 (§8): this ask's seat picks.
+                       "draft_seat_model": seat_local["draft"],
+                       "judge_model": seat_local["judge"],
+                       "extract_model": seat_local["extract"],
                        "fresh": fresh,
                        "full_question": question
                        if spec["part"] else None}
                 prepared.append((spec, ctx))
 
+            # v24 (§6.4): one progress tracker per unit,
+            # created before any unit runs so the snapshot
+            # shows every part from the first frame.
+            _trk_units = []
+            for _i, (_spec, _ctx) in enumerate(prepared):
+                _tu = _trk_new_unit(_i, _spec["part"])
+                _ctx["trk"] = _tu
+                _trk_units.append(_tu)
+            _actx.tracker = {"units": _trk_units,
+                             "parts": len(_trk_units)}
+
             def _run_prepared(pc):
+                _check_cancel()  # v24 (§5.2): the Stop seam
                 _spec, _ctx = pc
                 # v23.2 (F1): between parts the CLASS deadline
                 # binds too, not only the 600s outer cap — a
@@ -10373,6 +11358,7 @@ class Handler(BaseHTTPRequestHandler):
                     # strictly outranks the original, so the
                     # rescue can complete a partial but never
                     # downgrade one.
+                    _check_cancel()  # v24 (§5.2): the Stop seam
                     _seen_r = {(h["url"], h["excerpt"][:60])
                                for h in spec["hits"]}
                     _rescue_r, _rterms_r = _rescue_search(
@@ -10421,6 +11407,13 @@ class Handler(BaseHTTPRequestHandler):
                                            "started: "
                                            + _skip_r}
                         else:
+                            _tu_r = ctx.get("trk")
+                            if _tu_r is not None:
+                                _tu_r["pass"] += 1
+                                _tu_r["caption"] = (
+                                    f"Pass {_tu_r['pass']} "
+                                    "\u00b7 after rescue")
+                                _trk_set(_tu_r, "rescue", "active")
                             _unit_r = _run_unit(_ctx_r)
                         if _unit_r is not None:
                             _unit_r["rescue"] = {
@@ -10443,6 +11436,7 @@ class Handler(BaseHTTPRequestHandler):
                                 unit["rescue"] = \
                                     _unit_r["rescue"]
                     if unit["badge"] == "idk":
+                        _check_cancel()  # v24 (§5.2): Stop seam
                         web_b = _branch_attempt(failed_claims)
                     else:
                         web_b = []
@@ -10474,6 +11468,13 @@ class Handler(BaseHTTPRequestHandler):
                     elif web_b:
                         ctx2 = dict(ctx)
                         ctx2["hits"] = list(spec["hits"]) + web_b
+                        _tu_b = ctx.get("trk")
+                        if _tu_b is not None:
+                            _tu_b["pass"] += 1
+                            _tu_b["caption"] = (
+                                f"Pass {_tu_b['pass']} "
+                                "\u00b7 web branch")
+                            _trk_set(_tu_b, "web_branch", "active")
                         unit2 = _run_unit(ctx2)
                         web_rec = {
                             "branched": True,
@@ -10486,6 +11487,49 @@ class Handler(BaseHTTPRequestHandler):
                         else:
                             unit["web"] = web_rec
                 _apply_web_badge(unit, unit_hits)
+                # v24 (§6.3): this unit's rescue / web-branch
+                # decision points are now known — finalize its
+                # tracker from the unit record itself.
+                _tu = ctx.get("trk")
+                if _tu is not None:
+                    _tu["status"] = "done"
+                    if _tu["t0"] is not None:
+                        _tu["elapsed"] = round(
+                            time.monotonic() - _tu["t0"], 1)
+                    if unit.get("gate") == "time" \
+                            and _tu["t0"] is None:
+                        _tu["caption"] = ("Skipped \u00b7 time "
+                                          "budget spent")
+                    _rs = unit.get("rescue")
+                    if isinstance(_rs, dict) and _rs.get("skipped"):
+                        _trk_set(_tu, "rescue", "skipped",
+                                 detail="time budget spent"
+                                 if "time budget" in _rs["skipped"]
+                                 else "draft limit reached")
+                    elif _rs:
+                        _trk_set(_tu, "rescue", "done")
+                    elif unit["badge"] in (
+                            "checked", "verified_web",
+                            "checked_det", "verified_web_reduced"):
+                        _trk_set(_tu, "rescue", "not-needed")
+                    elif unit["badge"] in ("idk", "partial") \
+                            and unit.get("gate") != "time" \
+                            and (unit.get("judging") or {}).get(
+                                "mode") != "none":
+                        _trk_set(_tu, "rescue", "done",
+                                 detail="no new documents")
+                    _wb = unit.get("web")
+                    if isinstance(_wb, dict) and _wb.get("skipped"):
+                        _trk_set(_tu, "web_branch", "skipped",
+                                 detail="time budget spent"
+                                 if "time budget" in _wb["skipped"]
+                                 else "draft limit reached")
+                    elif _wb and _wb.get("branched"):
+                        _trk_set(_tu, "web_branch", "done")
+                    elif unit["badge"] != "idk":
+                        _trk_set(_tu, "web_branch", "not-needed")
+                    elif not ask_web.get("attempted"):
+                        _trk_set(_tu, "web_branch", "not-needed")
                 unit["part"] = spec["part"]
                 unit["unit_q"] = spec["unit_q"]
                 unit["hits"] = unit_hits
@@ -10672,6 +11716,30 @@ class Handler(BaseHTTPRequestHandler):
                      # or a skipped rescue still cut THIS ask.
                      cap_hit=any(u.get("cap_hit") for u in units)
                      or _ask_ctx().budget_cut)
+        except _AskCancelled:
+            # v24 (§5.2): the Stop button landed at a seam.
+            # The record says cancelled; the response carries
+            # the wall time so the page freezes its timer at
+            # "Stopped after m:ss". No answer ships.
+            if _inf_entry is not None:
+                _inflight_release(_inf_key)
+                _inf_entry = None
+            _wall = round(time.monotonic() - t_start, 3)
+            try:
+                _record_ask({
+                    "kind": "ask", "ask_id": _ask_ctx().ask_id,
+                    "ts": time.time(), "wall_s": _wall,
+                    "question": question, "corpus": corpus_name,
+                    "local": bool(local_mode or any_seat_local),
+                    "seat_models": dict(seat_models),
+                    "badge": "cancelled", "status": "cancelled",
+                    "cost_usd": _or_ask_cost(),
+                    "phase_ms": _phase_ms_snapshot()})
+            except Exception:
+                pass
+            self._json({"cancelled": True, "wall_s": _wall,
+                        "answer": "", "badge": None,
+                        "question": question})
         except Exception as e:
             if _inf_entry is not None:
                 _inflight_release(_inf_key)

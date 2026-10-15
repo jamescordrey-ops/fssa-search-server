@@ -1,6 +1,11 @@
 ![An AI question-and-answer server: a question flows through retrieval, drafting, and an independent judge panel before it is answered](assets/hero.webp)
 
-# Verified-Answer Q&A Server
+# FSSA SARA
+
+Search And Retrieval Assistant. A verified-answer Q&A server
+for Indiana Medicaid / FSSA questions.
+
+![FSSA SARA icon](assets/icon.png)
 
 A self-hosted question-and-answer server over a curated corpus of public
 Medicaid / FSSA policy documents. It answers benefits and eligibility
