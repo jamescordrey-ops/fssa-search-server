@@ -1,0 +1,19 @@
+{
+ "generation": "g0004",
+ "purpose": "v23.1 WS-E: g0003 + targeted registry-carrier enrichment delta (17 sections, 250 questions) lifting the generated registry-vocab audit from 10/14 + 3/5 to 14/14 + 5/5 on the live base. No chunk text changed. Wave 2 (same day): targeted mmmna-carrier enrichment (6 sections) fixing the live-base audit's sole miss (mmmna woke the transfer-penalty divisor pair); the 7th carrier (a Minnesota waiver-listing page) has no MMMNA content and was left untouched.",
+ "base_generation": "g0003",
+ "delta": "g0004_delta/enrichment_delta.jsonl (17 rows)",
+ "chunks": 77354,
+ "sections": 6095,
+ "synthq_rows": 56025,
+ "synthq_reused": 55901,
+ "synthq_embedded_fresh": 105,
+ "canary_min_cosine": 1.0,
+ "embedding_digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+ "vectors_state": "ready",
+ "built": "2026-10-15T16:45:27.533306+00:00",
+ "delta2": "g0004_delta/enrichment_delta_mmmna.jsonl (6 rows)",
+ "synthq_wave2_reused": 55995,
+ "synthq_wave2_embedded_fresh": 30,
+ "wave2_applied": "2026-10-15T17:26:12.658837+00:00"
+}

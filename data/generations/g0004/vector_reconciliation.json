@@ -1,0 +1,13 @@
+{
+ "generation": "g0004",
+ "vectors_state": "ready",
+ "measured": {
+  "chunk_vectors_carried_from_g0003": 77354,
+  "synthq_reused": 55901,
+  "synthq_embedded": 105,
+  "canary_min_cosine": 1.0,
+  "synthq_wave2_reused": 55995,
+  "synthq_wave2_embedded": 30,
+  "canary_min_cosine_wave2": 1.0
+ }
+}

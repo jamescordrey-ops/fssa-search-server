@@ -1666,3 +1666,167 @@ budget machinery now cuts at the cap and records
 `budget_cut` instead of running to 623s; the badge
 reading **Checked** (or "Checked · deterministic
 checks only" if both judge legs are down).
+
+## G0004 flip attempt (2026-10-15 ~12:42-12:52 EDT) — STOPPED AT GATE, CURRENT STAYS g0003
+
+Authorized by James 2026-10-15 ~12:41 EDT ("delete the old
+generations ... delete and do the data flip").
+
+1. **Git safety gate (passed).** In the PC clone
+   `C:\Users\james\fssa-srv-push`, `git ls-files
+   data/generations` shows all 8 provenance files tracked:
+   g0000 + g0001 (manifest + vector_reconciliation each)
+   and g0002 (g0002_delta_manifest, manifest,
+   remains_binary, vector_reconciliation). 30c8b50 is
+   contained in origin/main. The full binary stores were
+   never in git; they are rebuildable artifacts.
+2. **Deletion (done).** PC stores enumerated:
+   g0000 672.3 MB, g0001 703.1 MB, g0002 726.3 MB, g0003
+   729.9 MB; CURRENT read g0003 before and after. Only
+   the three named stores were deleted (~2.06 GB freed;
+   C: free 0.53 GB -> 2.59 GB). g0003, the live server
+   file, and the rollback .bak untouched.
+3. **Build (done, gates inside the build passed).**
+   `g0004_build/build_g0004.py` (the g0003 reuse +
+   embed-fresh pattern, not the stock finalize): g0003
+   copied to g0004; every delta figure asserted at its
+   stored offsets against the LIVE section text (all 17
+   sections pass); enrich rows + section_fts refreshed;
+   meta generation set to g0004; chunk vectors carried
+   byte-for-byte (77,354 == chunk count); synthq rebuilt
+   at 56,006 rows == post-delta question total (55,901
+   reused, 105 embedded fresh via local nomic, $0 spend);
+   row norms unit; **canary min cosine 1.000000** (5/5
+   unchanged questions). Manifest + reconciliation
+   written into the g0004 dir (embedding digest
+   0a109f422b47..., unchanged).
+4. **Live-base re-audit (THE GATE — FAILED).**
+   `tools/registry_vocab.py --gen generations/g0004`
+   run on the PC against the built store:
+   **figures 13/14, mechanisms 5/5, exit 1.** Sole
+   failure: `mmmna` — woke=transfer_penalty_divisor_
+   current [divisor pair 10.496; waiver_income_cap
+   9.836; mmmna below the top 3]. Same-day baseline on
+   live g0003 (same command): **figures 6/14, mechanisms
+   3/5**, mmmna already failing there (mmmna=9.79,
+   third). mmmna's carrier set is byte-identical pre/
+   post delta (7 registry_sources sections, 78 carrier
+   questions): WS-E never targeted it because it passed
+   on the VM's g0000 base — the exact per-store carrier
+   divergence WSE_RECORD §5 warned the live-base gate
+   exists to catch. Net: the delta improves the live
+   base 6/14 -> 13/14 and 3/5 -> 5/5 and regresses no
+   entry, but 13/14 is not the 14/14 bar.
+   Audit outputs preserved: `g0004_delta/
+   registry_vocab_g0004_livebase.json` and
+   `registry_vocab_g0003_livebase.json` (VM tree).
+5. **Outcome: NO FLIP.** CURRENT still reads g0003
+   (verified after the attempt); no restart was issued;
+   /health ok at ~12:52 EDT (roster/budgets unchanged;
+   retrieval block shows the known lazy-arm "down"
+   until first ask-path dispatch, as recorded at the
+   v23.1 deploy). No live /ask was run. The built g0004
+   store remains on the PC (~730 MB; C: free 1.87 GB
+   after cleanup of the 37.7 MB audit scratch) — it is
+   one targeted enrichment wave away from the gate: a
+   WS-E-style pass over mmmna's live-base carriers
+   (the 7 registry_sources sections above), re-audited
+   on the live base. That wave is NOT authorized by
+   this flip order and was not attempted. No follow-up
+   commit was staged in the PC clone for g0004 (the
+   flip did not land); the v23.1 commit 829513a + tag
+   still sit there awaiting James's `gh auth login`.
+
+## G0004 mmmna wave (2026-10-15 ~12:57-13:40 EDT) — STORE READY, FLIP PAUSED BY SCOPE CHANGE
+
+Authorized by James 2026-10-15 ~12:49 EDT ("Do it and then
+flip"), then scoped at ~13:13 EDT: **prep everything, pause
+before the flip** (James is demoing the live server to his
+case manager; no restart may cut an ask). Executed to that
+scope: the wave is applied to the PC's g0004 store and every
+gate is green; **CURRENT still reads g0003, no restart was
+issued, no post-flip probes were run.** The flip itself
+(pointer + restart + probes + /health verification) awaits
+James's explicit go.
+
+1. **Diagnosis (measured, from the preserved live-base
+   audit).** mmmna's staged vocabulary contained ZERO
+   attestations of the audit question's discriminating
+   units — 'husband', 'check', 'live', 'his' and every
+   bigram built from them ('monthly check', 'his monthly',
+   'husband nursing', 'check keep', 'keep live', 'home
+   his'). It attested only the generic units (home,
+   monthly, nursing, keep) where the divisor pair matched
+   or beat it (divisor 10.496, waiver_income_cap 9.836,
+   mmmna 9.79). Baseline reproduced exactly on a VM copy
+   of the PC store (MD5-verified transfer) before any
+   edit: 13/14 + 5/5, mmmna the sole failure.
+2. **The wave.** WS-E machinery (fleet merge +
+   deterministic + enrich_qa, 0 failures), staged on the
+   VM against the live-base store copy. 27 new questions
+   written in asker vocabulary, every one grounded in its
+   section's text (spousal allocation mechanics in
+   IHCPPM 3010.20.10/3455.15.10.10; the CMS page's 2026
+   standards $2,705.00 / $4,066.50 / $811.50; the ILTCP
+   protection law's $2,705 minimum and $4,067 appeal
+   ceiling; the DRA income-first rule; the POMS alimony
+   page's spousal-impoverishment support type). Six of
+   the seven carriers enriched; the seventh (Minnesota
+   waiver-listing page, 824 chars, no MMMNA content) was
+   left untouched on the WS-E d5818e0a precedent — no
+   grounded question exists to write for it. Placement
+   was deliberate: the full husband/monthly-check register
+   sits in mmmna's first carrier (3x weight; csra holds
+   it at position 4, waiver_income_cap at 9) and in the
+   two mmmna-only carriers, while the sections csra and
+   csra_half_clamp hold at 3x got the income register
+   instead — drafting took three passes against the audit
+   simulator to also keep the wave from waking
+   csra_half_clamp on snap_lump_sum's question (its 'check'
+   score is the wave's one tight margin, below).
+3. **Apply (PC, `g0004_build/apply_g0004_mmmna.py`, the
+   build_g0004 reuse + embed-fresh pattern).** Pre-wave
+   backup of the store's db + synthq files in
+   `g0004_build/pre_mmmna_backup/`. All delta figures
+   verified at offsets against live text; 6 enrich rows +
+   section_fts refreshed; chunk vectors untouched
+   (77,354 == chunk count asserted); synthq rebuilt at
+   **56,025 rows** (55,995 reused, 30 embedded fresh via
+   local nomic, $0 spend), norms unit; **canary min
+   cosine 1.000000** (5/5 unchanged questions at 1.0);
+   manifest + reconciliation extended in place
+   (embedding digest unchanged, 0a109f422b47...). One
+   recoverable snag: the first apply run died at the
+   synthq save (numpy appended .npy to a .new suffix);
+   fixed and completed via a --resume path that read
+   the old synthq mapping from the pre-wave backup.
+4. **Gates on the updated PC store (all green).**
+   `registry_vocab.py --gen generations/g0004` run on
+   the PC: **figures 14/14, mechanisms 5/5, exit 0.**
+   mmmna wakes itself at **52.331** (next: csra 44.406,
+   waiver_income_cap 32.185; the divisor pair is back at
+   ~9.6). The one tight margin in the set: snap_lump_sum
+   7.367 vs csra_half_clamp 6.707 — the wave's 'check'
+   phrasing in shared carriers is what narrowed it;
+   recorded here so a future audit change watches that
+   pair first. Final audit output preserved at
+   `g0004_delta/registry_vocab_g0004_mmmna_livebase.json`
+   (VM tree) and `g0004_build/audit_out_mmmna/` (PC).
+   Delta at `g0004_delta/enrichment_delta_mmmna.jsonl`
+   (6 rows, +19 questions net: 56,006 -> 56,025).
+5. **Live server state (verified after the prep).**
+   CURRENT = g0003; /health ok, engine v2, generation
+   g0003, vectors ready, embedding canary ok, drift
+   false, roster unchanged. The server was never
+   restarted and no /ask was run. C: free 1.52 GB (the
+   pre-wave backup accounts for ~0.35 GB of the spend;
+   it can be deleted once g0004 has served cleanly).
+6. **Remaining for the flip (on James's go):** write
+   generations/CURRENT = g0004, restart via
+   restart_fssa.ps1, verify /health (generation g0004,
+   canary ok, drift false) and run the 29-probe deployed-
+   file set against g0004. A follow-up commit (g0004
+   manifest + reconciliation, the wave delta + final
+   audit, this STATUS) is staged in the PC clone on top
+   of 829513a; the push still waits on James's
+   `gh auth login`.
