@@ -1,0 +1,22 @@
+{
+ "vectors_state": "ready",
+ "why": "embeddings.npz/embeddings.json and the nomic embedder (Ollama) live on the PC; this build ran on the VM under the stage's no-PC-access boundary.",
+ "recorded_live_state": {
+  "source": "v21 deploy /health record, 2026-10-14",
+  "embeddings_rows": 73014,
+  "manifest_rows_expected": 77354,
+  "delta_rows": -4340,
+  "missing_urls": 134,
+  "mismatched_urls": 393,
+  "orphan_urls": 1
+ },
+ "finalize": "tools/finalize_vectors.py, run where the embeddings file and Ollama live: joins vector rows to chunks by sha1(text); vector-file chunk texts are canonical for mismatched URLs (they replace the replica chunks for those docs, marked origin='vector_file'); chunks of missing URLs are embedded with nomic-embed-text and appended; orphan rows are dropped; synthetic-question vectors are embedded into synthq_vectors; the result must satisfy exact consistency (every chunk has exactly one vector row) before meta.vectors_state flips to 'ready'.",
+ "measured": {
+  "matched": 5193,
+  "vector_canonical": 0,
+  "embedded": 48,
+  "orphan_rows_dropped": 0,
+  "synthq_reused": 55277,
+  "synthq_embedded": 195
+ }
+}

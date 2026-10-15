@@ -4826,7 +4826,17 @@ MECHANISMS = [
                          "above the medicaid income limit",
                          "exceeds the medicaid income limit",
                          "is over the income limit",
-                         "income is too high", "too much income")},
+                         "income is too high", "too much income",
+                         # v22.2: plain asker phrasing (audit
+                         # MECHANISMS_TRIGGER_AUDIT.md)
+                         "more than medicaid allows",
+                         "make too much", "makes too much",
+                         "making too much", "earn too much",
+                         "earns too much", "too much to qualify",
+                         "puts him over", "puts her over",
+                         "puts me over", "because of his income",
+                         "because of her income",
+                         "because of my income")},
             {"tokens": {"medicaid", "waiver"},
              "phrases": ("nursing home", "long-term care",
                          "long term care")},
@@ -4901,7 +4911,15 @@ MECHANISMS = [
                          "retroactive benefit", "retroactive ssi",
                          "retroactive social security",
                          "retroactive payment", "past-due",
-                         "past due")},
+                         "past due",
+                         # v22.2: plain asker phrasing, mirroring
+                         # the v22.1 figures-entry widening so the
+                         # two layers stay consistent
+                         "owed me money",
+                         "owed me money from earlier months",
+                         "money from earlier months",
+                         "social security owed me",
+                         "paid it all at once")},
         ],
         "required": [
             {"label": "states the nine-month exclusion for retroactive "
@@ -4944,7 +4962,14 @@ MECHANISMS = [
              "phrases": ("food stamps", "food assistance")},
             {"tokens": {"lump", "resource", "resources", "limit"},
              "phrases": ("lump sum", "lump-sum", "back payment",
-                         "back-payment", "resource limit")},
+                         "back-payment", "resource limit",
+                         # v22.2: plain asker phrasing
+                         "one big check", "big check",
+                         "one big payment", "big payment",
+                         "single payment", "one-time payment",
+                         "one time payment", "money all at once",
+                         "paid in one payment", "lump-sum payment",
+                         "lump payment")},
         ],
         "required": [
             {"label": "says the lump sum is not counted as SNAP income",
@@ -4976,8 +5001,17 @@ MECHANISMS = [
             {"tokens": set(),
              "phrases": ("community spouse", "csra",
                          "spousal resource",
-                         "community spouse resource")},
-            {"tokens": {"savings", "assets", "resources", "countable"},
+                         "community spouse resource",
+                         # v22.2: plain asker phrasing, mirroring
+                         # the v22.1 figures csra widening
+                         "my wife", "my husband", "my spouse",
+                         "wife can keep", "husband can keep",
+                         "spouse can keep", "spouse resource",
+                         "spouse resources")},
+            {"tokens": {"savings", "assets", "resources", "countable",
+                        # v22.2: singular forms (the matcher is
+                        # exact-token; v22.1 stemming fix parity)
+                        "resource", "asset", "saving"},
              "phrases": ()},
         ],
         "required": [
@@ -5006,7 +5040,15 @@ MECHANISMS = [
         "groups": [
             {"tokens": {"caregiver", "caregiving"},
              "phrases": ("caregiver pay", "paid caregiver",
-                         "difficulty of care")},
+                         "difficulty of care",
+                         # v22.2: plain asker phrasing, mirroring
+                         # the v22.1 figures-entry widening
+                         "gets paid to take care",
+                         "paid to take care",
+                         "take care of me at home",
+                         "care for me at home", "paid to care for",
+                         "wife gets paid", "husband gets paid",
+                         "spouse gets paid")},
             {"tokens": {"hip", "magi"},
              "phrases": ("healthy indiana", "household income")},
         ],

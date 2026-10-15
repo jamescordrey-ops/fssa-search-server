@@ -5,6 +5,44 @@ each version are in `docs/`. Corpus updates are manual: new documents
 are collected, verified against their sources, and merged alongside a
 version bump rather than synced automatically.
 
+## v22.2 — 2026-10-15
+
+The mechanisms-trigger and corpus-repair release. Deployed
+with generation g0002; see docs/STATUS-v22.2.md for the full
+record.
+
+- Mechanisms registry triggers widened in asker vocabulary:
+  all 5 entries audited with plain-language questions;
+  before, 0 of 5 engaged on plain phrasing, after, 5 of 5,
+  each alone. Added phrasing/tokens only — no figures,
+  dates, required elements, prompts, or structure changed.
+  Full audit: docs/MECHANISMS_TRIGGER_AUDIT-v22.2.md.
+- Corpus repair: 52 federal documents held raw file or
+  response bytes as their stored text (Medicare publication
+  EPUB/PDF files stored as truncated raw prefixes; SSA and
+  choosework pages stored as raw response bodies). 48 were
+  recovered from the original crawl snapshots and
+  re-extracted to readable text (110,116 chars of garbage
+  -> 2,062,588 chars of text); 4 remain binary, with
+  reasons recorded. Generation g0002: chunks 73,454 ->
+  77,354, section ids unchanged, and every changed chunk
+  confined to the repaired documents. Record:
+  docs/G0002_DELTA-v22.2.md.
+- Enrichment for g0002: the completed fleet enrichment
+  carried over by section id for the 6,047 unchanged
+  sections; the 48 repaired sections carry the
+  deterministic layer (figures, aliases, scope tags,
+  template questions) until a later fleet pass.
+- Vector finalize fed the deployed g0001 store (same
+  embedder build, hash-verified reuse): 5,193 docs matched,
+  the 48 repaired docs embedded fresh, 55,277 of 55,472
+  synthetic-question vectors reused by question-text hash.
+  The run's exactness assert caught a duplicate-text
+  twin-row drop in the matched path; the finalize variant
+  (tools/finalize_g0002.py) assigns the vector to every
+  chunk row carrying the hash. Boot canary cosine 1.000000
+  on all picks; vector channels live on g0002.
+
 ## v22.1 — 2026-10-15
 
 The registry-trigger release, plus the completed enrichment

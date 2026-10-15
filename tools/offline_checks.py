@@ -234,6 +234,61 @@ def main():
     check("v22.1 audit: CSRA stemming probe (singular "
           "'resource' token)", got == ["csra"], f"{got}")
 
+    # ---------------- v22.2: mechanisms trigger audit -------
+    # One plain-language question per MECHANISMS entry (the
+    # v14 twins of the figures registry; same matcher, same
+    # disease). EVERY entry must hit, and hit ALONE. In the
+    # v22.1 base, ALL FIVE questions matched NOTHING. Full
+    # record: MECHANISMS_TRIGGER_AUDIT.md.
+    mech_audit_cases = {
+        "qit_over_cap":
+            "My dad's pension and Social Security add up to "
+            "more than Medicaid allows each month, so he "
+            "doesn't qualify. Is there anything that can be "
+            "done so he can still get help paying for his care?",
+        "backpay_nine_months":
+            "Social Security owed me money from earlier months "
+            "and just paid it all at once. How long before that "
+            "money counts against me?",
+        "snap_lump_sum":
+            "I just got one big check for months I was owed. "
+            "Will that count as income for my food stamps?",
+        "csra_half_clamp":
+            "If I go into a nursing home how much of our "
+            "savings can my wife keep?",
+        "difficulty_of_care_exclusion":
+            "My wife gets paid to take care of me at home. "
+            "Does that money count if she applies for Healthy "
+            "Indiana?",
+    }
+    for eid, q in mech_audit_cases.items():
+        got = [m["id"] for m in mod._mechanism_matches(q)]
+        check(f"v22.2 mech audit: {eid} hits alone on its "
+              f"plain question", got == [eid], f"{got}")
+    got = [m["id"] for m in mod._mechanism_matches(
+        "What is the community spouse resource allowance "
+        "for 2026?")]
+    check("v22.2 mech audit: CSRA stemming probe (singular "
+          "'resource' token)", got == ["csra_half_clamp"],
+          f"{got}")
+    got = [m["id"] for m in mod._mechanism_matches(
+        "My father gets $3,400 a month from a pension and "
+        "Social Security, which puts him over the Medicaid "
+        "income limit. He lives in Indiana. Is there anything "
+        "that can be done so he can qualify?")]
+    check("v22.2 mech audit: Miller scenario still hits "
+          "qit_over_cap alone", got == ["qit_over_cap"],
+          f"{got}")
+    got = [m["id"] for m in mod._mechanism_matches(
+        "I'm on Indiana Medicaid with an HCBS waiver, my wife "
+        "is my paid caregiver through Structured Family "
+        "Caregiving, her father passed and she'll inherit "
+        "about $60,000 once the estate settles; does it affect "
+        "my eligibility and what should we do before the "
+        "money arrives?")]
+    check("v22.2 mech audit: inheritance scenario still "
+          "matches no mechanism", got == [], f"{got}")
+
     # ---------------- WS3a: gap log ------------------------
     gap_path = os.path.join(tmp, "gap_test.jsonl")
     mod.GAP_LOG_PATH = gap_path

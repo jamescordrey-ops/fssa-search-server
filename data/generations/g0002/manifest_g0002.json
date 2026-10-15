@@ -1,0 +1,38 @@
+{
+ "generation": "g0002",
+ "staging_generation": "g0000 (build_generation internal name; DB is renamed corpus_g0002.db and meta generation label set to g0002 on PC placement, as with g0001)",
+ "purpose": "v22.2 deploy generation: g0001 + the 48 repaired binary-text documents from v22.2/g0002_delta swapped into the federal corpus by URL. No other corpus change.",
+ "built_against_server_file": "v22.2 fssa_search_server.py, 12,229 lines, MD5 878fcf448eb8a0d32305e01b809832e5",
+ "docs": 5241,
+ "chunks": 77354,
+ "sections": 6095,
+ "delta_vs_g0001": {
+  "docs": "5241 -> 5241 (URL set identical)",
+  "chunks": "73454 -> 77354 (4151 added, 251 removed; every changed chunk ID belongs to one of the 48 repaired docs, verified by set comparison)",
+  "sections": "6095 -> 6095 (section ID set identical; 48 sections carry new text, all in repaired docs)",
+  "repaired_docs_chunks": "251 -> 4151"
+ },
+ "enrichment": {
+  "rows": 6095,
+  "fleet_coverage": "6047/6095 sections carry the completed g0001 fleet enrichment verbatim (transplant asserted on byte-identical section text)",
+  "repaired_sections": "48 sections (the repaired docs) carry the deterministic layer only (template+code: figures/aliases/scope tags/template questions computed from the repaired text); fleet-written questions for them are a later pass, NOT this deploy",
+  "questions_total": 55472,
+  "enrichment_jsonl": "genbuild2 export, 6095 rows, copied into this staging dir"
+ },
+ "registry_lint_entries": 14,
+ "registry_lint_status_counts": {
+  "no-figures": 2,
+  "ok": 11,
+  "figures-missing": 1
+ },
+ "vectors_state": "ready",
+ "vector_reconciliation_measured": {
+  "matched": 5193,
+  "vector_canonical": 0,
+  "embedded": 48,
+  "orphan_rows_dropped": 0,
+  "synthq_reused": 55277,
+  "synthq_embedded": 195
+ },
+ "embedding_digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f"
+}
