@@ -1184,6 +1184,11 @@ _EQ_RE = re.compile(_MONEY + r"\s*([+\-−×x*/÷])\s*" + _MONEY +
                     r"\s*=\s*" + _MONEY)
 _PAREN_EQ_RE = re.compile(_MONEY + r"\s*\(\s*" + _MONEY +
                           r"\s*([+\-−×x*/÷])\s*" + _MONEY + r"\s*\)")
+# v29: a stated equation with 3+ terms ("$2,600 - $1,805 -
+# $52 = $743"); folded left-to-right by _arithmetic_errors
+# before the two-term scans run (see there).
+_CHAIN_RE = re.compile(_MONEY + r"(?:\s*[+\-−×x*/÷]\s*" + _MONEY +
+                       r"){2,}\s*=\s*" + _MONEY)
 
 
 def _fmt_money(v):
@@ -1240,7 +1245,46 @@ def _arithmetic_errors(answer):
                      f"{_fmt_money(want)} (the answer above says "
                      f"{_fmt_money(c)})")
 
+    # v29: multi-term chains fold left-to-right FIRST. The
+    # v26.2 B04-Quick draft stated its liability chain as one
+    # three-term equation "($2,600 - $1,805 - $52 = $743)" —
+    # correct arithmetic — but the two-term scan below read
+    # the inner window "$1,805 - $52 = $743" and failed the
+    # draft. A chain (3+ terms) is now reconciled as a whole,
+    # and two-term matches inside a chain's span are skipped.
+    chain_spans = []
+    for m in _CHAIN_RE.finditer(answer or ""):
+        raw = m.group(0)
+        chain_spans.append((m.start(), m.end()))
+        try:
+            nums = [float(x.replace(",", ""))
+                    for x in re.findall(_MONEY, raw)]
+            ops = re.findall(r"[+\-−×x*/÷]", raw)
+        except ValueError:
+            continue
+        if len(nums) < 4 or len(ops) != len(nums) - 2:
+            continue
+        acc = nums[0]
+        ok = True
+        for op, n in zip(ops, nums[1:-1]):
+            acc = _eval_money(acc, op, n)
+            if acc is None:
+                ok = False
+                break
+        if not ok or abs(acc - nums[-1]) <= 0.51 or raw in seen:
+            continue
+        seen.add(raw)
+        lhs = raw.rsplit("=", 1)[0].strip().rstrip(")").strip()
+        notes.append(f"- {lhs} = {_fmt_money(acc)} (the answer "
+                     f"above says {_fmt_money(nums[-1])})")
+
+    def _in_chain(m):
+        return any(s <= m.start() and m.end() <= e
+                   for s, e in chain_spans)
+
     for m in _EQ_RE.finditer(answer or ""):
+        if _in_chain(m):
+            continue
         try:
             consider(float(m.group(1).replace(",", "")), m.group(2),
                      float(m.group(3).replace(",", "")),
@@ -1248,6 +1292,8 @@ def _arithmetic_errors(answer):
         except ValueError:
             continue
     for m in _PAREN_EQ_RE.finditer(answer or ""):
+        if _in_chain(m):
+            continue
         try:
             # v26 (N1; Claude's v25.2 handoff via plan §7): a
             # parenthetical holding a bare date or fraction
@@ -3733,23 +3779,42 @@ def _check_quantities(answer, question="", mechanisms=None):
              (r"\bper week\b|\bweekly\b|\ba week\b", "per week",
               r"\bper year\b|\bannual\w*\b|\ba year\b", "per year",
               52.0)]
+    # v29: a conversion reconciles only WITHIN one sentence
+    # (or one line / table row). The v28 CSHCS draft stated
+    # each table row as two sentences (the annual figure,
+    # then the monthly figure); the old cross-sentence
+    # pairing took one row's ANNUAL figure as the "per
+    # month" value (_money_near reaches back across the
+    # boundary) and the next sentence's monthly figure as
+    # the year value, failing a correct draft four times.
+    # A draft that truly mis-states a conversion states
+    # both units together in one sentence; that is still
+    # caught, with the same factors and tolerance.
+    segments = []
+    _seg_start = 0
+    for _sm in re.finditer(r"\n|(?<=[.!?])\s+", low):
+        segments.append((_seg_start, _sm.start()))
+        _seg_start = _sm.end()
+    segments.append((_seg_start, len(low)))
     for rx_a, name_a, rx_b, name_b, factor in convs:
-        for ma in re.finditer(rx_a, low):
-            va = _money_near(low, ma.start())
-            mb = re.search(rx_b, low[ma.end():ma.end() + 120])
-            if not mb:
-                continue
-            vb = _money_near(low, ma.end() + mb.start())
-            if not va or not vb:
-                continue
-            expect = va * factor
-            if abs(vb - expect) > max(15.0, 0.02 * expect):
-                fails.append({
-                    "mechanism": "quantity-conversion",
-                    "label": (f"period conversion does not "
-                              f"reconcile: ${va:,.2f} {name_a} is "
-                              f"${expect:,.2f} {name_b}, not "
-                              f"${vb:,.2f}")})
+        for s0, s1 in segments:
+            seg = low[s0:s1]
+            for ma in re.finditer(rx_a, seg):
+                va = _money_near(seg, ma.start())
+                mb = re.search(rx_b, seg[ma.end():])
+                if not mb:
+                    continue
+                vb = _money_near(seg, ma.end() + mb.start())
+                if not va or not vb:
+                    continue
+                expect = va * factor
+                if abs(vb - expect) > max(15.0, 0.02 * expect):
+                    fails.append({
+                        "mechanism": "quantity-conversion",
+                        "label": (f"period conversion does not "
+                                  f"reconcile: ${va:,.2f} {name_a} is "
+                                  f"${expect:,.2f} {name_b}, not "
+                                  f"${vb:,.2f}")})
     periods = [m for m in mech if m.get("period")]
     if periods:
         rm = re.search(_MONTH_RX, qlow)
@@ -4029,7 +4094,8 @@ VERIFIED_FIGURES = [
             "a qualified disability expense; Indiana's INvestABLE "
             "plan is exempt for Indiana Medicaid (DFR Policy Manual "
             "section 2615.10.35) and contributions earn a 20% state "
-            "tax credit up to $500."),
+            "tax credit up to $1,000 ($500 if married filing "
+            "separately)."),
         "source": ("IRS ABLE guidance (age 46, 2026) and DFR Policy "
                    "Manual section 2615.10.35 (INvestABLE)"),
         # v22 registry fix: the contribution-limit figures
@@ -4038,8 +4104,12 @@ VERIFIED_FIGURES = [
         # this entry's ANDed onset-vocabulary group kept the
         # registry from ever engaging on a pure contribution
         # question (the 2026-10-14 live v21 failure). The
-        # $100,000 SSI disregard and the $500 tax credit stay.
-        "figures": (100000.0, 500.0),
+        # $100,000 SSI disregard and the tax credit stay.
+        # v29: the credit cap corrected to the verified
+        # general cap $1,000 (20% of contributions; $500 is
+        # only the married-filing-separately cap, per
+        # indiana_able_tax_credit / HB 1303 fiscal note).
+        "figures": (100000.0, 1000.0, 500.0),
         # v18 (F16): the discrete stale-value watch list for
         # the generalized conflict scan below.
         "conflict_numbers": (
