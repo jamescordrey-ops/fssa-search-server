@@ -451,6 +451,17 @@ neither cache nor record (F15); dead code removed (F16);
 request validation returns 400 before the async branch
 (N2); the arithmetic checker no longer reads bare date
 or fraction parentheticals as equations (N1).
+
+v26.1 (2026-10-15): hotfix for a v26 regression found on
+the first live test. F14's final cancel check read
+`_ask_ctx().cancel` on the no-job branch of response
+assembly; _AskContext holds `cancel_rec`, not `cancel`,
+so every synchronous /ask raised AttributeError at
+assembly (after the full pipeline had run) and returned
+500. The async job route (the page) was unaffected. The
+branch now calls _cancel_requested(), the same flag read
+the rest of the cancel plumbing uses. Nothing else
+changed; see v26.1/BUILD.md.
 """
 
 import datetime
@@ -11891,7 +11902,12 @@ class Handler(BaseHTTPRequestHandler):
                 if _job_now is not None:
                     _cancelled_now = bool(_job_now.get("cancel"))
                 else:
-                    _cancelled_now = bool(_ask_ctx().cancel)
+                    # v26.1: the context holds cancel_rec,
+                    # not a cancel attribute; mirror
+                    # _cancel_requested()'s flag read.
+                    # Sync asks have no job — the context
+                    # is the only place their flag can live.
+                    _cancelled_now = _cancel_requested()
                 if _cancelled_now:
                     raise _AskCancelled()
                 t_end = time.monotonic()
