@@ -1,7 +1,7 @@
 {
  "schema": 1,
  "generated": "2026-10-16",
- "notes": "Front door rows: the v27.1/v27.2 WIRED set plus the v29 wiring of every DRAFTED row that re-traced clean in the v29 data review (v29/FRONT_DOOR_REVIEW.md). Every row traces to FRONT_DOOR_DATA.md in the v27.1 tree plus its v29 trace; the 15 UNVERIFIED topics are absent on purpose. fs_annual_cap is flagged general: the router's specificity guard keeps it from claiming a question that names a service or topic another row covers. v29.1: paid_relative_cap corrected and the parent-of-own-child territory split into parent_guardian_minor_bar + parent_paid_own_child (v29.1/BUGS.md).",
+ "notes": "Front door rows: the v27.1/v27.2 WIRED set plus the v29 wiring of every DRAFTED row that re-traced clean in the v29 data review (v29/FRONT_DOOR_REVIEW.md). Every row traces to FRONT_DOOR_DATA.md in the v27.1 tree plus its v29 trace; the 15 UNVERIFIED topics are absent on purpose. fs_annual_cap is flagged general: the router's specificity guard keeps it from claiming a question that names a service or topic another row covers. v29.1: paid_relative_cap corrected and the parent-of-own-child territory split into parent_guardian_minor_bar + parent_paid_own_child (v29.1/BUGS.md). v29.2: Battery 2 free-layer defect pass (v29.2/BUGS.md): trigger, exclude, and one conditions change only; every row's facts are byte-identical to v29.1.",
  "rows": [
   {
    "id": "csra",
@@ -598,7 +598,56 @@
     "qualified medicare",
     "medicare savings",
     "community spouse",
-    "csra"
+    "csra",
+    "alabama",
+    "alaska",
+    "arizona",
+    "arkansas",
+    "california",
+    "colorado",
+    "connecticut",
+    "delaware",
+    "florida",
+    "georgia",
+    "hawaii",
+    "idaho",
+    "illinois",
+    "iowa",
+    "kansas",
+    "kentucky",
+    "louisiana",
+    "maine",
+    "maryland",
+    "massachusetts",
+    "michigan",
+    "minnesota",
+    "mississippi",
+    "missouri",
+    "montana",
+    "nebraska",
+    "nevada",
+    "new hampshire",
+    "new jersey",
+    "new mexico",
+    "new york",
+    "north carolina",
+    "north dakota",
+    "ohio",
+    "oklahoma",
+    "oregon",
+    "pennsylvania",
+    "rhode island",
+    "south carolina",
+    "south dakota",
+    "tennessee",
+    "texas",
+    "utah",
+    "vermont",
+    "virginia",
+    "washington",
+    "west virginia",
+    "wisconsin",
+    "wyoming"
    ],
    "golden": [
     {
@@ -661,13 +710,15 @@
       "keep from her check",
       "allowance in the nursing home",
       "nursing home allowance",
-      "monthly allowance",
-      "keep each month",
-      "keep every month",
-      "keep per month"
+      "monthly allowance"
      ]
     ]
    },
+   "exclude": [
+    "allocated",
+    "nursing home get",
+    "nursing home gets"
+   ],
    "golden": [
     {
      "q": "What is the personal needs allowance for someone on a Medicaid waiver?",
@@ -737,7 +788,10 @@
     "work requirement",
     "work requirements",
     "time limit",
-    "time limits"
+    "time limits",
+    "settlement",
+    "lump sum",
+    "lump-sum"
    ],
    "golden": [
     {
@@ -1098,7 +1152,26 @@
     "teenage daughter",
     "teenage child",
     "legal guardian",
-    "guardian"
+    "guardian",
+    "medicare",
+    "on hip",
+    "hip program",
+    "hip plan",
+    "healthy indiana",
+    "work requirement",
+    "work requirements",
+    "work rules",
+    "in a nursing home",
+    "nursing home gets",
+    "nursing home get",
+    "is allocated",
+    "allocated $",
+    "inheritance",
+    "inherited",
+    "windfall",
+    "lump sum",
+    "passed away",
+    "just passed"
    ],
    "triggers": {
     "all": [
@@ -1447,6 +1520,12 @@
      ]
     ]
    },
+   "exclude": [
+    "slmb",
+    "difference between",
+    "versus",
+    " vs "
+   ],
    "golden": [
     {
      "q": "What are the QMB income and asset limits for 2026?",
@@ -1526,7 +1605,12 @@
    "exclude": [
     "exempt",
     "exemption",
-    "excused"
+    "excused",
+    "how much can i earn",
+    "how much can i make",
+    "how much money can i earn",
+    "income limit",
+    "income cap"
    ],
    "golden": [
     {
@@ -1638,10 +1722,12 @@
    },
    "verified_on": "2026-10-16",
    "review_by": "2027-01-15",
+   "exclude": [
+    "inherit"
+   ],
    "triggers": {
     "all": [
      [
-      "able",
       "able account",
       "able accounts",
       "my able",
@@ -1657,9 +1743,6 @@
       "balance",
       "count against",
       "count toward",
-      "count",
-      "counts",
-      "counted",
       "against my ssi",
       "against ssi",
       "affect ssi",
@@ -1844,7 +1927,13 @@
    "exclude": [
     "hip",
     "healthy indiana",
-    "tax"
+    "tax",
+    "inheritance",
+    "inherited",
+    "windfall",
+    "lump sum",
+    "passed away",
+    "just passed"
    ],
    "golden": [
     {
@@ -3262,7 +3351,8 @@
    "title": "Respite",
    "values": {
     "covered": true,
-    "program": "Family Supports and CIH waivers"
+    "program": "Family Supports and CIH waivers",
+    "conditions": "Not available while Structured Family Caregiving is being furnished to the individual. Respite also may not be furnished in a nursing facility, and may not be provided by a spouse, or by a parent, stepparent, or legal guardian of a minor."
    },
    "source": "DDARS HCBS Waivers Provider Manual v12.2, Section 9.27",
    "effective": {
@@ -3311,6 +3401,11 @@
       "Family Supports and CIH"
      ]
     }
+   ],
+   "exclude": [
+    "structured family caregiving",
+    "structured family",
+    "sfc"
    ]
   },
   {
@@ -4592,6 +4687,11 @@
       "Health & Wellness and TBI"
      ]
     }
+   ],
+   "exclude": [
+    "structured family caregiving",
+    "structured family",
+    "sfc"
    ]
   },
   {
@@ -5215,11 +5315,9 @@
       "maximum benefit",
       "max benefit",
       "most",
-      "how much",
       "benefit amount",
       "get per month",
-      "monthly benefit",
-      "receive"
+      "monthly benefit"
      ]
     ]
    },
@@ -5227,7 +5325,15 @@
     "income limit",
     "income limits",
     "resource",
-    "lump"
+    "lump",
+    "savings",
+    "saved",
+    "bank",
+    "asset",
+    "assets",
+    "calculated",
+    "calculation",
+    "formula"
    ],
    "golden": [
     {
@@ -5360,7 +5466,12 @@
     "maximum benefit",
     "max benefit",
     "resource",
-    "lump"
+    "lump",
+    "will we get",
+    "will i get",
+    "how much snap will",
+    "how much will we get",
+    "how much will i get"
    ],
    "golden": [
     {
@@ -5485,7 +5596,17 @@
     "qmb",
     "slmb",
     "medicaid pay",
-    "state pays"
+    "state pays",
+    "2023",
+    "2024",
+    "2025",
+    "2027",
+    "2028",
+    "2029",
+    "2030",
+    "next year",
+    "last year",
+    "coming year"
    ],
    "golden": [
     {
@@ -5584,6 +5705,9 @@
    },
    "verified_on": "2026-10-16",
    "review_by": "2027-01-15",
+   "exclude": [
+    "inherit"
+   ],
    "triggers": {
     "all": [
      [
@@ -5602,7 +5726,6 @@
       "indiana medicaid",
       "count against",
       "count as",
-      "count",
       "balance",
       "exempt",
       "disregard",
@@ -6010,7 +6133,14 @@
     "preschool",
     "school-age",
     "school age",
-    "young child"
+    "young child",
+    "pays for",
+    "more services than",
+    "spending limit",
+    "spending cap",
+    "annual cap",
+    "yearly cap",
+    "medicare"
    ],
    "triggers": {
     "all": [
