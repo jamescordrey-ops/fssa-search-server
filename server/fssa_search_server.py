@@ -462,6 +462,42 @@ assembly (after the full pipeline had run) and returned
 branch now calls _cancel_requested(), the same flag read
 the rest of the cancel plumbing uses. Nothing else
 changed; see v26.1/BUILD.md.
+
+v26.2 (2026-10-16): the battery-driven checker and
+honesty pass (see v26.2/DESIGN.md; evidence: the
+2026-10-15/16 hole-finding battery). Eight fixes:
+(1) derived arithmetic grounds through a bounded
+derivation chaining of the existing half/double/sum/
+difference whitelist, in _det_claim_check and in
+_check_figures (two-step post-eligibility math —
+$2,300 - $1,000 - $52 = $1,248 — no longer fails
+grounding); (2) question-supplied figures are premises:
+_check_figures reads the question's bare-form figures
+too ("make 1300 a month"), and a claim whose figures
+all come from the question is cited by the question;
+(3) _check_figures and the claim check mask dates
+before figure extraction, so "the July 2026 dollar
+limits" no longer parses as a $2,026 figure (the
+v25.1 _mask_dates precedent, extended to the figure
+gate); (4) source-conflict claims engage only when
+the question matched the entry or the draft writes
+about the figure on-topic — a patient-liability ask
+no longer inherits a forced shelter-allowance
+conflict from its hits; (5) badge honesty: an answer
+whose lead sentences state the documents do not
+answer the question ships as an IDK, never under a
+checked/quick/partial badge; (6) partial floor: a
+one-sentence assembly ships only when its claim is
+load-bearing, and a figure-seeking question never
+ships a figureless partial; (7) fail-fast: the Deep
+ladder stops after a second rung fails on the
+identical deterministic signature, instead of
+spending the whole class budget re-asking (the $1
+per-ask ceiling is unchanged); (8) the CSRA and
+MMMNA registry entries match vague spousal-worry
+phrasing ("will my wife be okay financially") via
+financial-worry group-2 terms; group 1 still
+requires a named spouse.
 """
 
 import datetime
@@ -3126,6 +3162,58 @@ def _drop_payee_admin(question, hits):
     return [h for h in hits if "/payee/" not in (h.get("url") or "")]
 
 
+def _derivation_level1(values):
+    """v26.2 (fix 1): ONE level of the derivation whitelist —
+    the scope values plus their halves, doubles, and pairwise
+    sums and differences (the v23.1 claim check's expansion,
+    factored out). All values rounded to cents, matching the
+    checkers' own rounding, so set membership below is exact."""
+    allowed = set()
+    for v in values or ():
+        try:
+            allowed.add(round(float(v), 2))
+        except (TypeError, ValueError):
+            pass
+    snap = sorted(allowed)
+    for v in snap:
+        allowed.add(round(v / 2, 2))
+        allowed.add(round(v * 2, 2))
+    for i, a in enumerate(snap):
+        for b in snap[i:]:
+            allowed.add(round(a + b, 2))
+            allowed.add(round(abs(a - b), 2))
+    return allowed
+
+
+def _derivable(val, level1):
+    """v26.2 (fix 1): is val grounded as a derivation of the
+    scope whose level-1 set is `level1`? True when val is in
+    the level-1 set (in scope, or one whitelist step from it),
+    or one further step beyond it: val = y + z, y - z, or
+    z - y with y, z both in level1. That second step is the
+    two-step chain the battery's post-eligibility math needs
+    ($2,600 - $52 = $2,548 and $2,705 - $900 = $1,805, then
+    $2,548 - $1,805 = $743) — through v26.1 the check stopped
+    at one level and the result failed grounding with every
+    input in scope. The full closure is never materialized
+    (pairwise expansion explodes combinatorially); the test
+    is per candidate value, O(|level1|) set lookups."""
+    if any(abs(val - a) <= 0.011 for a in level1):
+        return True
+    return _derivation_step(val, level1)
+
+
+def _derivation_step(val, level1):
+    """The second whitelist step alone (no membership test):
+    val = y + z, y - z, or z - y for some y, z in level1."""
+    for y in level1:
+        if round(y - val, 2) in level1 \
+                or round(val - y, 2) in level1 \
+                or round(val + y, 2) in level1:
+            return True
+    return False
+
+
 def _check_figures(answer, question, hits, extra_allowed=(),
                    pool_all=False):
     """v11 figure provenance: every dollar figure in the answer must
@@ -3150,7 +3238,19 @@ def _check_figures(answer, question, hits, extra_allowed=(),
     floor is presence in the retrieved evidence, with per-sentence
     support carried by the citation gate instead. Pool extraction
     mirrors the answer scan (money_re + bare_re) so normalization
-    ($, commas, decimals) matches on both sides."""
+    ($, commas, decimals) matches on both sides.
+    v26.2: (fix 3) all extraction below runs on date-masked text
+    (_mask_dates, the v25.1 precedent this gate never had), so
+    "the July 2026 dollar limits" yields no $2,026 figure and
+    "(7/2026)" no phantom equation. (fix 2) the question's
+    bare-form figures join base, as the pooled excerpts already
+    did. (fix 1) a sentence figure also grounds when it is a
+    derivation (the whitelist, with one chained step) of
+    this sentence's scope plus the figures earlier sentences
+    grounded — two-step arithmetic stated in prose grounds end
+    to end, while F5/F6 scoping is untouched: the derivation
+    test only ever combines values the strict rules already
+    grounded."""
     money_re = re.compile(r"\$\s?(\d[\d,]*(?:\.\d{1,2})?)")
     bare_re = re.compile(
         r"\b(\d[\d,]*(?:\.\d{1,2})?)\s*(?:dollars?\b|per month\b|"
@@ -3174,9 +3274,19 @@ def _check_figures(answer, question, hits, extra_allowed=(),
         except (TypeError, ValueError):
             pass
     base |= _grab(question)
+    # v26.2 (fix 2): the question's bare-form figures are
+    # premises too ("if i make 1300 a month" — battery B26
+    # Quick flagged the asker's own $1,300). Read on masked
+    # text (fix 3), mirroring the pooled excerpt read below.
+    for m in bare_re.finditer(_mask_dates(question or "")):
+        try:
+            base.add(round(float(
+                m.group(1).replace(",", "")), 2))
+        except ValueError:
+            pass
     if pool_all:
         for _h in hits or ():
-            _ex = (_h or {}).get("excerpt", "")
+            _ex = _mask_dates((_h or {}).get("excerpt", ""))
             base |= _grab(_ex)
             for m in bare_re.finditer(_ex):
                 try:
@@ -3186,70 +3296,103 @@ def _check_figures(answer, question, hits, extra_allowed=(),
                     pass
 
     parsed = _parse_citations(answer or "", hits or [])
-    derived = set()
     ungrounded = []
 
     def _near(val, scope):
         return any(abs(val - a) <= 0.011 for a in scope)
 
-    def _flag(val):
-        if val and val not in ungrounded:
-            ungrounded.append(val)
-
-    for s in parsed["sentences"]:
-        text_s = s["text"]
-        scope = set(base) | derived
-        # v26 (F6, D6 ruled 2026-10-15): sentence-local scope
-        # for FIGURE grounding in scoped mode. Through v25.1
-        # the scope was the sentence's block-attributed
-        # sources, so a citation block at a group's end
-        # widened every earlier sentence's figure scope to
-        # the block's excerpts — a wrong figure in an early
-        # sentence grounded against a later block's excerpt
-        # and the unit shipped it `checked` (Phase 0 probe
-        # F6). In scoped mode figures now ground against the
-        # excerpts the sentence's OWN in-text markers cite
-        # (own_sources, kept by _parse_citations). Block
-        # attribution itself is unchanged (citation credit,
-        # cited_claims, the uncited gate — the c3b7 fix),
-        # and pooled mode (pool_all, Quick) keeps the block
-        # scope exactly as designed.
-        _scope_srcs = s["sources"] if pool_all else (
-            s["own_sources"] if "own_sources" in s
-            else s["sources"])
-        for j in _scope_srcs:
-            if 0 <= j < len(hits or []):
-                scope |= _grab(hits[j].get("excerpt", ""))
-        eqs = []
-        for m in _EQ_RE.finditer(text_s):
-            try:
-                eqs.append((float(m.group(1).replace(",", "")),
-                            float(m.group(3).replace(",", "")),
-                            float(m.group(4).replace(",", ""))))
-            except ValueError:
-                pass
-        for m in _PAREN_EQ_RE.finditer(text_s):
-            try:
-                eqs.append((float(m.group(2).replace(",", "")),
-                            float(m.group(4).replace(",", "")),
-                            float(m.group(1).replace(",", ""))))
-            except ValueError:
-                pass
-        for a, b, c in eqs:
-            if _near(a, scope) and _near(b, scope):
-                derived.add(round(c, 2))
-        scope |= derived
-        for rx in (money_re, bare_re):
-            for m in rx.finditer(text_s):
+    def _figure_pass(seed_prior, flag):
+        """One pass over the sentences. A sentence's figures
+        ground on: base, the results of its explicit equations
+        whose operands are in scope (the F5 rule, unchanged),
+        its own scope below, and derivations (_derivable) of
+        that scope plus the figures grounded so far. Returns
+        (flags, grounded). v26.2 (fix 1): the caller runs the
+        pass twice — the first pass collects every figure the
+        answer grounds ANYWHERE (its shown steps may come
+        after the lead sentence that states their result);
+        the second pass, seeded with that set, does the
+        flagging, so a result stated before its steps still
+        grounds on them. Direct (non-derived) grounding stays
+        sentence-local exactly as F6 ruled: the seed only ever
+        feeds the DERIVATION test, never direct membership."""
+        derived = set()
+        grounded = set(seed_prior)
+        flags = []
+        for s in parsed["sentences"]:
+            # v26.2 (fix 3): extraction reads date-masked text
+            # (masking preserves length; only values are taken
+            # from it, never offsets).
+            text_s = _mask_dates(s["text"])
+            scope = set(base) | derived
+            # v26 (F6, D6 ruled 2026-10-15): sentence-local
+            # scope for FIGURE grounding in scoped mode.
+            # Through v25.1 the scope was the sentence's
+            # block-attributed sources, so a citation block at
+            # a group's end widened every earlier sentence's
+            # figure scope to the block's excerpts — a wrong
+            # figure in an early sentence grounded against a
+            # later block's excerpt and the unit shipped it
+            # `checked` (Phase 0 probe F6). In scoped mode
+            # figures now ground against the excerpts the
+            # sentence's OWN in-text markers cite (own_sources,
+            # kept by _parse_citations). Block attribution
+            # itself is unchanged (citation credit,
+            # cited_claims, the uncited gate — the c3b7 fix),
+            # and pooled mode (pool_all, Quick) keeps the block
+            # scope exactly as designed.
+            _scope_srcs = s["sources"] if pool_all else (
+                s["own_sources"] if "own_sources" in s
+                else s["sources"])
+            for j in _scope_srcs:
+                if 0 <= j < len(hits or []):
+                    scope |= _grab(_mask_dates(
+                        hits[j].get("excerpt", "")))
+            eqs = []
+            for m in _EQ_RE.finditer(text_s):
                 try:
-                    val = round(float(
-                        m.group(1).replace(",", "")), 2)
+                    eqs.append((float(m.group(1).replace(",", "")),
+                                float(m.group(3).replace(",", "")),
+                                float(m.group(4).replace(",", ""))))
                 except ValueError:
-                    continue
-                if val == 0:
-                    continue
-                if not _near(val, scope):
-                    _flag(val)
+                    pass
+            for m in _PAREN_EQ_RE.finditer(text_s):
+                try:
+                    eqs.append((float(m.group(2).replace(",", "")),
+                                float(m.group(4).replace(",", "")),
+                                float(m.group(1).replace(",", ""))))
+                except ValueError:
+                    pass
+            for a, b, c in eqs:
+                if _near(a, scope) and _near(b, scope):
+                    derived.add(round(c, 2))
+            scope |= derived
+            # Grounding test: direct membership in this
+            # sentence's own level-1 set (scope + one
+            # whitelist step — sentence-local, as F6 ruled),
+            # or one derivation step over the scope widened
+            # by the grounded seed. The seed never grounds a
+            # figure by membership alone.
+            l1_scope = _derivation_level1(scope)
+            l1_all = _derivation_level1(scope | grounded)
+            for rx in (money_re, bare_re):
+                for m in rx.finditer(text_s):
+                    try:
+                        val = round(float(
+                            m.group(1).replace(",", "")), 2)
+                    except ValueError:
+                        continue
+                    if val == 0:
+                        continue
+                    if _near(val, l1_scope) \
+                            or _derivation_step(val, l1_all):
+                        grounded.add(val)
+                    elif flag and val not in flags:
+                        flags.append(val)
+        return flags, grounded
+
+    _collect, answer_grounded = _figure_pass(set(), False)
+    ungrounded, _g = _figure_pass(answer_grounded, True)
     if not ungrounded:
         return answer, []
     listed = ", ".join(f"${v:,.2f}" if v % 1 else f"${v:,.0f}"
@@ -3462,41 +3605,95 @@ def _conflict_scan(hits):
     return out
 
 
-def _conflict_claims(conflicts, answer):
+def _conflict_claims(conflicts, answer, engaged_ids=None):
     """Conflict records as claim texts, plus the code override
     map (claim text -> forced final) for drafts that do not
     present BOTH values. v18 (F16, pass 2 item F1): conflict
     claims are resolved IN CODE ONLY — _run_unit keeps them
     out of the judge-facing claim set entirely, so the forced
     finals no longer ride the Flash final rung either. The map
-    is consumed as conflict_fail by _run_unit."""
+    is consumed as conflict_fail by _run_unit.
+    v26.2 (fix 4): a conflict becomes a claim only when it is
+    ENGAGED — the question matched the entry (engaged_ids,
+    passed by the caller from the ask's registry matches), or
+    the draft presents one of the two values in a sentence
+    carrying one of the entry's conflict terms or title words
+    (the draft is writing about that figure). Through v26.1
+    the scan armed on ANY registry entry found in the hits,
+    so an ask that never used the figure inherited a forced
+    conflict (battery B19: the $812/$811.50 shelter pair
+    forced on a patient-liability ask whose question matched
+    no registry entry and whose draft presented neither
+    value). An unengaged conflict is dropped entirely."""
     claims, forced = [], {}
     low = (answer or "").lower()
+    sents = [s.lower() for s in _split_sentences(answer or "")]
+    by_id = {e["id"]: e for e in VERIFIED_FIGURES}
+
+    def _forms(v, kind):
+        if kind == "age":
+            return (f"age {int(v)}", f"age of {int(v)}",
+                    f"before age {int(v)}")
+        return (f"${v:,.2f}", f"${v:,.0f}", f"{v:,.2f}",
+                f"{v:,.0f}")
+
+    def _eforms(v, kind):
+        # v26.2 (fix 4): engagement probes also count the
+        # comma-less bare form ("2705 dollars") — a shape
+        # drafters actually write, which _forms' $-and-comma
+        # forms miss, so an on-topic draft would read as
+        # never presenting the value and its conflict would
+        # drop. Engagement only: the both-values test keeps
+        # _forms exactly as before.
+        forms = list(_forms(v, kind))
+        if kind != "age":
+            try:
+                fv = float(v)
+                forms.append(f"{fv:.0f}" if fv == int(fv)
+                             else f"{fv}")
+            except (TypeError, ValueError):
+                pass
+        return tuple(forms)
+
     for cf in conflicts:
-        if cf.get("kind") == "age":
+        kind = cf.get("kind")
+        if kind == "age":
             rv, cv = int(cf["registry_value"]), int(
                 cf["corpus_value"])
+        else:
+            rv, cv = cf["registry_value"], cf["corpus_value"]
 
-            def _has(v):
-                forms = (f"age {int(v)}", f"age of {int(v)}",
-                         f"before age {int(v)}")
-                return any(f in low for f in forms)
+        def _has(v, _kind=kind):
+            return any(f in low for f in _forms(v, _kind))
 
-            both = _has(rv) and _has(cv)
+        both = _has(rv) and _has(cv)
+        engaged = engaged_ids is not None \
+            and cf.get("entry") in engaged_ids
+        if not engaged and (any(f in low for f in _eforms(rv, kind))
+                            or any(f in low
+                                   for f in _eforms(cv, kind))):
+            entry = by_id.get(cf.get("entry")) or {}
+            terms = [t.lower() for t in
+                     (entry.get("conflict_terms") or ())]
+            terms += [w for w in re.findall(
+                r"[a-z]{4,}", (entry.get("title") or "").lower())
+                if w not in terms]
+            for s in sents:
+                if not any(t in s for t in terms):
+                    continue
+                if any(f in s for f in _eforms(rv, kind)) \
+                        or any(f in s for f in _eforms(cv, kind)):
+                    engaged = True
+                    break
+        if not engaged:
+            continue
+        if kind == "age":
             text = (f"The answer surfaces the source disagreement "
                     f"on {cf['entry']}: sources give both age {rv} "
                     f"and age {cv} (corpus variant from "
                     f"{cf['source']}), instead of presenting one "
                     f"value as settled.")
         else:
-            rv, cv = cf["registry_value"], cf["corpus_value"]
-
-            def _has(v):
-                forms = {f"${v:,.2f}", f"${v:,.0f}", f"{v:,.2f}",
-                         f"{v:,.0f}"}
-                return any(f.lower() in low for f in forms)
-
-            both = _has(rv) and _has(cv)
             text = (f"The answer surfaces the source disagreement on "
                     f"{cf['entry']}: sources give both "
                     f"${rv:,.2f} and "
@@ -3654,8 +3851,20 @@ VERIFIED_FIGURES = [
             # exact-token, so "resource" never matched the
             # token "resources" (and vice versa).
             {"tokens": {"savings", "saving", "assets", "asset",
-                        "resources", "resource", "countable"},
-             "phrases": ()},
+                        "resources", "resource", "countable",
+                        # v26.2 (fix 8): the vague-worry shape
+                        # ("will my wife be okay financially")
+                        # names no money noun at all, and the
+                        # battery's B06 matched no entry because
+                        # of it. Financial-worry terms only —
+                        # facility words stay out, so a question
+                        # merely about a spouse in a facility
+                        # cannot pull this block.
+                        "financially"},
+             "phrases": ("be okay", "okay financially",
+                         "financially okay", "afford",
+                         "protected", "lose everything",
+                         "left with nothing", "taken care of")},
         ],
         "statement": (
             "The community spouse resource allowance is ONE HALF of "
@@ -3683,7 +3892,13 @@ VERIFIED_FIGURES = [
                          "husband's check", "wife's check",
                          "spouse's check", "husband's income",
                          "wife's income", "spouse's income")},
-            {"tokens": {"income", "check", "checks"},
+            {"tokens": {"income", "check", "checks",
+                        # v26.2 (fix 8): same vague-worry
+                        # widening as the CSRA entry — B06's
+                        # worry is about the spouse's income
+                        # and resources together, so both
+                        # spousal entries take the same terms.
+                        "financially"},
              "phrases": ("keep each month",
                          "maintenance needs allowance",
                          "maximum monthly maintenance",
@@ -3691,7 +3906,12 @@ VERIFIED_FIGURES = [
                          # how askers name the income.
                          "monthly check",
                          "his monthly check", "her monthly check",
-                         "keep to live on")},
+                         "keep to live on",
+                         # v26.2 (fix 8): the worry phrases.
+                         "be okay", "okay financially",
+                         "financially okay", "afford",
+                         "protected", "lose everything",
+                         "left with nothing", "taken care of")},
         ],
         "statement": (
             "The community spouse may keep between $2,705.00 and "
@@ -8037,19 +8257,24 @@ def _det_claim_check(claim, hits, question, mech_block, admitted):
     indices), the verified-figures / mechanism block text
     (which carries the registry block), the question, and the
     registry values admitted for the question's date. A figure
-    also passes when it is a simple derivation of scoped
-    figures — half, double, sum, or difference of two of them
-    (the addendum's derivation whitelist; a CSRA allowance is
-    legitimately half the couple's assets). A claim with no
+    also passes when it is a derivation of scoped figures —
+    half, double, sum, or difference (the addendum's
+    derivation whitelist; a CSRA allowance is legitimately
+    half the couple's assets), with one further chained step
+    since v26.2 (fix 1: two-step post-eligibility math
+    failed on its second step through v26.1). A claim with no
     mapped sources cannot be scoped tighter, so it scopes to
     every excerpt; the answer-level _check_figures still
     enforces the strict per-sentence rule on the shipped text.
 
     cited_ok: the claim maps to at least one cited excerpt, or
     rests on the registry ([registry] in its text), or is a
-    meta claim about the documents."""
+    meta claim about the documents, or (v26.2, fix 2) its
+    figures all come from the question itself — a restatement
+    of the asker's own stated facts is cited by the question.
+    Figure extraction reads date-masked claim text (fix 3)."""
     text = claim.get("text") or ""
-    figs = _claim_money(text)
+    figs = _claim_money(_mask_dates(text))
     srcs = [j for j in (claim.get("sources") or [])
             if isinstance(j, int)]
     if srcs:
@@ -8063,19 +8288,14 @@ def _det_claim_check(claim, hits, question, mech_block, admitted):
     if mech_block:
         scope |= _claim_money(mech_block)
     scope |= _claim_money(question)
-    allowed = set(scope)
-    for v in list(scope):
-        allowed.add(round(v / 2, 2))
-        allowed.add(round(v * 2, 2))
-    _sl = sorted(scope)
-    for _a in _sl:
-        for _b in _sl:
-            allowed.add(round(_a + _b, 2))
-            allowed.add(round(abs(_a - _b), 2))
+    allowed1 = _derivation_level1(scope)
     bad = [v for v in sorted(figs)
-           if not any(abs(v - a) <= 0.011 for a in allowed)]
+           if not _derivable(v, allowed1)]
+    _q_figs = _claim_money(question)
+    _premise = bool(figs) and all(
+        any(abs(v - q) <= 0.011 for q in _q_figs) for v in figs)
     cited_ok = bool(srcs) or "[registry]" in text.lower() \
-        or bool(claim.get("meta"))
+        or bool(claim.get("meta")) or _premise
     return bad, cited_ok
 
 
@@ -8974,6 +9194,22 @@ def _assemble_capped_partial(draft, jr, question, hits,
                                  extra_allowed=allowed_extra)
         arith = _arithmetic_errors(text)
         if not ung and not arith:
+            # v26.2 (fix 6): the partial floor. A one-sentence
+            # assembly ships only when its claim is
+            # load-bearing (battery B16 Deep shipped a single
+            # orphaned non-load-bearing sentence as a partial);
+            # and when the judged draft carried figures and the
+            # question seeks one, an assembly with NO figure in
+            # it does not ship (battery B20 Deep: a partial
+            # confirming a maximum exists, its amount stripped).
+            # Both floors return None — the caller's existing
+            # fail-closed IDK — and never loosen anything.
+            if len(pairs) == 1 \
+                    and not (pairs[0][1].get("load_bearing")):
+                return None
+            if _claim_money(draft) and not _claim_money(text) \
+                    and _FIGURE_SEEKING_RX.search(question or ""):
+                return None
             min_cov = min((len(c.get("coverage") or [])
                            for _s, c in pairs), default=0)
             return text, min_cov
@@ -8987,6 +9223,56 @@ def _assemble_capped_partial(draft, jr, question, hits,
 
         pairs = [(s, c) for s, c in pairs if not _bad(s)]
     return None
+
+
+# --- v26.2 (fix 5): IDK-shaped shipped text -------------------
+# A draft whose operative lead states the documents do not
+# answer the question passes every gate (a refusal contains
+# nothing to contradict) and through v26.1 shipped under
+# checked / quick badges — the battery's badge audit found 8
+# such records. The ship exits in _run_unit and
+# _run_unit_quick test their own text with this detector and
+# fall to the IDK disposition when it fires, so the badge
+# never claims a completed lane for a refusal. (The ask-level
+# web branch keys off an IDK disposition, so these asks get
+# the branch's chance exactly as designed.)
+_IDK_SHAPE_RES = (
+    re.compile(r"i don'?t know based on the available "
+               r"documents"),
+    re.compile(r"i (could not|cannot|can't) verify"),
+    re.compile(r"the (available )?documents (do not|don't) "
+               r"(say|state|specify|give|provide)"),
+    re.compile(r"none of the excerpts (give|state|say|"
+               r"provide|describe)"),
+    re.compile(r"no specific rule listed"),
+)
+
+
+def _idk_shaped(text):
+    """True when one of the text's first two substantive
+    sentences (skipping "Confidence:" lines and markdown
+    headings) is a not-knowing statement in one of the
+    shapes above."""
+    sents = []
+    for s in _split_sentences(text or ""):
+        st = s.strip()
+        if st.lower().startswith("confidence:"):
+            continue
+        if st.startswith("#"):
+            continue
+        sents.append(st)
+    for s in sents[:2]:
+        sl = s.lower().replace("’", "'")
+        if any(rx.search(sl) for rx in _IDK_SHAPE_RES):
+            return True
+    return False
+
+
+# v26.2 (fix 6): the figure-seeking question shape for the
+# capped-partial central-figure floor.
+_FIGURE_SEEKING_RX = re.compile(
+    r"how much|how many|what is the|maximum|limit|cap|"
+    r"amount|cost", re.IGNORECASE)
 
 
 def _lead_citation(ctx):
@@ -9162,6 +9448,11 @@ def _run_unit(ctx):
     assembly_guard = None
     cost_capped = False
     conflict_fail = False
+    fail_fast = False  # v26.2 (fix 7): the ladder stopped on
+    # a repeated deterministic failure signature
+    _prev_sig = None
+    idk_shaped_hit = False  # v26.2 (fix 5): a ship exit's
+    # text was IDK-shaped and the exit was refused
     check_error = None  # v26 (F10): a checker exception's text
     judged_draft = None       # last draft that went through judging
     # v23: divergence-required points are gone with the
@@ -9335,7 +9626,10 @@ def _run_unit(ctx):
                         break
             lead_uncited = bool(lead_sentence
                                 and lead_sentence in uncited_lb)
-            c_claims, c_forced = _conflict_claims(conflicts, draft)
+            c_claims, c_forced = _conflict_claims(
+                conflicts, draft,
+                engaged_ids={e.get("id") for e in
+                             (ctx.get("registry_entries") or ())})
             # v18 (F16): conflict claims are resolved IN CODE ONLY
             # and never enter the judge-facing claim set (pass 2
             # item F1): a draft that does not surface both values
@@ -9440,7 +9734,11 @@ def _run_unit(ctx):
                     parsed = parsed2
                     uncited_lb = parsed2["uncited_lb"]
                     judged_draft = draft
-                    _cc2, _cf2 = _conflict_claims(conflicts, draft2)
+                    _cc2, _cf2 = _conflict_claims(
+                        conflicts, draft2,
+                        engaged_ids={e.get("id") for e in
+                                     (ctx.get("registry_entries")
+                                      or ())})
                     conflict_fail = bool(_cf2)
                     _a, ungrounded = _check_figures(
                         draft, ctx["question"], ctx["hits"],
@@ -9474,6 +9772,35 @@ def _run_unit(ctx):
                 + ". Rewrite the lead with that citation "
                 "attached; do not drop the mechanism.")
         draft = None if rung < 2 else draft
+        # v26.2 (fix 7): fail-fast. The rung's deterministic
+        # FIGURE-failure signature — the ungrounded figures
+        # plus the forced-conflict flag — is compared with
+        # the previous rung's. An identical second failure
+        # means the drafter demonstrably is not fixing what
+        # the objections listed; the ladder stops here and
+        # the normal final disposition (strip / capped
+        # partial / IDK) reads the same state it reads
+        # today. Judge-only failures (empty signature) never
+        # trip it. The signature is deliberately figure-
+        # scoped: uncited-sentence and mechanism-lead
+        # failures are what redrafts and lead repairs exist
+        # for, and the BUG-11 replay's recorded CSRA shape
+        # burns to the draft cap on exactly those terms —
+        # that accounting is a permanent regression gate
+        # and must not change (found at the v26.2 gate run;
+        # the battery evidence for this fix is figure
+        # failures: B05 Deep 286.6s, B06 Deep 151.0s, both
+        # re-failing identical ungrounded figures rung
+        # after rung). The per-ask cost ceiling is
+        # unchanged (D1); this only stops spending inside
+        # it on a proven no-progress loop.
+        _sig = (frozenset(round(float(v), 2) for v in ungrounded),
+                bool(conflict_fail))
+        if _prev_sig is not None and _sig == _prev_sig \
+                and any(_sig):
+            fail_fast = True
+            break
+        _prev_sig = _sig
     # v17.3: strip, don't sink. The ladder's repair rungs are
     # exhausted; if the last judged draft still carries uncited
     # load-bearing sentences, cut the ones that map to no
@@ -9565,8 +9892,11 @@ def _run_unit(ctx):
                               judge_model=ctx.get("judge_model"),
                               extract_model=ctx.get("extract_model"),
                     use_cache=not ctx.get("fresh"), deadline=deadline)
-                _cc3, _cf3 = _conflict_claims(conflicts,
-                                              stripped_draft)
+                _cc3, _cf3 = _conflict_claims(
+                    conflicts, stripped_draft,
+                    engaged_ids={e.get("id") for e in
+                                 (ctx.get("registry_entries")
+                                  or ())})
                 conflict_fail = bool(_cf3)
             except Exception as e:
                 # v26 (F10): same fail-closed rule — a checker
@@ -9592,6 +9922,13 @@ def _run_unit(ctx):
             shipped = True
         elif deadline and time.monotonic() > deadline:
             _mark_cap()
+    if shipped and _idk_shaped(draft):
+        # v26.2 (fix 5): badge honesty — a passing draft whose
+        # lead states the documents do not answer the question
+        # does not ship under a checked badge; the unit falls
+        # through to its IDK disposition below.
+        shipped = False
+        idk_shaped_hit = True
     # v24 (§6.3): the ladder has closed — the optional
     # sections' decision points are now known for THIS pass.
     # A redraft that never ran is not-needed from this moment;
@@ -9615,6 +9952,7 @@ def _run_unit(ctx):
             "budget_cut": cap_hit,
             "cut_phase": cut_phase,
             "cost_capped": cost_capped,
+            "fail_fast": fail_fast,
             # v23.2 (F2/F3): the ask's shared draft-call count
             # at this unit's end, whether this unit stopped on
             # the draft cap, and the assembly guard's record.
@@ -9722,9 +10060,10 @@ def _run_unit(ctx):
                 _ship_sents = [
                     s for s in _split_sentences(_atext)
                     if not s.lower().startswith("confidence:")]
-                if len(_ship_sents) < _supp_n \
-                        or len(_ship_sents) * 4 \
-                        < len(_draft_sents) * 3:
+                if (len(_ship_sents) < _supp_n
+                        or len(_ship_sents) * 4
+                        < len(_draft_sents) * 3) \
+                        and not _idk_shaped(judged_draft):
                     assembly_guard = {
                         "fired": True,
                         "supported_claims": _supp_n,
@@ -9768,17 +10107,24 @@ def _run_unit(ctx):
                         "the checks are shown")
             cut = [c["text"] for c in jr["claims"]
                    if c["final"] != "supported" and not c.get("meta")]
-            return dict(base, answer=_atext, badge="partial",
-                        judging={"mode": jr["mode"],
-                                 "errors": jr["errors"],
-                                 "annotation":
-                                     _checks_annotation(jr),
-                                 "checks": jr.get("checks")},
-                        claims=jr["claims"],
-                        missing=[_why,
-                                 *[f"not verified: \"{t}\""
-                                   for t in cut[:4]]],
-                        gate=None)
+            if _idk_shaped(_atext):
+                # v26.2 (fix 5): the assembly's own lead is a
+                # not-knowing statement; it does not ship
+                # under the partial badge either. Fall through
+                # to the IDK disposition below.
+                idk_shaped_hit = True
+            else:
+                return dict(base, answer=_atext, badge="partial",
+                            judging={"mode": jr["mode"],
+                                     "errors": jr["errors"],
+                                     "annotation":
+                                         _checks_annotation(jr),
+                                     "checks": jr.get("checks")},
+                            claims=jr["claims"],
+                            missing=[_why,
+                                     *[f"not verified: \"{t}\""
+                                       for t in cut[:4]]],
+                            gate=None)
     # v23.2 (F3, second placement — the ABLE-ask shape): the
     # judged draft PASSED its check round (every substantive
     # claim supported, deterministic blocks clean) but the
@@ -9798,7 +10144,8 @@ def _run_unit(ctx):
                 and not ((_chk2.get("citations") or {}).get(
                     "failed")) \
                 and not mech_failures and not quantities \
-                and not conflict_fail and not uncited_lb:
+                and not conflict_fail and not uncited_lb \
+                and not _idk_shaped(judged_draft):
             assembly_guard = {
                 "fired": True,
                 "supported_claims": len([
@@ -9861,6 +10208,14 @@ def _run_unit(ctx):
         missing.append("the draft used figures found in none of the "
                        "excerpts: " + ", ".join(
                            _fmt_money(v) for v in ungrounded[:4]))
+    if idk_shaped_hit or (judged_draft is not None
+                          and _idk_shaped(judged_draft)):
+        # v26.2 (fix 5): the reason this unit IDKs — the
+        # draft's own lead said the documents do not answer.
+        missing.append("the draft stated that the documents "
+                       "do not answer the question, so the "
+                       "answer is an IDK rather than a verified "
+                       "badge")
     if jr is not None:
         for c in jr["claims"]:
             if c["final"] != "supported" and not c.get("meta"):
@@ -10136,6 +10491,7 @@ def _run_unit_quick(ctx):
     uncited_lb, stripped = [], []
     conflict_fail = False
     gate_error = None  # v26 (F10): a checker exception's text
+    idk_shaped_hit = False  # v26.2 (fix 5)
 
     def _det_gates(text):
         _p = _parse_citations(text, ctx["hits"])
@@ -10149,7 +10505,10 @@ def _run_unit_quick(ctx):
         for _note in _arithmetic_errors(text):
             _qs.append({"mechanism": "arithmetic",
                         "label": _note.lstrip("- ")})
-        _cc, _cf = _conflict_claims(conflicts, text)
+        _cc, _cf = _conflict_claims(
+            conflicts, text,
+            engaged_ids={e.get("id") for e in
+                         (ctx.get("registry_entries") or ())})
         return _p, _ung, _mf, _qs, bool(_cf)
 
     def _gates_with_strip(text):
@@ -10308,9 +10667,16 @@ def _run_unit_quick(ctx):
             "quick_repair_error": quick_repair_error,
             "stripped_sentences": stripped}
     _check_cancel()  # the Stop seam, again before shipping
-    if draft is not None and not ungrounded \
-            and not mech_failures and not quantities \
-            and not uncited_lb and not conflict_fail:
+    _ship = draft is not None and not ungrounded \
+        and not mech_failures and not quantities \
+        and not uncited_lb and not conflict_fail
+    if _ship and _idk_shaped(draft):
+        # v26.2 (fix 5): badge honesty, as in _run_unit — an
+        # IDK-shaped text does not ship under the quick badge;
+        # the unit IDKs below with the reason recorded.
+        _ship = False
+        idk_shaped_hit = True
+    if _ship:
         answer, _fixes = _check_arithmetic(draft)
         return dict(base, answer=answer, badge="quick",
                     judging=judging, claims=[], missing=[],
@@ -10354,6 +10720,11 @@ def _run_unit_quick(ctx):
         missing.append("the draft used figures found in none of "
                        "the excerpts: " + ", ".join(
                            _fmt_money(v) for v in ungrounded[:4]))
+    if idk_shaped_hit:
+        missing.append("the draft stated that the documents "
+                       "do not answer the question, so the "
+                       "answer is an IDK rather than a verified "
+                       "badge")
     if conflict_fail:
         missing.append("the draft did not surface both values "
                        "of a source conflict")
