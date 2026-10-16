@@ -498,6 +498,19 @@ MMMNA registry entries match vague spousal-worry
 phrasing ("will my wife be okay financially") via
 financial-worry group-2 terms; group 1 still
 requires a named spouse.
+
+v27.1 (2026-10-16): the front door (see v27/DESIGN.md +
+v27/FRONT_DOOR_DATA.md). A code front door sits in front of
+the AI lanes: facts live in front_door_data.json rows
+(figure, source citation, effective window, verified-on,
+review-by), five general engines compute answers
+(split-and-clamp, liability, penalty, year-indexed caps,
+coverage lookup), and a conservative router claims a
+question only when a row provably covers it. Everything
+else falls through to Quick/Deep untouched and is logged
+by topic to front_door_log.jsonl as the expansion queue.
+Code answers ship under the badge "code" with their
+figures and source in the answer text, at $0.
 """
 
 import datetime
@@ -12071,7 +12084,8 @@ function finishRun(d, jp){
     checked_det: ['no', 'Checked · figures and citations'],
     verified_web_reduced: ['no', 'Checked · web · figures and citations'],
     partial: ['no', 'Partial · partly verified'],
-    idk: ['err', 'No verified answer']
+    idk: ['err', 'No verified answer'],
+    code: ['ok', 'Code answer · computed from cited figures']
   };
   const bm = badgeMap[d.badge];
   $('answerBadge').innerHTML = bm
@@ -12234,6 +12248,528 @@ def _record_ask(record):
                 f.write(line + "\n")
     except Exception:
         pass
+
+
+# --- v27.1: the front door ----------------------------------------
+# A code front door in front of the AI lanes (design:
+# v27/DESIGN.md front-door section; classification + row
+# provenance: v27/FRONT_DOOR_DATA.md). Facts live ONLY in
+# front_door_data.json beside this file; the code below is five
+# general engines plus a conservative router. A missing or
+# invalid data file disables the door and the lanes behave
+# exactly as v27. The door claims a question ONLY when a row's
+# trigger phrases all match, the row is inside its effective
+# window and before its review-by date, every input the engine
+# needs is present or a row constant, and every dollar amount
+# present can be assigned to an input unambiguously. Bundled
+# (multi-part) and discovery questions never claim. Everything
+# else falls through to Quick/Deep untouched. Every decision
+# is appended to front_door_log.jsonl (the expansion queue).
+# Claimed answers ship under the badge "code" with their
+# figures, arithmetic, and source line in the answer text;
+# they cost $0 and never enter the AI answer cache.
+
+_FRONT_DOOR_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "front_door_data.json")
+_FRONT_DOOR_LOG = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "front_door_log.jsonl")
+_FRONT_DOOR_LOCK = threading.Lock()
+_FRONT_DOOR_ROWS = []
+_FRONT_DOOR_STATE = {"loaded": False, "rows": 0, "error": None}
+
+
+def _front_door_load():
+    global _FRONT_DOOR_ROWS
+    try:
+        with open(_FRONT_DOOR_PATH, encoding="utf-8") as f:
+            doc = json.load(f)
+        rows = doc["rows"]
+        for r in rows:
+            for k in ("id", "engine", "values", "source",
+                      "triggers"):
+                if k not in r:
+                    raise ValueError("row missing " + k)
+        _FRONT_DOOR_ROWS = rows
+        _FRONT_DOOR_STATE.update(
+            {"loaded": True, "rows": len(rows), "error": None})
+    except Exception as e:
+        _FRONT_DOOR_ROWS = []
+        _FRONT_DOOR_STATE.update(
+            {"loaded": False, "rows": 0, "error": str(e)[:200]})
+
+
+_front_door_load()
+
+
+def _front_door_health():
+    return dict(_FRONT_DOOR_STATE)
+
+
+def _fd_log(entry):
+    try:
+        entry = dict(entry, ts=time.time())
+        line = json.dumps(entry, ensure_ascii=False, default=str)
+        with _FRONT_DOOR_LOCK:
+            with open(_FRONT_DOOR_LOG, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def _fd_money(v):
+    v = float(v)
+    if v == int(v):
+        return "$" + format(int(v), ",")
+    return "$" + format(v, ",.2f")
+
+
+def _fd_norm(q):
+    return " " + re.sub(r"\s+", " ", (q or "").lower()) + " "
+
+
+def _fd_triggers_match(row, qn):
+    for phrase in row.get("exclude", ()):
+        if phrase in qn:
+            return False
+    for group in row["triggers"]["all"]:
+        if not any(p in qn for p in group):
+            return False
+    return True
+
+
+def _fd_row_active(row, today):
+    if row.get("review_by") and today > row["review_by"]:
+        return False
+    eff = row.get("effective") or {}
+    if eff.get("from") and today < eff["from"]:
+        return False
+    if eff.get("to") and today > eff["to"]:
+        return False
+    return True
+
+
+_FD_AMT_RE = re.compile(r"\$\s?([0-9][0-9,]*(?:\.[0-9]{1,2})?)")
+_FD_SPOUSE_WORDS = ("wife", "husband", "spouse")
+_FD_PATIENT_WORDS = ("my income", "i get", "i receive", "i have",
+                     "patient", "nursing home", "my check",
+                     "my benefit")
+_FD_SHELTER_WORDS = ("rent", "mortgage", "shelter", "housing",
+                     "utilities", "utility")
+
+
+def _fd_amounts(question):
+    """Dollar amounts with their clause context:
+    [(value, clause_text_lower)]. Clauses are the spans
+    between sentence punctuation, found by offset."""
+    ql = (question or "").lower()
+    spans = []
+    start = 0
+    for sm in re.finditer(r"[.,;]", ql):
+        spans.append((start, sm.start()))
+        start = sm.end()
+    spans.append((start, len(ql)))
+    out = []
+    for m in _FD_AMT_RE.finditer(ql):
+        try:
+            val = float(m.group(1).replace(",", ""))
+        except Exception:
+            continue
+        clause = ""
+        for a, b in spans:
+            if a <= m.start() < b:
+                clause = ql[a:b]
+                break
+        out.append((val, clause))
+    return out
+
+
+def _fd_assign_liability(amounts):
+    """Assign amounts to (patient, spouse, shelter). Returns a
+    dict with any of the keys, or None when an amount cannot be
+    assigned unambiguously (the conservative fall-through)."""
+    patient = spouse = shelter = None
+    for val, clause in amounts:
+        if any(w in clause for w in _FD_SHELTER_WORDS):
+            if shelter is not None:
+                return None
+            shelter = val
+        elif any(w in clause for w in _FD_SPOUSE_WORDS):
+            if spouse is not None:
+                return None
+            spouse = val
+        elif any(w in clause for w in _FD_PATIENT_WORDS):
+            if patient is not None:
+                return None
+            patient = val
+        else:
+            return None
+    out = {}
+    if patient is not None:
+        out["patient_income"] = patient
+    if spouse is not None:
+        out["spouse_income"] = spouse
+    if shelter is not None:
+        out["shelter_costs"] = shelter
+    return out
+
+
+def _fd_source_line(row):
+    eff = row.get("effective") or {}
+    win = ""
+    if eff.get("from") or eff.get("to"):
+        win = (" Figures effective "
+               + (eff.get("from") or "...") + " to "
+               + (eff.get("to") or "open") + ".")
+    return ("Source: " + row["source"] + "." + win
+            + " Verified " + str(row.get("verified_on"))
+            + "; next review by " + str(row.get("review_by"))
+            + ". Answered by code from this data row; no AI "
+              "draft was used.")
+
+
+def _fd_engine_split_and_clamp(row, question, amounts):
+    v = row["values"]
+    lines = []
+    inputs = {}
+    if amounts:
+        if len(amounts) != 1:
+            return None
+        assets = amounts[0][0]
+        inputs["assets"] = assets
+        half = assets * float(v["fraction"])
+        csra = max(float(v["min"]), min(float(v["max"]), half))
+        lines.append(
+            "The community spouse resource allowance (CSRA) is "
+            + _fd_money(csra) + ".")
+        lines.append(
+            "How it is figured: one half of the couple's "
+            "combined countable assets of " + _fd_money(assets)
+            + " is " + _fd_money(half) + ", and the allowance is "
+            "that half clamped to a minimum of "
+            + _fd_money(v["min"]) + " and a maximum of "
+            + _fd_money(v["max"]) + " (2026).")
+        if csra != half:
+            lines.append(
+                "The clamp is what sets the answer here: the raw "
+                "half falls outside the allowed range.")
+    else:
+        ex = float(v["example_assets"])
+        ex_csra = max(float(v["min"]),
+                      min(float(v["max"]), ex * float(v["fraction"])))
+        lines.append(
+            "The community spouse resource allowance (CSRA) is "
+            "one half of the couple's combined countable assets, "
+            "clamped to a minimum of " + _fd_money(v["min"])
+            + " and a maximum of " + _fd_money(v["max"])
+            + " (2026).")
+        lines.append(
+            "Example: on " + _fd_money(ex) + " of countable "
+            "assets, the allowance is " + _fd_money(ex_csra)
+            + ". The exact figure needs the couple's countable "
+            "assets at the snapshot date; nothing is subtracted "
+            "before halving.")
+    return "\n\n".join(lines), inputs
+
+
+def _fd_engine_liability(row, question, amounts):
+    v = row["values"]
+    qn = _fd_norm(question)
+    assigned = _fd_assign_liability(amounts)
+    if assigned is None:
+        return None
+    inputs = dict(assigned)
+    pna = float(v["pna"])
+    mn_min = float(v["mmmna_min"])
+    mn_max = float(v["mmmna_max"])
+    shelter_std = float(v["shelter_standard"])
+    wants_range = (not amounts) and any(
+        t in qn for t in ("mmmna", "monthly maintenance",
+                         "allocation"))
+    if wants_range:
+        lines = [
+            "The monthly maintenance needs allowance (MMMNA) "
+            "lets the community spouse keep between "
+            + _fd_money(mn_min) + " and " + _fd_money(mn_max)
+            + " per month of the institutionalized spouse's "
+            "income (2026).",
+            "Where it lands in that range depends on the "
+            "spouse's own income and the couple's housing "
+            "costs: the target is the minimum of "
+            + _fd_money(mn_min) + " plus any shelter costs "
+            "above the " + _fd_money(shelter_std)
+            + " shelter standard, capped at "
+            + _fd_money(mn_max)
+            + ", and the allocation is the part of that target "
+            "the spouse's own income does not already cover. "
+            "With both incomes (and any shelter costs) the "
+            "door computes the exact allocation and the "
+            "patient liability.",
+        ]
+        return "\n\n".join(lines), inputs
+    if "spouse_income" in inputs and "patient_income" not in inputs:
+        spouse_inc = inputs["spouse_income"]
+        target = mn_min + max(
+            0.0, inputs.get("shelter_costs", shelter_std)
+            - shelter_std)
+        target = max(mn_min, min(mn_max, target))
+        alloc = max(0.0, target - spouse_inc)
+        lines = [
+            "The spousal allocation is " + _fd_money(alloc)
+            + " per month.",
+            "How it is figured: the MMMNA target is "
+            + _fd_money(target) + " (the 2026 minimum of "
+            + _fd_money(mn_min)
+            + (" plus excess shelter costs" if inputs.get(
+                "shelter_costs") else "")
+            + ", capped at " + _fd_money(mn_max)
+            + "), minus the spouse's own income of "
+            + _fd_money(spouse_inc) + ". The patient liability "
+            "also needs the institutionalized spouse's income.",
+        ]
+        return "\n\n".join(lines), inputs
+    if "patient_income" not in inputs:
+        return None
+    lines = []
+    patient = inputs["patient_income"]
+    alloc = None
+    if "spouse_income" in inputs:
+        target = mn_min + max(
+            0.0, inputs.get("shelter_costs", shelter_std)
+            - shelter_std)
+        target = max(mn_min, min(mn_max, target))
+        alloc = max(0.0, target - inputs["spouse_income"])
+    liability = patient - pna - (alloc or 0.0)
+    if liability < 0:
+        liability = 0.0
+    lines.append(
+        "The patient liability is " + _fd_money(liability)
+        + " per month.")
+    steps = ("How it is figured: income of "
+             + _fd_money(patient) + ", minus the personal "
+             "needs allowance of " + _fd_money(pna))
+    if alloc is not None:
+        steps += (", minus the spousal allocation of "
+                  + _fd_money(alloc) + " (the MMMNA target of "
+                  + _fd_money(target) + ": the 2026 minimum "
+                  + _fd_money(mn_min)
+                  + " plus any shelter costs above "
+                  + _fd_money(shelter_std) + ", capped at "
+                  + _fd_money(mn_max) + ", less the spouse's own "
+                  "income of "
+                  + _fd_money(inputs["spouse_income"]) + ")")
+    steps += "."
+    lines.append(steps)
+    return "\n\n".join(lines), inputs
+
+
+_FD_MONTHS = {m.lower(): i + 1 for i, m in enumerate(
+    ["January", "February", "March", "April", "May", "June",
+     "July", "August", "September", "October", "November",
+     "December"])}
+
+
+def _fd_application_date(question):
+    ql = (question or "").lower()
+    m = re.search(
+        r"(january|february|march|april|may|june|july|august|"
+        r"september|october|november|december)\s+(\d{4})", ql)
+    if m:
+        return "%04d-%02d-01" % (int(m.group(2)),
+                                 _FD_MONTHS[m.group(1)])
+    m = re.search(r"(?:applied|applying|filed|filing|application)"
+                  r"[^0-9]{0,24}(\d{4})", ql)
+    if m:
+        return m.group(1) + "-01-01"
+    return datetime.date.today().isoformat()
+
+
+def _fd_engine_penalty(row, question, amounts):
+    v = row["values"]
+    app_date = _fd_application_date(question)
+    divisor = None
+    for d in sorted(v["divisors"],
+                    key=lambda d: d.get("from") or "",
+                    reverse=True):
+        if d.get("from") is None or app_date >= d["from"]:
+            divisor = float(d["divisor"])
+            break
+    if divisor is None:
+        return None
+    inputs = {"application_date": app_date}
+    if amounts:
+        if len(amounts) != 1:
+            return None
+        amount = amounts[0][0]
+        inputs["amount"] = amount
+        months = amount / divisor
+        lines = [
+            "The transfer penalty period is "
+            + format(months, ".1f") + " months.",
+            "How it is figured: the uncompensated transfer of "
+            + _fd_money(amount) + " divided by the penalty "
+            "divisor of " + _fd_money(divisor) + " per month "
+            "(the divisor for applications on the date in the "
+            "question, " + app_date + "). Only transfers inside "
+            "the " + str(v["lookback_months"]) + "-month "
+            "lookback are penalized.",
+        ]
+        return "\n\n".join(lines), inputs
+    if "divisor" in _fd_norm(question):
+        lines = [
+            "The transfer penalty divisor is "
+            + _fd_money(divisor) + " per month for an "
+            "application dated " + app_date + ".",
+            "The penalty period for an uncompensated transfer "
+            "is the transfer amount divided by this divisor. "
+            "Only transfers inside the "
+            + str(v["lookback_months"]) + "-month lookback are "
+            "penalized.",
+        ]
+        return "\n\n".join(lines), inputs
+    return None
+
+
+def _fd_engine_year_indexed(row, question, amounts):
+    v = row["values"]
+    table = v["table"]
+    m = re.search(r"\b(20\d{2})\b", question or "")
+    year = m.group(1) if m else str(datetime.date.today().year)
+    if year not in table:
+        return None
+    entry = table[year]
+    labels = v.get("field_labels", {})
+    lines = [row["title"] + " for " + year + ":"]
+    for k, val in entry.items():
+        label = labels.get(k, k)
+        if k.endswith("_pct"):
+            lines.append("- " + label + ": " + str(val) + "%")
+        elif isinstance(val, (int, float)):
+            lines.append("- " + label + ": " + _fd_money(val))
+        else:
+            lines.append("- " + label + ": " + str(val))
+    return "\n".join(lines), {"year": year}
+
+
+def _fd_engine_lookup(row, question, amounts):
+    lines = [row["title"] + ":"]
+    for fact in row["values"]["facts"]:
+        lines.append("- " + fact["label"] + ": " + fact["value"])
+    return "\n".join(lines), {}
+
+
+def _fd_engine_coverage(row, question, amounts):
+    v = row["values"]
+    lines = []
+    if v.get("covered"):
+        lines.append("Yes. " + row["title"] + " is covered "
+                     "under the " + v["program"] + ".")
+    else:
+        lines.append("No. " + row["title"] + " is not covered "
+                     "under the " + v["program"] + ".")
+    if v.get("cap"):
+        cap = v["cap"]
+        if cap.get("plain"):
+            lines.append("Cap: " + str(cap["amount"]) + " "
+                         + cap["period"] + ".")
+        else:
+            lines.append("Cap: " + _fd_money(cap["amount"])
+                         + " " + cap["period"] + ".")
+    if v.get("conditions"):
+        lines.append(v["conditions"])
+    return "\n\n".join(lines), {}
+
+
+_FD_ENGINES = {
+    "split_and_clamp": _fd_engine_split_and_clamp,
+    "liability": _fd_engine_liability,
+    "penalty": _fd_engine_penalty,
+    "year_indexed": _fd_engine_year_indexed,
+    "lookup": _fd_engine_lookup,
+    "coverage": _fd_engine_coverage,
+}
+
+_FD_TOPIC_TERMS = (
+    ("P1_spousal_ltc", ("nursing home", "spouse", "wife",
+                        "husband", "csra", "mmmna", "liability",
+                        "long-term care", "long term care")),
+    ("P2_P3_waivers", ("waiver", "family supports", "cih",
+                       "health and wellness", "respite",
+                       "structured family", "ddars")),
+    ("P8_snap", ("snap", "food stamps", "food assistance",
+                 "ebt")),
+    ("P13_msp", ("qmb", "slmb", "medicare savings")),
+    ("P12_medicare", ("medicare", "part b", "hospice")),
+    ("P16_able", ("able account", "able")),
+    ("P5_hip", ("hip", "healthy indiana")),
+    ("P18_nemt", ("ride", "verida", "nemt", "transportation")),
+    ("P11_appeals", ("appeal", "hearing", "notice")),
+    ("P14_ssi_ssdi", ("ssi", "ssdi", "social security")),
+    ("P1_eligibility", ("medicaid", "asset", "income limit",
+                        "qualify", "eligible")),
+)
+
+
+def _fd_topic(question):
+    qn = _fd_norm(question)
+    for tag, terms in _FD_TOPIC_TERMS:
+        if any(t in qn for t in terms):
+            return tag
+    return "other"
+
+
+def _front_door_try(question):
+    """Returns {answer, row_id, engine, inputs} when the door
+    claims the question, else None. Logs every decision.
+    Never raises. FSSA_FRONT_DOOR=0 is the kill switch: the
+    door claims nothing and the lanes see v27 behavior (the
+    legacy gate suites run under it)."""
+    try:
+        if os.environ.get("FSSA_FRONT_DOOR") == "0":
+            return None
+        if not _FRONT_DOOR_ROWS:
+            return None
+        if is_discovery_question(question):
+            _fd_log({"decision": "fell_through",
+                     "topic": "discovery",
+                     "q": (question or "")[:160]})
+            return None
+        try:
+            if decompose_question(question):
+                _fd_log({"decision": "fell_through",
+                         "topic": "bundled",
+                         "q": (question or "")[:160]})
+                return None
+        except Exception:
+            pass
+        qn = _fd_norm(question)
+        amounts = _fd_amounts(question)
+        today = datetime.date.today().isoformat()
+        for row in _FRONT_DOOR_ROWS:
+            if not _fd_row_active(row, today):
+                continue
+            if not _fd_triggers_match(row, qn):
+                continue
+            engine = _FD_ENGINES.get(row["engine"])
+            if engine is None:
+                continue
+            got = engine(row, question, amounts)
+            if got is None:
+                continue
+            text, inputs = got
+            answer = text + "\n\n" + _fd_source_line(row)
+            _fd_log({"decision": "claimed", "row": row["id"],
+                     "engine": row["engine"], "inputs": inputs,
+                     "q": (question or "")[:160]})
+            return {"answer": answer, "row_id": row["id"],
+                    "engine": row["engine"], "inputs": inputs}
+        _fd_log({"decision": "fell_through",
+                 "topic": _fd_topic(question),
+                 "q": (question or "")[:160]})
+        return None
+    except Exception:
+        return None
 
 
 # --- v18 (F18): identical in-flight ask dedupe -----------------------
@@ -12407,7 +12943,11 @@ class Handler(BaseHTTPRequestHandler):
                         # accounting mode + credit-ledger
                         # figure, and Groq's daily guard.
                         "xai": _xai_health_block(),
-                        "groq": _groq_health_block()})
+                        "groq": _groq_health_block(),
+                        # v27.1: front-door state (rows loaded;
+                        # a missing data file reads loaded=false
+                        # and the lanes are untouched).
+                        "front_door": _front_door_health()})
         elif u.path == "/gaps":
             # v14: the gap log (IDKs, abstained parts, failed gates)
             # for the monthly rescrape watchlist and registry growth.
@@ -12888,6 +13428,82 @@ class Handler(BaseHTTPRequestHandler):
                        seat_models["draft"], seat_models["extract"],
                        seat_models["judge"], search_help or "",
                        web_branch_pick or "", ask_mode)
+            # v27.1: the front door. A claimed question is
+            # answered by code from front_door_data.json and
+            # returns here; anything else has already been
+            # logged as a fall-through and continues into the
+            # lanes below untouched. Door answers never enter
+            # the AI answer cache and cost $0.
+            _fd = None
+            try:
+                _fd = _front_door_try(question)
+            except Exception:
+                _fd = None
+            if _fd is not None:
+                _fd_end = time.monotonic()
+                _fd_result = {
+                    "answer": _fd["answer"], "hits": [],
+                    "ts": time.time(),
+                    "model": "front-door (code)", "prompt": "",
+                    "fallback": False, "downgraded": False,
+                    "discovery": False,
+                    "timing": {
+                        "retrieve_ms": 0,
+                        "generate_ms": int(
+                            (_fd_end - t_start) * 1000),
+                        "total_ms": int(
+                            (_fd_end - t_start) * 1000),
+                        "rungs": 0},
+                    "registry": [], "routed": None,
+                    "figure_check": {"ungrounded": [],
+                                     "regenerated": False},
+                    "parts": 1, "badge": "code",
+                    "judging": {
+                        "mode": "front_door",
+                        "annotation": (
+                            "Computed by code from a verified "
+                            "data row (front door row "
+                            + _fd["row_id"] + "); no AI draft, "
+                            "no judge."),
+                        "checks": _empty_checks_block(),
+                        "errors": []},
+                    "verification": [], "web": None,
+                    "cost_usd": 0.0, "mechanisms": [],
+                    "front_door": {"row": _fd["row_id"],
+                                   "engine": _fd["engine"],
+                                   "inputs": _fd["inputs"]},
+                    "wall_s": round(_fd_end - t_start, 3),
+                    "progress": {
+                        "pills": ["Front door: code answer"],
+                        "parts": []}}
+                try:
+                    _record_ask({
+                        "kind": "ask",
+                        "ask_id": _ask_ctx().ask_id,
+                        "ts": time.time(),
+                        "wall_s": _fd_result["wall_s"],
+                        "phase_ms": _phase_ms_snapshot(),
+                        "question": question,
+                        "corpus": corpus_name, "mode": ask_mode,
+                        "local": bool(local_mode),
+                        "seat_models": dict(seat_models),
+                        "seat_substitution": seat_substitution,
+                        "search_help": search_help or "",
+                        "web_branch": web_branch_pick or "",
+                        "badge": "code", "cost_usd": 0.0,
+                        "served": "front-door (code)",
+                        "budget_cut": False, "cut_phase": None,
+                        "draft_calls": 0, "draft_capped": False,
+                        "checks": _empty_checks_block(),
+                        "annotation": _fd_result["judging"][
+                            "annotation"],
+                        "events": [], "retrieval": [],
+                        "units": [],
+                        "front_door": _fd_result["front_door"]})
+                except Exception:
+                    pass
+                self._json(_fd_result)
+                return
             if not fresh:
                 cached_answer = _cache_get(_ASK_CACHE, ask_key)
                 if cached_answer:

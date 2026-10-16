@@ -1,0 +1,1164 @@
+{
+ "schema": 1,
+ "generated": "2026-10-16",
+ "notes": "v27.1 front door WIRED rows. Every row traces to FRONT_DOOR_DATA.md in this tree; UNVERIFIED rows are absent on purpose.",
+ "rows": [
+  {
+   "id": "csra",
+   "engine": "split_and_clamp",
+   "topic": "P1-7",
+   "title": "Community Spouse Resource Allowance (CSRA)",
+   "values": {
+    "fraction": 0.5,
+    "min": 32532,
+    "max": 162660,
+    "example_assets": 120000
+   },
+   "source": "CMS 2026 spousal impoverishment standards (server registry entry csra)",
+   "effective": {
+    "from": "2026-01-01",
+    "to": "2026-12-31"
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "my wife",
+      "my husband",
+      "my spouse",
+      "spouse",
+      "community spouse",
+      "csra"
+     ],
+     [
+      "savings",
+      "assets",
+      "asset",
+      "resources",
+      "resource",
+      "countable"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "If I go into a nursing home, how much of our savings can my wife keep?",
+     "expect": [
+      "$32,532",
+      "$162,660",
+      "one half"
+     ]
+    },
+    {
+     "q": "Our countable assets are $120,000. If I go into a nursing home, what is my wife's CSRA?",
+     "expect": [
+      "$60,000",
+      "$120,000"
+     ]
+    },
+    {
+     "q": "We have $40,000 in countable assets. How much can my husband keep as the community spouse?",
+     "expect": [
+      "$32,532"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "spousal_liability",
+   "engine": "liability",
+   "topic": "P1-8/9/12",
+   "title": "Spousal allocation (MMMNA) and patient liability",
+   "values": {
+    "pna": 52,
+    "mmmna_min": 2705,
+    "mmmna_max": 4066.5,
+    "shelter_standard": 811.5
+   },
+   "source": "CMS 2026 spousal impoverishment standards; IHCPPM 3010.20.10 (shelter standard printed as $812; CMS component $811.50); personal needs allowance $52, IHCPPM post-eligibility (battery key B04)",
+   "effective": {
+    "from": "2026-07-01",
+    "to": "2026-12-31"
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "liability",
+      "mmmna",
+      "monthly maintenance",
+      "spousal allocation",
+      "spouse allocation",
+      "allocation",
+      "owe the nursing home",
+      "pay the nursing home",
+      "share of cost"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "I am in a nursing home. My income is $2,600 a month. My wife's income is $900 a month. What is my patient liability?",
+     "expect": [
+      "$1,805",
+      "$743",
+      "$52",
+      "$2,705"
+     ]
+    },
+    {
+     "q": "What is the MMMNA my wife can keep each month?",
+     "expect": [
+      "$2,705",
+      "$4,066.50"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "transfer_penalty",
+   "engine": "penalty",
+   "topic": "P1-13/14",
+   "title": "Transfer penalty period (divisor by application date)",
+   "values": {
+    "lookback_months": 60,
+    "divisors": [
+     {
+      "from": "2026-07-01",
+      "divisor": 8027
+     },
+     {
+      "from": null,
+      "divisor": 7651
+     }
+    ]
+   },
+   "source": "IHCPPM 3006.00.00, average monthly cost of private nursing facility care (fetched successor text, v27/sources/01)",
+   "effective": {
+    "from": "2026-07-01",
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "transfer",
+      "gave",
+      "give away",
+      "giving away",
+      "gave away",
+      "signed over",
+      "deeded",
+      "gift"
+     ],
+     [
+      "penalty",
+      "penalized",
+      "medicaid",
+      "nursing home",
+      "long-term care",
+      "long term care",
+      "waiver",
+      "benefits",
+      "apply",
+      "applying"
+     ]
+    ]
+   },
+   "exclude": [
+    "give me",
+    "gives me",
+    "giving me",
+    "give us",
+    "wants to give me",
+    "going to give me",
+    "gift to me",
+    "left me",
+    "inherit"
+   ],
+   "golden": [
+    {
+     "q": "I gave my daughter $40,135 eight months ago and I am applying for Medicaid now. How long will my transfer penalty be?",
+     "expect": [
+      "5.0 months",
+      "$8,027",
+      "60-month"
+     ]
+    },
+    {
+     "q": "What is the transfer penalty divisor for a Medicaid application filed in October 2026?",
+     "expect": [
+      "$8,027"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "able_contribution",
+   "engine": "year_indexed",
+   "topic": "P16-1",
+   "title": "ABLE account annual contribution limit",
+   "values": {
+    "table": {
+     "2025": {
+      "amount": 19000
+     },
+     "2026": {
+      "amount": 20000
+     }
+    },
+    "field_labels": {
+     "amount": "Annual contribution limit"
+    }
+   },
+   "source": "SSA POMS SI 01130.740 (annual contribution limit by calendar year); IRS newsroom",
+   "effective": {
+    "from": "2025-01-01",
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "able"
+     ],
+     [
+      "contribution",
+      "contribute",
+      "put in",
+      "deposit",
+      "limit",
+      "cap",
+      "annual",
+      "per year",
+      "max"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "What was the maximum ABLE account contribution for 2025?",
+     "expect": [
+      "$19,000",
+      "2025"
+     ]
+    },
+    {
+     "q": "How much can I contribute to my ABLE account in 2026?",
+     "expect": [
+      "$20,000",
+      "2026"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "waiver_income_cap",
+   "engine": "year_indexed",
+   "topic": "P1-1",
+   "title": "HCBS waiver income cap (Special Income Level)",
+   "values": {
+    "table": {
+     "2026": {
+      "amount": 2982
+     }
+    },
+    "field_labels": {
+     "amount": "Monthly income cap"
+    }
+   },
+   "source": "Indiana HCBS waiver standards 2026: 300% of the SSI federal benefit rate (server registry entry waiver_income_cap). The 2027 cap had not been posted by Indiana as of October 2026.",
+   "effective": {
+    "from": "2026-01-01",
+    "to": "2026-12-31"
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "waiver"
+     ],
+     [
+      "income limit",
+      "income cap",
+      "how much income",
+      "earn too much",
+      "make too much",
+      "income can"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "What is the income limit for a Medicaid waiver in Indiana?",
+     "expect": [
+      "$2,982"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "home_equity_limit",
+   "engine": "lookup",
+   "topic": "P1-10",
+   "title": "Medicaid home equity limit (2026)",
+   "values": {
+    "facts": [
+     {
+      "label": "Home equity limit",
+      "value": "$752,000"
+     },
+     {
+      "label": "Applies when",
+      "value": "the applicant's equity interest in the home exceeds the limit (long-term care eligibility); exceptions include a spouse, minor or disabled child, or a sibling with an equity interest lawfully living in the home"
+     }
+    ]
+   },
+   "source": "IHCPPM 3005.10.05 (Indiana $752,000 limit, eff. 1/1/2026); CMS 2026 home equity range",
+   "effective": {
+    "from": "2026-01-01",
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "home equity",
+      "equity in my home",
+      "equity in our home",
+      "equity limit"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "What is the home equity limit for Medicaid long-term care in Indiana?",
+     "expect": [
+      "$752,000"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "asset_limit",
+   "engine": "lookup",
+   "topic": "P1-2",
+   "title": "The $2,000 individual asset (resource) limit",
+   "values": {
+    "facts": [
+     {
+      "label": "Individual asset limit",
+      "value": "$2,000"
+     },
+     {
+      "label": "Couple asset limit",
+      "value": "$3,000"
+     },
+     {
+      "label": "Counted as of",
+      "value": "the first moment of the month"
+     }
+    ]
+   },
+   "source": "SSA SSI resource limits; POMS SI 01110.600 (first-of-the-month counting)",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "asset limit",
+      "resource limit",
+      "assets can i have",
+      "money in the bank",
+      "savings can i have",
+      "in the bank and still",
+      "how much can i have in the bank",
+      "keep in the bank",
+      "assets am i allowed",
+      "resources am i allowed"
+     ]
+    ]
+   },
+   "exclude": [
+    "snap",
+    "food stamps",
+    "food assistance",
+    "qmb",
+    "slmb",
+    "qualified medicare",
+    "medicare savings"
+   ],
+   "golden": [
+    {
+     "q": "How much money can I have in the bank and still get Medicaid?",
+     "expect": [
+      "$2,000",
+      "$3,000"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "pna",
+   "engine": "lookup",
+   "topic": "P1-12",
+   "title": "Personal needs allowance ($52)",
+   "values": {
+    "facts": [
+     {
+      "label": "Personal needs allowance",
+      "value": "$52 per month"
+     },
+     {
+      "label": "Who gets it",
+      "value": "a person in a nursing facility or on an HCBS waiver keeps this amount of income each month for personal needs (the waiver allowance equals the Special Income Level personal needs standard)"
+     }
+    ]
+   },
+   "source": "IHCPPM post-eligibility (personal needs allowance); battery key B04",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "personal needs allowance",
+      "personal needs",
+      "pna"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "What is the personal needs allowance for someone on a Medicaid waiver?",
+     "expect": [
+      "$52"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "snap_resource_limit",
+   "engine": "lookup",
+   "topic": "P8-3",
+   "title": "Indiana SNAP resource limit ($5,000 under BBCE)",
+   "values": {
+    "facts": [
+     {
+      "label": "Indiana SNAP resource limit",
+      "value": "$5,000"
+     },
+     {
+      "label": "Basis",
+      "value": "broad-based categorical eligibility (BBCE); the $3,000 federal general limit is not the Indiana figure"
+     }
+    ]
+   },
+   "source": "FNS SNAP state page for Indiana (BBCE)",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "snap",
+      "food stamps",
+      "food assistance",
+      "ebt"
+     ],
+     [
+      "resource",
+      "asset",
+      "limit",
+      "bank",
+      "savings"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "What is the SNAP resource limit in Indiana?",
+     "expect": [
+      "$5,000"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "fs_annual_cap",
+   "engine": "coverage",
+   "topic": "P2-3",
+   "title": "Family Supports Waiver annual cap",
+   "values": {
+    "covered": true,
+    "program": "Family Supports (FS) Waiver",
+    "cap": {
+     "amount": 26482,
+     "period": "per year"
+    },
+    "conditions": "Spending on FS Waiver services is capped for the plan year; needs past the cap are a CIH / other-funding conversation with the case manager."
+   },
+   "source": "DDARS HCBS Waivers Provider Manual, Section 3.6",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "family supports",
+      "fs waiver"
+     ],
+     [
+      "cap",
+      "limit",
+      "per year",
+      "each year",
+      "spending",
+      "budget",
+      "how much"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "What is the Family Supports Waiver annual spending cap?",
+     "expect": [
+      "$26,482",
+      "per year"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "pest_control_hw",
+   "engine": "coverage",
+   "topic": "P3-21",
+   "title": "Pest Control (Health & Wellness / TBI waivers)",
+   "values": {
+    "covered": true,
+    "program": "Health & Wellness and TBI waivers",
+    "cap": {
+     "amount": 4000,
+     "period": "per plan year"
+    },
+    "conditions": "Covered as a waiver service under the manual's Pest Control section."
+   },
+   "source": "DDARS HCBS Waivers Provider Manual, Section 11.23",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "pest control",
+      "pest",
+      "pests",
+      "exterminator",
+      "bugs",
+      "insects"
+     ],
+     [
+      "waiver",
+      "medicaid",
+      "cover",
+      "covered",
+      "coverage"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "Does the Health and Wellness Waiver cover pest control?",
+     "expect": [
+      "Yes",
+      "$4,000",
+      "plan year"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "vehicle_mods_fs_cih",
+   "engine": "coverage",
+   "topic": "P2-43",
+   "title": "Vehicle Modifications (FS / CIH waivers)",
+   "values": {
+    "covered": true,
+    "program": "Family Supports and CIH waivers",
+    "cap": {
+     "amount": 15000,
+     "period": "per vehicle per 10 years"
+    },
+    "conditions": "Modifications beyond the cap in the 10-year window are not covered under this service."
+   },
+   "source": "DDARS HCBS Waivers Provider Manual, Sections 9.32 and 10.3",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "vehicle modification",
+      "van modification",
+      "car modification",
+      "modify my vehicle",
+      "modify our vehicle",
+      "wheelchair lift",
+      "hand controls"
+     ],
+     [
+      "waiver",
+      "cih",
+      "family supports",
+      "medicaid",
+      "cover",
+      "covered",
+      "cap",
+      "limit",
+      "cost",
+      "pay for"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "What is the vehicle modification cap on the CIH waiver?",
+     "expect": [
+      "Yes",
+      "$15,000",
+      "10 years"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "paid_relative_cap",
+   "engine": "coverage",
+   "topic": "P2-11",
+   "title": "Relatives as paid providers (40-hour weekly cap)",
+   "values": {
+    "covered": true,
+    "program": "DD waivers (FS / CIH)",
+    "cap": {
+     "amount": 40,
+     "period": "hours per week",
+     "plain": true
+    },
+    "conditions": "Legally responsible individuals (a spouse, or a parent of a minor) face extra bars: a spouse may be paid only under Structured Family Caregiving."
+   },
+   "source": "DDARS HCBS Waivers Provider Manual, Section 6.9",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "relative",
+      "family member",
+      "daughter",
+      "son",
+      "parent",
+      "brother",
+      "sister"
+     ],
+     [
+      "paid",
+      "pay",
+      "hours",
+      "caregiver"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "Can my daughter be a paid caregiver for me on the CIH waiver, and how many hours a week can she work?",
+     "expect": [
+      "40",
+      "hours per week"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "nemt_booking",
+   "engine": "lookup",
+   "topic": "P18",
+   "title": "Booking a Medicaid ride (Verida, fee-for-service)",
+   "values": {
+    "facts": [
+     {
+      "label": "Broker",
+      "value": "Verida (formerly Southeastrans)"
+     },
+     {
+      "label": "Book ahead",
+      "value": "at least 3 calendar days before the trip, up to 30 days ahead"
+     },
+     {
+      "label": "Phone",
+      "value": "1-855-325-7586"
+     },
+     {
+      "label": "Urgent trips",
+      "value": "available 24/7"
+     },
+     {
+      "label": "Trip allowance",
+      "value": "the fee-for-service benefit starts at 20 one-way trips per 12 months"
+     }
+    ]
+   },
+   "source": "Verida Indiana NEMT member rules (fetched 2026-10-16, v27/sources/02); battery key B36",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "nemt",
+      "verida",
+      "southeastrans",
+      "book a ride",
+      "ride to my appointment",
+      "rides to my appointments",
+      "medical transportation",
+      "ride to the doctor",
+      "ride to dialysis",
+      "ride to my doctor"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "How do I book a ride to my appointment through Medicaid, and how far ahead do I need to book?",
+     "expect": [
+      "Verida",
+      "3 calendar days",
+      "1-855-325-7586"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "dd_appeal_clocks",
+   "engine": "lookup",
+   "topic": "P11-1/2",
+   "title": "DD waiver appeal deadlines (calendar days)",
+   "values": {
+    "facts": [
+     {
+      "label": "Waiver service authorization appeal",
+      "value": "33 calendar days"
+     },
+     {
+      "label": "CIH allocation (OBA) appeal",
+      "value": "30 calendar days"
+     },
+     {
+      "label": "DD eligibility appeal",
+      "value": "15 calendar days"
+     },
+     {
+      "label": "Level-of-care appeal",
+      "value": "15 calendar days"
+     },
+     {
+      "label": "Reserved-capacity denial appeal",
+      "value": "18 calendar days"
+     },
+     {
+      "label": "Counted from",
+      "value": "the decision / service authorization date on the notice"
+     }
+    ]
+   },
+   "source": "DDARS HCBS Waivers Provider Manual, Section 7.3 (Appeal Process)",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "appeal"
+     ],
+     [
+      "how long",
+      "days",
+      "deadline",
+      "time to appeal",
+      "time limit",
+      "service authorization",
+      "reserved capacity",
+      "allocation",
+      "level of care"
+     ]
+    ]
+   },
+   "exclude": [
+    "snap",
+    "food stamps",
+    "food assistance"
+   ],
+   "golden": [
+    {
+     "q": "How long do I have to appeal a waiver service authorization decision?",
+     "expect": [
+      "33 calendar days",
+      "30 calendar days",
+      "15 calendar days",
+      "18 calendar days"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "qmb_limits",
+   "engine": "lookup",
+   "topic": "P13-1",
+   "title": "Qualified Medicare Beneficiary (QMB) limits, 2026",
+   "values": {
+    "facts": [
+     {
+      "label": "QMB income limit (2026)",
+      "value": "$1,350 per month"
+     },
+     {
+      "label": "QMB asset limit (2026)",
+      "value": "$9,950"
+     },
+     {
+      "label": "What QMB pays",
+      "value": "the Medicare Part B premium and Medicare cost-sharing"
+     }
+    ]
+   },
+   "source": "Medicaid.gov Medicare Savings Program standards table (2026); battery key B26",
+   "effective": {
+    "from": "2026-01-01",
+    "to": "2026-12-31"
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "qmb",
+      "qualified medicare beneficiary"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "What are the QMB income and asset limits for 2026?",
+     "expect": [
+      "$1,350",
+      "$9,950"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "hip_work_requirement",
+   "engine": "lookup",
+   "topic": "P5-3",
+   "title": "HIP work requirements (from January 1, 2027)",
+   "values": {
+    "facts": [
+     {
+      "label": "Work activity requirement",
+      "value": "80 hours per month"
+     },
+     {
+      "label": "Earnings alternative",
+      "value": "$580 per month in earnings"
+     },
+     {
+      "label": "Enforcement starts",
+      "value": "January 1, 2027"
+     }
+    ]
+   },
+   "source": "FSSA Healthy Indiana Plan work requirements page (staging registry topic hip_work_requirements)",
+   "effective": {
+    "from": "2026-01-01",
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "hip",
+      "healthy indiana"
+     ],
+     [
+      "work requirement",
+      "work requirements",
+      "hours do i have to work",
+      "work rules",
+      "working requirement"
+     ]
+    ]
+   },
+   "exclude": [
+    "exempt",
+    "exemption",
+    "excused"
+   ],
+   "golden": [
+    {
+     "q": "What are the HIP work requirements for 2027?",
+     "expect": [
+      "80 hours",
+      "$580",
+      "January 1, 2027"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "able_onset_age",
+   "engine": "lookup",
+   "topic": "P16-2",
+   "title": "ABLE account onset age (before 46)",
+   "values": {
+    "facts": [
+     {
+      "label": "Disability onset must be before",
+      "value": "age 46"
+     },
+     {
+      "label": "Changed by",
+      "value": "the ABLE Age Adjustment Act, effective January 1, 2026 (the older before-26 rule is stale)"
+     }
+    ]
+   },
+   "source": "IRS ABLE guidance (age 46, 2026)",
+   "effective": {
+    "from": "2026-01-01",
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "able"
+     ],
+     [
+      "onset",
+      "became disabled",
+      "disability started",
+      "disability began",
+      "oldest age",
+      "age limit",
+      "age my disability"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "What is the ABLE account onset age? How old could I have been when my disability started?",
+     "expect": [
+      "46"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "able_ssi_disregard",
+   "engine": "lookup",
+   "topic": "P16-3",
+   "title": "ABLE balance disregard for SSI ($100,000)",
+   "values": {
+    "facts": [
+     {
+      "label": "Disregarded for SSI",
+      "value": "the first $100,000 in an ABLE account"
+     },
+     {
+      "label": "Above that",
+      "value": "amounts over $100,000 count as a resource for SSI"
+     }
+    ]
+   },
+   "source": "SSA POMS ABLE sections (registry entry able_onset_age statement)",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "able"
+     ],
+     [
+      "ssi",
+      "disregard",
+      "balance",
+      "count against",
+      "count toward",
+      "affect my benefits"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "Does the money in my ABLE account count against my SSI?",
+     "expect": [
+      "$100,000"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "ssa_2027",
+   "engine": "year_indexed",
+   "topic": "P14-4/5",
+   "title": "Social Security amounts for 2027",
+   "values": {
+    "table": {
+     "2027": {
+      "cola_pct": 3.6,
+      "fbr_individual": 1029,
+      "fbr_couple": 1544,
+      "sga_nonblind": 1770,
+      "sga_blind": 2950,
+      "twp": 1270
+     }
+    },
+    "field_labels": {
+     "cola_pct": "Cost-of-living increase (percent)",
+     "fbr_individual": "SSI federal benefit rate, individual (per month)",
+     "fbr_couple": "SSI federal benefit rate, couple (per month)",
+     "sga_nonblind": "Substantial gainful activity, non-blind (per month)",
+     "sga_blind": "Substantial gainful activity, blind (per month)",
+     "twp": "Trial work period threshold (per month)"
+    }
+   },
+   "source": "SSA press release and 2027 COLA fact sheet, October 14, 2026",
+   "effective": {
+    "from": "2026-10-14",
+    "to": "2027-12-31"
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-03-01",
+   "triggers": {
+    "all": [
+     [
+      "2027"
+     ],
+     [
+      "social security",
+      "ssi",
+      "ssdi",
+      "cola",
+      "cost-of-living",
+      "cost of living",
+      "substantial gainful",
+      "trial work",
+      "federal benefit"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "What is the SSI federal benefit rate for 2027?",
+     "expect": [
+      "$1,029",
+      "3.6%"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "sfc_spouse_rule",
+   "engine": "coverage",
+   "topic": "P2-41/P3-26",
+   "title": "A spouse as paid caregiver: Structured Family Caregiving only",
+   "values": {
+    "covered": true,
+    "program": "CIH Waiver and Health & Wellness / TBI waivers (not a Family Supports Waiver service)",
+    "cap": null,
+    "conditions": "A spouse, or a parent of a minor, is a legally responsible individual and may be paid ONLY under Structured Family Caregiving: a per diem paid through a DDARS-approved provider agency, never directly, and only for extraordinary care beyond what the spouse would ordinarily provide. A spouse may NOT be paid under Attendant Care, Home and Community Assistance, Respite, or Participant-Directed Home Care. Claim notes must show the true spouse relationship."
+   },
+   "source": "DDARS HCBS Waivers Provider Manual, Sections 9.30 and 11.28 (Structured Family Caregiving; legally responsible individuals)",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "my wife",
+      "my husband",
+      "my spouse",
+      "wife",
+      "husband",
+      "spouse"
+     ],
+     [
+      "paid",
+      "pay",
+      "caregiver",
+      "care for",
+      "take care"
+     ]
+    ]
+   },
+   "exclude": [
+    "hip",
+    "healthy indiana",
+    "tax"
+   ],
+   "golden": [
+    {
+     "q": "Can my wife get paid to take care of me on my waiver?",
+     "expect": [
+      "Structured Family Caregiving",
+      "only",
+      "agency"
+     ]
+    }
+   ]
+  }
+ ]
+}
