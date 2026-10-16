@@ -12,7 +12,8 @@
              "jurisdiction_match": 1.05,
              "other_state_when_indiana_scoped": 0.8,
              "frequency_intent_with_frequency_figure": 1.1,
-             "figure_intent_with_figures": 1.05},
+             "figure_intent_with_figures": 1.05,
+             "ddars_manual_rule_prior": 1.25},
   "windows": {"excerpt_chars": 2000, "neighbours": 1},
   "notes": "Starting weights per the v22 consult design (weighted RRF, k=60). Tuning is a reporting exercise against the flip list, not a gate; weights live here, not in code, so a profile change never needs a server rebuild."
 }

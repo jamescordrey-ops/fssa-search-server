@@ -293,6 +293,294 @@
    "reason": "converted from the v21 _TOPIC_BRIDGES table (deterministic topic bridge for a chronic retrieval gap)",
    "case_id": null,
    "source": "_TOPIC_BRIDGES"
+  },
+  {
+   "id": "ddars-waitlist-entry",
+   "trigger_tokens": [
+    "waitlist"
+   ],
+   "trigger_texts": [
+    "waiting list",
+    "waiver waiting list",
+    "get on the waiting list",
+    "fs waiver waiting list",
+    "family supports waiting list",
+    "waiver waitlist"
+   ],
+   "require_tokens": [
+    "ddars",
+    "cih",
+    "bds"
+   ],
+   "require_texts": [
+    "family supports",
+    "fs waiver",
+    "developmental disability",
+    "developmental disabilities"
+   ],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "single statewide waiting list family supports waiver",
+      "pin_term": "statewide waiting list"
+     },
+     {
+      "phrase": "family supports waiver waiting list application date level of care",
+      "pin_term": "waiting list"
+     },
+     {
+      "phrase": "reserved capacity targeted individuals family supports waiver entrance",
+      "pin_term": "reserved capacity"
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "v27: DDARS battery shape - FS/CIH waitlist and entrance (manual sections 4.4-4.6); deterministic floor for the DDARS-manual sections enriched in Phase A3",
+   "case_id": null,
+   "source": "v27 DDARS enrichment (ddars_enrichment.jsonl)"
+  },
+  {
+   "id": "ddars-fs-at-18",
+   "trigger_tokens": [],
+   "trigger_texts": [
+    "turns 18",
+    "turning 18",
+    "turned 18",
+    "aged out of school",
+    "left school",
+    "graduated from school",
+    "permanently separated from school",
+    "ages 18 through 24"
+   ],
+   "require_tokens": [],
+   "require_texts": [
+    "family supports",
+    "fs waiver"
+   ],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "family supports waiver alternative icf iid community settings",
+      "pin_term": "family supports"
+     },
+     {
+      "phrase": "ages 18 through 24 aged out graduated separated school family supports",
+      "pin_term": "18 through 24"
+     },
+     {
+      "phrase": "annual waiver services cost cap family supports waiver poc service plan",
+      "pin_term": "family supports"
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "v27: DDARS battery shape - Family Supports at/after 18, incl. the 18-24 school-separation entrance (manual sections 3.6, 4.4-4.5)",
+   "case_id": null,
+   "source": "v27 DDARS enrichment (ddars_enrichment.jsonl)"
+  },
+  {
+   "id": "ddars-respite",
+   "trigger_tokens": [
+    "respite"
+   ],
+   "trigger_texts": [
+    "respite care",
+    "respite services"
+   ],
+   "require_tokens": [
+    "waiver",
+    "cih",
+    "ddars"
+   ],
+   "require_texts": [
+    "family supports",
+    "fs waiver",
+    "community integration",
+    "waiver"
+   ],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "respite services short-term basis absence need for relief caregivers",
+      "pin_term": "respite"
+     },
+     {
+      "phrase": "respite fs cih waivers individuals unable to care for themselves",
+      "pin_term": "respite"
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "v27: DDARS battery shape - waiver respite is caregiver relief, not hospice care (manual section 9.27; the B13 failure shape)",
+   "case_id": null,
+   "source": "v27 DDARS enrichment (ddars_enrichment.jsonl)"
+  },
+  {
+   "id": "ddars-moving-to-indiana",
+   "trigger_tokens": [],
+   "trigger_texts": [
+    "moving to indiana",
+    "moved to indiana",
+    "move to indiana",
+    "new to indiana",
+    "relocating to indiana",
+    "moving into indiana"
+   ],
+   "require_tokens": [
+    "waiver"
+   ],
+   "require_texts": [
+    "family supports",
+    "fs waiver",
+    "cih",
+    "developmental disability",
+    "developmental disabilities",
+    "waiver"
+   ],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "single statewide waiting list family supports waiver",
+      "pin_term": "statewide waiting list"
+     },
+     {
+      "phrase": "cih waiver reserved capacity priority criteria entrance",
+      "pin_term": "reserved capacity"
+     },
+     {
+      "phrase": "family supports waiver waiting list application local bds office",
+      "pin_term": "waiting list"
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "v27: DDARS battery shape - moving to Indiana and entering the DD waivers (manual sections 4.4-4.6)",
+   "case_id": null,
+   "source": "v27 DDARS enrichment (ddars_enrichment.jsonl)"
+  },
+  {
+   "id": "ddars-rhs",
+   "trigger_tokens": [
+    "rhs"
+   ],
+   "trigger_texts": [
+    "residential habilitation",
+    "residential habilitation and support",
+    "rhs hourly",
+    "rhs daily"
+   ],
+   "require_tokens": [
+    "cih"
+   ],
+   "require_texts": [
+    "cih",
+    "community integration",
+    "cih waiver"
+   ],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "residential habilitation and support hourly cih waiver",
+      "pin_term": "residential habilitation"
+     },
+     {
+      "phrase": "residential habilitation and support daily cih waiver",
+      "pin_term": "residential habilitation"
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "v27: DDARS battery shape - Residential Habilitation and Support, hourly and daily (manual sections 9.25-9.26)",
+   "case_id": null,
+   "source": "v27 DDARS enrichment (ddars_enrichment.jsonl)"
+  },
+  {
+   "id": "ddars-vehicle-modifications",
+   "trigger_tokens": [],
+   "trigger_texts": [
+    "vehicle modification",
+    "vehicle modifications",
+    "modify our vehicle",
+    "modify my vehicle",
+    "modify a vehicle",
+    "modify the vehicle",
+    "modify the van",
+    "wheelchair lift for our van",
+    "vehicle mods"
+   ],
+   "require_tokens": [
+    "waiver"
+   ],
+   "require_texts": [
+    "family supports",
+    "fs waiver",
+    "cih",
+    "waiver"
+   ],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "vehicle modifications adaptive equipment structural changes motor vehicle",
+      "pin_term": "vehicle modifications"
+     },
+     {
+      "phrase": "vehicle modifications cap one vehicle 10-year period household",
+      "pin_term": "vehicle modifications"
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "v27: DDARS battery shape - Vehicle Modifications under FS/CIH (manual section 9.32)",
+   "case_id": null,
+   "source": "v27 DDARS enrichment (ddars_enrichment.jsonl)"
+  },
+  {
+   "id": "ddars-sfc-lri-bars",
+   "trigger_tokens": [
+    "sfc"
+   ],
+   "trigger_texts": [
+    "structured family caregiving",
+    "can a parent be paid",
+    "can my parent be paid",
+    "can a spouse be paid",
+    "can my spouse be paid",
+    "can my wife be paid",
+    "can my husband be paid",
+    "parent be paid to care"
+   ],
+   "require_tokens": [
+    "waiver",
+    "cih",
+    "minor"
+   ],
+   "require_texts": [
+    "cih",
+    "family supports",
+    "fs waiver",
+    "waiver",
+    "minor"
+   ],
+   "target": {
+    "phrases": [
+     {
+      "phrase": "parents stepparents legal guardians minors may not receive payment waiver funded service",
+      "pin_term": "may not receive payment"
+     },
+     {
+      "phrase": "legally responsible individuals parents spouse may not be paid waiver supports",
+      "pin_term": "legally responsible"
+     },
+     {
+      "phrase": "structured family caregiving cih waiver living arrangement primary caregiver",
+      "pin_term": "structured family caregiving"
+     }
+    ],
+    "program_scope": null
+   },
+   "reason": "v27: DDARS battery shape - SFC/LRI payment bars for parents, guardians and spouses (manual sections 6.9, 9.30)",
+   "case_id": null,
+   "source": "v27 DDARS enrichment (ddars_enrichment.jsonl)"
   }
  ]
 }

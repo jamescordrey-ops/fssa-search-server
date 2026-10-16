@@ -1970,6 +1970,47 @@ def _v2_section_hit(sid, match, anchors=None):
     return hit
 
 
+# --- v27 (Change 3a): DDARS-manual rule prior --------------------
+# When the question carries DD-waiver rule signals, sections of
+# the DDARS HCBS Waivers Provider Manual get a multiplicative
+# prior from the retrieval profile (priors.ddars_manual_rule_
+# prior; absent key = 1.0, a no-op). The preference is a lift
+# inside DD scope only: no other source is demoted, and the
+# manual is identified from the loaded doc metadata (title /
+# source_file in _V2["docs"]), never from URL patterns.
+_DD_RULE_PHRASES = (
+    "family supports", "community integration and habilitation",
+    "fs waiver", "family supports waiver", "waiver waiting list",
+    "waiting list", "structured family caregiving",
+    "residential habilitation", "participant assistance and care",
+    "vehicle modification", "vehicle modifications",
+    "developmental disability", "developmental disabilities",
+    "waiver slot", "reserved capacity", "priority criteria",
+    "community integration", "habilitation waiver",
+)
+_DD_RULE_TOKENS = {"cih", "ddars", "respite", "bds"}
+
+
+def _dd_rule_question(q_low):
+    """True when the (lowercased) question carries a DD-waiver
+    rule signal: a manual/program phrase, or a standalone DD
+    token (exact-token, so 'cih' never fires inside a word)."""
+    if any(p in q_low for p in _DD_RULE_PHRASES):
+        return True
+    toks = set(re.findall(r"[a-z]+", q_low))
+    return bool(toks & _DD_RULE_TOKENS)
+
+
+def _is_ddars_manual_doc(doc):
+    """The DDARS HCBS Waivers Provider Manual, from the doc
+    metadata recorded at corpus build: 'hcbs waivers' or
+    'ddars' in the title or the source_file value."""
+    title = ((doc or {}).get("title") or "").lower()
+    sf = ((doc or {}).get("source_file") or "").lower()
+    return ("hcbs waivers" in title or "ddars" in title
+            or "hcbs waivers" in sf or "ddars" in sf)
+
+
 def _hybrid_search_v2(query, corpus, n, use_rewrite, use_rerank):
     """The v22 ask-path retrieval. Same return contract as
     hybrid_search: the top-n served hits."""
@@ -1984,6 +2025,12 @@ def _hybrid_search_v2(query, corpus, n, use_rewrite, use_rerank):
     if cached:
         _retr_pool_note({"q": query[:80], "n": n, "cached": True,
                          "engine": "v2", "gen": gen,
+                         # v27 (Change 2): a cached pool carries
+                         # no fresh band/registry/pin signal; the
+                         # fields ride as None (unknown) so the
+                         # thin test never reads them as False.
+                         "flat": None, "registry_hit": None,
+                         "pin_fired": None,
                          "pool": [{"t": (h.get("title") or "")[:70],
                                    "u": h.get("url"), "sel": i}
                                   for i, h in enumerate(cached[:28])]})
@@ -2109,6 +2156,11 @@ def _hybrid_search_v2(query, corpus, n, use_rewrite, use_rerank):
                    ("limit", "cost", "amount", "much", "income",
                     "pay", "rate", "dollar", "price", "fee",
                     "premium", "allowance", "keep"))
+    # v27 (Change 3a): the DDARS-manual rule prior, computed
+    # once per search (question signal + the profile value).
+    dd_rule_q = _dd_rule_question(q_low)
+    dd_prior = pr.get("ddars_manual_rule_prior", 1.0) \
+        if dd_rule_q else 1.0
     for sid, sc in list(scores.items()):
         meta = _V2["sections"].get(sid)
         if not meta:
@@ -2127,6 +2179,8 @@ def _hybrid_search_v2(query, corpus, n, use_rewrite, use_rerank):
             m *= pr.get("frequency_intent_with_frequency_figure", 1.1)
         if figure_q and figs:
             m *= pr.get("figure_intent_with_figures", 1.05)
+        if dd_prior != 1.0 and _is_ddars_manual_doc(doc):
+            m *= dd_prior
         scores[sid] = sc * m
 
     ranked = sorted(scores, key=lambda s: -scores[s])
@@ -2239,6 +2293,15 @@ def _hybrid_search_v2(query, corpus, n, use_rewrite, use_rerank):
             "w": True, "sel": sel.get(k)})
     _retr_pool_note({"q": query[:80], "n": n, "engine": "v2",
                      "gen": gen, "round2": round2,
+                     # v27 (Change 2): the thin-result signals,
+                     # surfaced mechanically on the pool note the
+                     # function already writes (the v2 return
+                     # contract is unchanged): the fused band
+                     # was flat, a registry-channel section was
+                     # in the fusion, a pin fired.
+                     "flat": bool(flat),
+                     "registry_hit": bool(channels.get("R")),
+                     "pin_fired": bool(pin_hits),
                      "typo_expansions": typo_alts, "pool": pool})
     for h in result:
         h.pop("_section", None)
@@ -3122,6 +3185,140 @@ def _retrieve_bundled(question, corp, n_ex, use_rewrite=True,
     return (guaranteed + rest)[:max(n_ex, len(guaranteed))], per_part
 
 
+def _merge_guaranteed(base, extra_lists, per_list=2):
+    """v27: the _retrieve_bundled merge discipline, generalized.
+    `base` hits keep their order and are NEVER displaced; each
+    extra source list contributes up to `per_list` hits not
+    already present, deduped on (url, excerpt[:60])."""
+    out = list(base)
+    seen = {(h["url"], h["excerpt"][:60]) for h in out}
+    for lst in extra_lists:
+        taken = 0
+        for h in lst or ():
+            if taken >= per_list:
+                break
+            key = (h["url"], h["excerpt"][:60])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(h)
+            taken += 1
+    return out
+
+
+def _v27_run_cerebras(question, corp, n_ex, use_rewrite,
+                      use_rerank, merged, state):
+    """v27 (Change 1): run the Cerebras expansion seat ONCE for
+    this ask (the ask context's v27_cerebras_ran flag is the
+    once-guard) and merge its phrasings' hits into `merged`
+    under the guarantee discipline. Returns (merged, phrasings).
+    Fail-open throughout: no key, a seat failure, or an empty
+    expansion leaves `merged` untouched. When a key is present
+    the run is recorded on the ask's pool-note channel (the
+    `cerebras` field: {used, phrasings, ms, fail_open}) exactly
+    the way other retrieval facts reach the ask record; with no
+    key nothing is recorded and retrieval is byte-for-byte the
+    pre-v27 behavior."""
+    ctx = _ask_ctx()
+    if ctx.v27_cerebras_ran:
+        state["ran"] = True
+        return merged, []
+    ctx.v27_cerebras_ran = True
+    state["ran"] = True
+    key_present = bool(_cerebras_key())
+    t0 = time.monotonic()
+    phrasings = []
+    if key_present:
+        try:
+            phrasings = _cerebras_expand(question) or []
+        except Exception:
+            phrasings = []
+    info = {"used": bool(phrasings),
+            "phrasings": list(phrasings),
+            "ms": int((time.monotonic() - t0) * 1000),
+            "fail_open": bool(key_present and not phrasings)}
+    state["info"] = info
+    if key_present:
+        _retr_pool_note({"q": question[:80], "engine": "v27",
+                         "cerebras": info})
+    if not phrasings:
+        return merged, []
+    lists = []
+    for ph in phrasings:
+        try:
+            lists.append(hybrid_search(
+                ph, corpus=corp, n=6, use_rewrite=use_rewrite,
+                use_rerank=use_rerank))
+        except Exception:
+            lists.append([])
+    return _merge_guaranteed(merged, lists, per_list=2), phrasings
+
+
+def _v27_thin_reasons(pools, hits, n_ex):
+    """v27 (Change 2): the THIN test on the first merged result,
+    evaluated once per retrieve_ask_hits call from the pool
+    notes that call's own searches wrote. Thin when any of:
+    (a) a v2 fused band was flat (the pool note's `flat`, the
+    < 0.045 / spread signal _hybrid_search_v2 already computes);
+    (b) fewer hits than requested; (c) no registry-channel hit
+    and no pin fired, on the searches that reported those
+    signals (a cached pool reports None = unknown and never
+    counts toward (c))."""
+    reasons = []
+    notes = [p for p in pools if isinstance(p, dict)]
+    if any(p.get("flat") for p in notes):
+        reasons.append("flat_band")
+    if len(hits) < n_ex:
+        reasons.append("short")
+    sig = [p for p in notes if p.get("registry_hit") is not None]
+    if sig and not any(p.get("registry_hit") for p in sig) \
+            and not any(p.get("pin_fired") for p in sig):
+        reasons.append("no_registry_or_pin")
+    return reasons
+
+
+def _v27_wider_pass(question, corp, n_ex, use_rewrite, use_rerank,
+                    merged, state):
+    """v27 (Change 2): ONE wider pass for this ask, never two
+    (the ask context's v27_wider_ran flag is the once-guard).
+    Cerebras expansion first when the seat is on and has not
+    already run for this ask; otherwise (seat already ran, seat
+    off, or the seat failed open) the deterministic widening:
+    SYNONYMS + growth expansions searched at increased depth.
+    Either way the merge is the guarantee discipline: the
+    existing hits are never displaced."""
+    ctx = _ask_ctx()
+    if ctx.v27_wider_ran:
+        return merged
+    ctx.v27_wider_ran = True
+    if _cerebras_key() and not ctx.v27_cerebras_ran:
+        merged, phrasings = _v27_run_cerebras(
+            question, corp, n_ex, use_rewrite, use_rerank,
+            merged, state)
+        if phrasings:
+            return merged
+    q_low = question.lower()
+    exps = []
+    for t in keywords(question):
+        for w in SYNONYMS.get(t, ()):
+            if w not in exps:
+                exps.append(w)
+    for gt in _growth_expansions(q_low):
+        if gt not in exps:
+            exps.append(gt)
+    if not exps:
+        return merged
+    widened = question + " " + " ".join(exps)
+    try:
+        extra = hybrid_search(widened, corpus=corp,
+                              n=max(n_ex * 2, n_ex + 6),
+                              use_rewrite=use_rewrite,
+                              use_rerank=use_rerank)
+    except Exception:
+        extra = []
+    return _merge_guaranteed(merged, [extra], per_list=2)
+
+
 def retrieve_ask_hits(question, corp, n_ex, use_rewrite=True,
                       use_rerank=True):
     """Retrieval for /ask (v11): for bundled narrative questions,
@@ -3132,15 +3329,36 @@ def retrieve_ask_hits(question, corp, n_ex, use_rewrite=True,
     v13: the bundled path now keys off the splitter alone, so a short
     question with 3+ real parts gets per-part retrieval too; the
     narrative check only decided excerpt count, which the caller
-    still owns."""
+    still owns.
+    v27: after that first merged result, (Change 1) the Cerebras
+    expansion seat's phrasings are retrieved under the same
+    guarantee discipline when the seat is on, and (Change 2) a
+    THIN first result earns ONE wider pass for the ask (Cerebras
+    if it has not run yet, else the deterministic widening)."""
+    pools0 = len(_ask_ctx().retr_pools)
     parts = _split_subquestions(question)
     if not parts:
-        return hybrid_search(question, corpus=corp, n=n_ex,
-                             use_rewrite=use_rewrite,
-                             use_rerank=use_rerank)
-    merged, _per_part = _retrieve_bundled(
-        question, corp, n_ex, use_rewrite=use_rewrite,
-        use_rerank=use_rerank)
+        merged = hybrid_search(question, corpus=corp, n=n_ex,
+                               use_rewrite=use_rewrite,
+                               use_rerank=use_rerank)
+    else:
+        merged, _per_part = _retrieve_bundled(
+            question, corp, n_ex, use_rewrite=use_rewrite,
+            use_rerank=use_rerank)
+    first_pools = _retr_pools_since(pools0)
+    state = {"ran": False, "info": None}
+    # v27 (Change 1): the expansion seat (fail-open; a no-key
+    # seat leaves the merged result and the record untouched).
+    merged, _ph = _v27_run_cerebras(
+        question, corp, n_ex, use_rewrite, use_rerank, merged,
+        state)
+    # v27 (Change 2): THIN is evaluated once, on the FIRST
+    # merged result's own pool notes; one wider pass at most.
+    if _v27_thin_reasons(first_pools, merged, n_ex) \
+            and not _ask_ctx().v27_wider_ran:
+        merged = _v27_wider_pass(
+            question, corp, n_ex, use_rewrite, use_rerank,
+            merged, state)
     return merged
 
 
@@ -4398,6 +4616,49 @@ VERIFIED_FIGURES += [
 ]
 
 
+# v27 (Change 4, REGISTRY_PREP Class R item 8): the DD appeal
+# clocks, verified directly against the DDARS HCBS Waivers
+# Provider Manual text (Section 7's time-limits list) during
+# the registry prep. The clocks are day counts, not dollars,
+# so the entry carries figures=() (the backpay_exclusion
+# pattern): serving them as checker "figures" would wrongly
+# admit $33 / $30 / $15 / $18 as grounded dollar amounts.
+VERIFIED_FIGURES += [
+    {
+        "id": "dd_appeal_clocks",
+        "title": "DD waiver appeal deadlines (33 / 30 / 15 / 18 calendar days)",
+        "groups": [
+            {"tokens": {"ddars", "cih"},
+             "phrases": ("family supports", "fs waiver",
+                         "developmental disability",
+                         "developmental disabilities",
+                         "dd waiver", "waiver service authorization",
+                         "objective-based allocation",
+                         "reserved capacity", "priority criteria")},
+            {"tokens": {"appeal", "appeals", "deadline"},
+             "phrases": ("how long do i have to appeal",
+                         "appeal deadline", "time to appeal",
+                         "appeal a denial", "appeal the decision",
+                         "appeal my allocation", "appeal a decision")},
+        ],
+        "statement": (
+            "DD waiver appeal deadlines run from the decision / "
+            "service authorization date, in calendar days: waiver "
+            "service authorization appeals must be received within "
+            "33 calendar days; CIH objective-based allocation "
+            "(OBA) appeals within 30 calendar days; DD eligibility "
+            "appeals and level-of-care (LOC) appeals within 15 "
+            "calendar days; and an appeal of a denial for entrance "
+            "to the waiver via priority (reserved-capacity) "
+            "criteria within 18 calendar days."),
+        "source": ("DDARS HCBS Waivers Provider Manual, "
+                   "Section 7 (Appeal Process), time limits for "
+                   "requesting appeals"),
+        "figures": (),
+    },
+]
+
+
 def _groups_hit(groups, q_low, q_tokens):
     """True when EVERY trigger group hits: a group hits when any of its
     word tokens or substring phrases appears in the question. Shared by
@@ -4870,7 +5131,355 @@ MECHANISMS = [
         "missing": ("no excerpt covers the difficulty-of-care "
                     "exclusion (IRS Notice 2014-7) for caregiver pay"),
     },
+    # --- v27 (Change 4, REGISTRY_PREP Class R): the entries below
+    # were verified against the source texts named in each entry
+    # (v27/sources/ + KEY_VERIFICATION.md + the DDARS manual text)
+    # before they were written; no Class U item is included.
+    {
+        "id": "nemt_booking",
+        "title": "NEMT rides: Verida broker, book 3 calendar days ahead",
+        "groups": [
+            {"tokens": {"nemt", "verida", "southeastrans"},
+             "phrases": ("non-emergency transportation",
+                         "nonemergency transportation",
+                         "medical transportation", "ride to my doctor",
+                         "rides to my appointments",
+                         "get to my doctor appointments",
+                         "get to the doctor", "transportation to my appointments",
+                         "help getting to my appointments",
+                         "book a ride", "schedule a ride")},
+            {"tokens": {"ride", "rides", "transportation", "transport",
+                        "trip", "trips", "book", "booking", "schedule"},
+             "phrases": ("doctor appointments", "medical appointments",
+                         "to my appointments", "a ride")},
+        ],
+        "required": [
+            {"label": "names Verida as the fee-for-service NEMT broker",
+             "any": ("verida",)},
+            {"label": "states booking at least 3 calendar days ahead",
+             "any": ("3 calendar days", "three calendar days",
+                     "3 days in advance", "three days in advance",
+                     "at least 3 days", "at least three days")},
+            {"label": "gives the reservation line 1-855-325-7586",
+             "any": ("1-855-325-7586", "855-325-7586")},
+        ],
+        "forbidden": ("2 business days", "two business days"),
+        "prompt": (
+            "Non-emergency medical transportation (NEMT) is an "
+            "Indiana Medicaid benefit. Fee-for-service / Traditional "
+            "Medicaid rides are brokered by Verida, Inc. (the same "
+            "company formerly named Southeastrans, renamed per IHCP "
+            "banner BR202252): book at least 3 CALENDAR days ahead "
+            "(up to 30 days ahead) on the reservation line "
+            "1-855-325-7586; urgent trips are available 24/7. The "
+            "older '2 business days' figure is superseded and must "
+            "not be given. Managed-care members book through their "
+            "health plan instead. The FFS benefit starts at 20 "
+            "one-way trips per 12-month period, with more available "
+            "when the doctor requests them and they are approved."),
+        "sufficiency_terms": ("verida", "non-emergency transportation",
+                              "nemt"),
+        "retry_query": "Verida non-emergency transportation Indiana "
+                       "Medicaid book ride 3 calendar days",
+        "missing": ("no excerpt covers Verida NEMT booking for "
+                    "Indiana Medicaid (3 calendar days ahead, "
+                    "1-855-325-7586)"),
+    },
+    {
+        "id": "aba_epsdt",
+        "title": "ABA therapy: an EPSDT / state-plan benefit, not a waiver service",
+        "groups": [
+            {"tokens": {"aba"},
+             "phrases": ("applied behavior analysis",
+                         "aba therapy", "autism therapy")},
+            {"tokens": {"cover", "covers", "covered", "coverage",
+                        "qualify", "eligible", "autism", "child",
+                        "daughter", "son"},
+             "phrases": ("does medicaid cover", "is aba covered",
+                         "for my daughter", "for my son",
+                         "for my child", "with autism")},
+        ],
+        "required": [
+            {"label": "frames ABA as an EPSDT / state-plan benefit, "
+                      "not a waiver service",
+             "any": ("epsdt", "early and periodic screening",
+                     "state plan", "state-plan")},
+            {"label": "states the under-21 limit (21+ ended Oct 1, 2026)",
+             "any": ("under 21", "under the age of 21",
+                     "younger than 21", "age 21 and older",
+                     "21 and older", "20 and younger",
+                     "through age 20")},
+        ],
+        "forbidden": ("waiver service under the family supports",
+                      "waiver service under the cih"),
+        "prompt": (
+            "Applied behavior analysis (ABA) therapy for autism is "
+            "covered by Indiana Medicaid as a STATE-PLAN / EPSDT "
+            "benefit, NOT as a waiver service (it is on no FS/CIH "
+            "waiver service list; the DDARS manual routes under-21s "
+            "to ABA under EPSDT). EPSDT-only from April 1, 2026 "
+            "(IHCP BT202627): members under 21 only, and ABA for "
+            "members 21 and older ended October 1, 2026. Prior "
+            "authorization is required (BT201606, criteria at "
+            "405 IAC 5-3). Comprehensive ABA has a 4,000-hour "
+            "lifetime allocation based on medical necessity, then "
+            "up to 15 hours per week of targeted ABA."),
+        "sufficiency_terms": ("epsdt", "applied behavior analysis",
+                              "aba"),
+        "retry_query": "ABA therapy EPSDT Indiana Medicaid under 21 "
+                       "prior authorization 4000 hours",
+        "missing": ("no excerpt covers ABA therapy as an EPSDT / "
+                    "state-plan benefit for members under 21"),
+        "canonical_claims": (
+            "ABA therapy is not an FS or CIH waiver service; it is "
+            "an Indiana Medicaid state-plan benefit delivered "
+            "through EPSDT for members under 21.",
+            "Comprehensive ABA carries a 4,000-hour lifetime "
+            "allocation based on medical necessity; after that "
+            "allocation, targeted ABA is available at up to 15 "
+            "hours per week.",
+        ),
+    },
+    {
+        "id": "parental_income_disregard_waiver",
+        "title": "Parental income disregarded for a child in an HCBS waiver category",
+        "groups": [
+            {"tokens": {"parental", "parents"},
+             "phrases": ("my income", "parents' income",
+                         "parent's income", "income count against",
+                         "count against my child",
+                         "count against my son",
+                         "count against my daughter")},
+            {"tokens": {"waiver"},
+             "phrases": ("family supports", "fs waiver", "cih",
+                         "community integration and habilitation",
+                         "hcbs waiver", "medicaid waiver",
+                         "waiver category")},
+            {"tokens": {"child", "minor"},
+             "phrases": ("my child", "my son", "my daughter",
+                         "under 18", "child under 18")},
+        ],
+        "required": [
+            {"label": "states parental income is disregarded for a "
+                      "child under 18 in a waiver category",
+             "any": ("disregarded", "not factored", "not counted",
+                     "does not count", "is not counted")},
+            {"label": "states the child is budgeted on the child's "
+                      "own income against 300% of the SSI maximum",
+             "any": ("300%", "300 percent", "three hundred percent")},
+        ],
+        "forbidden": (),
+        "prompt": (
+            "For a child under 18 in an HCBS waiver category (FS, "
+            "CIH, H&W, TBI), parental income is DISREGARDED: the "
+            "child is budgeted on the child's own income against "
+            "300% of the SSI maximum. Do NOT apply SSI parental "
+            "deeming or ABD parental deeming to a waiver-category "
+            "application."),
+        "sufficiency_terms": ("parental income", "disregarded",
+                              "300%"),
+        "retry_query": "parental income disregarded child under 18 "
+                       "HCBS waiver category 300% SSI",
+        "missing": ("no excerpt states the parental income "
+                    "disregard for a child in an HCBS waiver "
+                    "category"),
+    },
+    {
+        "id": "parental_deeming_abd_child",
+        "title": "Parental deeming for an ABD-category child living at home (IHCPPM 3455.05.20)",
+        "groups": [
+            {"tokens": {"parental", "parents", "deeming", "deemed"},
+             "phrases": ("my income", "parents' income",
+                         "parent's income", "count against my child",
+                         "count against my son",
+                         "count against my daughter",
+                         "deemed to my child", "deeming")},
+            {"tokens": {"abd"},
+             "phrases": ("aged blind disabled", "aged, blind",
+                         "ma a", "ma b", "ma d", "abd category",
+                         "abd categories", "non-magi",
+                         "disability category")},
+            {"tokens": {"child", "minor"},
+             "phrases": ("my child", "my son", "my daughter",
+                         "living at home", "lives at home",
+                         "living with", "at home")},
+        ],
+        "required": [
+            {"label": "states parental income is deemed to an "
+                      "ABD-category child living with a parent",
+             "any": ("deemed", "deeming")},
+            {"label": "states the living-with-a-parent / under-18 "
+                      "conditions (or a stated exception)",
+             "any": ("living with", "lives with", "at home",
+                     "under age 18", "under 18", "waiver",
+                     "institutionalized", "student")},
+        ],
+        "forbidden": (),
+        "prompt": (
+            "For ABD-category Medicaid (MA A, MA B, MA D), IHCPPM "
+            "section 3455.05.20 applies parental deeming: income "
+            "is deemed from a non-recipient biological or adoptive "
+            "parent when the child is under 18, lives with the "
+            "parent(s), and is NOT receiving HCBS waiver services. "
+            "No deeming applies when the child is institutionalized "
+            "(from the month after admission), and a student "
+            "between 18 and 21 is not deemed a parent's income. "
+            "The section's allocations (stepparent, siblings) come "
+            "off the parent's income before the excess over the "
+            "Chapter 3000 standard is deemed to the child. (This "
+            "entry carries no general-disregard figure: the "
+            "fetched section text names it inconsistently, so no "
+            "figure is served until that is resolved.)"),
+        "sufficiency_terms": ("3455.05.20", "parental deemed income",
+                              "parental deeming"),
+        "retry_query": "IHCPPM 3455.05.20 parental deemed income "
+                       "ABD child living with parent",
+        "missing": ("no excerpt covers IHCPPM 3455.05.20 parental "
+                    "deeming for an ABD-category child at home"),
+    },
+    {
+        "id": "magi_childrens_categories_parent_income",
+        "title": "MAGI children's categories (Hoosier Healthwise / CHIP): parents' income counts as household MAGI",
+        "groups": [
+            {"tokens": {"parental", "parents", "magi"},
+             "phrases": ("my income", "parents' income",
+                         "parent's income", "household income",
+                         "count against my child",
+                         "count against my son",
+                         "count against my daughter")},
+            {"tokens": {"chip", "magi"},
+             "phrases": ("hoosier healthwise", "children's health "
+                         "insurance", "childrens health insurance",
+                         "ma 4", "ma 8", "masi")},
+            {"tokens": {"child", "minor"},
+             "phrases": ("my child", "my son", "my daughter",
+                         "children's category", "childrens category")},
+        ],
+        "required": [
+            {"label": "states the parents' income counts as "
+                      "household MAGI for these categories",
+             "any": ("household magi", "magi", "household income")},
+            {"label": "names a MAGI children's category or program "
+                      "(Hoosier Healthwise / CHIP / MA 4 / MA 8 / MASI)",
+             "any": ("hoosier healthwise", "chip", "ma 4", "ma 8",
+                     "masi")},
+        ],
+        "forbidden": (),
+        "prompt": (
+            "For the MAGI children's categories (Hoosier "
+            "Healthwise / CHIP: Indiana categories MA 4, MA 8 and "
+            "MASI), eligibility is based on total HOUSEHOLD MAGI "
+            "under 42 CFR 435.603, so the parents' income in the "
+            "home counts as household income. This is not SSI "
+            "deeming and not the waiver-category disregard: the "
+            "mechanism is household MAGI composition."),
+        "sufficiency_terms": ("magi", "hoosier healthwise", "435.603"),
+        "retry_query": "Hoosier Healthwise CHIP household MAGI "
+                       "parents income 42 CFR 435.603 children",
+        "missing": ("no excerpt covers household MAGI counting "
+                    "parents' income for Hoosier Healthwise / CHIP "
+                    "children's categories"),
+    },
+    {
+        "id": "ssi_parental_deeming",
+        "title": "SSI parental deeming: a minor living at home; stops at 18",
+        "groups": [
+            {"tokens": {"ssi", "deeming", "deemed"},
+             "phrases": ("supplemental security income", "deeming",
+                         "deemed income", "deemed resources")},
+            {"tokens": {"parental", "parents", "parent"},
+             "phrases": ("my income", "parents' income",
+                         "parent's income", "parental income",
+                         "parental resources")},
+            {"tokens": {"child", "minor"},
+             "phrases": ("my child", "my son", "my daughter",
+                         "living at home", "lives at home",
+                         "minor child")},
+        ],
+        "required": [
+            {"label": "states SSI deems parental income (and "
+                      "resources) to a minor living at home",
+             "any": ("deemed", "deeming", "deems")},
+            {"label": "states deeming stops at 18",
+             "any": ("stops at 18", "ends at 18", "through the "
+                     "month the child attains 18", "attains 18",
+                     "turns 18", "at age 18", "until 18")},
+        ],
+        "forbidden": (),
+        "prompt": (
+            "For SSI, parental income and resources are deemed to "
+            "a child under 18 who lives in the same household as "
+            "the parent(s) (or a parent's spouse): the child is "
+            "presumed to share in the parents' income. Deeming "
+            "continues through the month the child attains 18 and "
+            "then stops. Parental resources above the parent's own "
+            "resource limit (individual if one parent, couple if "
+            "two) are deemed whether or not available to the child."),
+        "sufficiency_terms": ("deeming", "parent-to-child", "si 013"),
+        "retry_query": "SSI parental deeming child under 18 living "
+                       "at home stops at 18 POMS SI 013",
+        "missing": ("no excerpt covers SSI parental deeming to a "
+                    "minor living at home (stops at 18)"),
+    },
+    {
+        "id": "supported_decision_making",
+        "title": "Supported decision-making agreements (IC 29-3-14)",
+        "groups": [
+            {"tokens": {"sdm"},
+             "phrases": ("supported decision-making",
+                         "supported decision making",
+                         "supported decision making agreement",
+                         "decision-making agreement",
+                         "guardianship alternative",
+                         "alternatives to guardianship",
+                         "less restrictive alternative",
+                         "instead of guardianship",
+                         "avoid guardianship")},
+            {"tokens": {"adult", "guardianship", "guardian"},
+             "phrases": ("my adult child", "adult child",
+                         "make decisions", "make her own decisions",
+                         "make his own decisions",
+                         "help making decisions",
+                         "help with decisions")},
+        ],
+        "required": [
+            {"label": "names supported decision-making (agreements) "
+                      "under IC 29-3-14",
+             "any": ("supported decision", "ic 29-3-14", "29-3-14")},
+            {"label": "states the adult keeps decision-making "
+                      "authority (an agreement is not evidence of "
+                      "incapacity)",
+             "any": ("keeps decision", "retains decision",
+                     "decision-making authority",
+                     "decision making authority",
+                     "not evidence of incapacity",
+                     "not be considered evidence of incapacity",
+                     "adult's own decision", "adult keeps")},
+        ],
+        "forbidden": (),
+        "prompt": (
+            "Indiana has supported decision-making agreements "
+            "under IC 29-3-14 (added by SEA 380 / P.L.68-2019, "
+            "effective July 1, 2019): an adult voluntarily names "
+            "one or more supporters who help the adult make, "
+            "communicate and effectuate life decisions, and the "
+            "ADULT keeps decision-making authority. A court may "
+            "not consider an adult's execution of an SDM agreement "
+            "as evidence of incapacity, and an agreement does not "
+            "stop the adult acting independently. An agreement may "
+            "not supplant a guardian's authority unless the "
+            "guardian consents in writing. SDM is a less "
+            "restrictive alternative to guardianship, not a "
+            "replacement ordered by a court."),
+        "sufficiency_terms": ("supported decision", "29-3-14",
+                              "sdm agreement"),
+        "retry_query": "Indiana supported decision making agreement "
+                       "IC 29-3-14 adult keeps decision authority",
+        "missing": ("no excerpt covers Indiana supported "
+                    "decision-making agreements (IC 29-3-14)"),
+    },
 ]
+
 
 
 def _mechanism_matches(question, pool=None):
@@ -5414,6 +6023,152 @@ _GROQ_USAGE_FILE = "groq_usage.json"
 _GROQ_LOCK = threading.Lock()
 _GROQ_STATE = {"date": "", "requests": 0, "list_usd": 0.0,
                "broken": False, "loaded": False}
+# --- v27 (Change 1): the Cerebras expansion seat -------------------
+# A pre-retrieval expansion seat beside the other provider seats:
+# one fast Cerebras chat call rewrites the asker's question into
+# 3-5 phrasings in manual/program vocabulary, and those phrasings
+# are retrieved under the bundled merge discipline (see
+# retrieve_ask_hits). Quota-only provider (no dollar cost is
+# booked); the key loads via _nim_key_for exactly like the other
+# seats (env var first, else the gitignored key file in the
+# server dir). Missing key = seat OFF, and retrieval is
+# byte-for-byte the pre-v27 behavior. The seat is FAIL-OPEN by
+# construction: any failure returns [] and no exception escapes
+# _cerebras_expand, ever.
+CEREBRAS_BASE_URL = "https://api.cerebras.ai/v1"
+CEREBRAS_KEY_ENV = "CEREBRAS_API_KEY"
+CEREBRAS_KEY_FILE = "cerebras_key.txt"
+CEREBRAS_DEFAULT_MODEL = "gpt-oss-120b"
+CEREBRAS_TIMEOUT_S = 4.0  # STRICT total budget (connect + read)
+CEREBRAS_MAX_TOKENS = 1024  # >= 512: gpt-oss-120b is a reasoning
+# model; a small cap spends the budget in the reasoning field and
+# returns empty content (verified in the connector record).
+# Cloudflare rejects the default Python user agent with 403 /
+# Error 1010 (verified production fact, 2026-10-16); the request
+# MUST send a non-default UA.
+CEREBRAS_USER_AGENT = "curl/8.5.0"
+_CEREBRAS_EXPAND_CACHE = {}
+
+
+def _cerebras_key():
+    return _nim_key_for(CEREBRAS_KEY_ENV, CEREBRAS_KEY_FILE)
+
+
+def _cerebras_model():
+    """The seat's model: the retrieval profile's key when one is
+    present there (a "cerebras_model" string, or a "model" inside
+    a "cerebras" object), else the verified catalog default."""
+    profile = (_V2.get("profile") or {}) if isinstance(
+        globals().get("_V2"), dict) else {}
+    m = profile.get("cerebras_model")
+    if not m and isinstance(profile.get("cerebras"), dict):
+        m = profile["cerebras"].get("model")
+    return m or CEREBRAS_DEFAULT_MODEL
+
+
+def _cerebras_post(payload, timeout):
+    """One POST to the Cerebras chat endpoint. Returns the reply
+    text; raises on any transport/HTTP/shape failure (the caller
+    is fail-open). A single attempt on the caller's timeout: the
+    seat's strict budget leaves no room for the shared
+    transport's retry, so this seat does not ride _nim_text."""
+    key = _cerebras_key()
+    if not key:
+        raise RuntimeError("cerebras API key not configured "
+                           "(cerebras_key.txt missing)")
+    req = urllib.request.Request(
+        CEREBRAS_BASE_URL + "/chat/completions",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json",
+                 "Authorization": "Bearer " + key,
+                 "User-Agent": CEREBRAS_USER_AGENT},
+        method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        data = json.loads(resp.read())
+    content = data["choices"][0]["message"]["content"]
+    if not content or not content.strip():
+        raise RuntimeError("cerebras returned an empty response")
+    return content
+
+
+def _cerebras_parse_phrasings(text):
+    """Parse the seat's plain list output into 3-5 phrasings.
+    The multi-line extension of _clean_llm_list_output's
+    discipline: preamble lines (a lead-in ending in ':' with no
+    question content, 'here are ...' lines) are skipped, list
+    furniture (bullets, numbering, quotes) is stripped, and a
+    single comma-separated line splits on its commas."""
+    out = []
+    for raw in (text or "").split("\n"):
+        line = raw.strip().strip('"').strip()
+        line = re.sub(r"^(?:[-*\u2022]|\d+[.)])\s+", "", line)
+        if not line:
+            continue
+        low = line.lower()
+        if low.startswith(("here are", "here is", "sure,")):
+            continue
+        if line.endswith(":") and "?" not in line \
+                and len(line.split()) <= 8:
+            continue  # a lead-in line, not a phrasing
+        parts = [line]
+        if "," in line and "?" not in line and len(line) > 60:
+            parts = [p.strip() for p in line.split(",")]
+        for p in parts:
+            if len(p.split()) >= 3 and p not in out:
+                out.append(p)
+        if len(out) >= 5:
+            break
+    return out[:5]
+
+
+def _cerebras_expand(question):
+    """3-5 rewrites of `question` in manual/program vocabulary
+    (the words a policy manual would use), or [] on ANY failure:
+    no key, timeout, HTTP error, empty or unparseable output.
+    FAIL-OPEN: no exception escapes, ever. Results are cached
+    per (question, generation), the v2 result cache's
+    discipline, so repeats never pay for the seat twice."""
+    try:
+        if not _cerebras_key():
+            return []
+        gen = _V2.get("generation") if isinstance(
+            globals().get("_V2"), dict) else None
+        cache_key = (question, gen)
+        cached = _cache_get(_CEREBRAS_EXPAND_CACHE, cache_key)
+        if cached is not None:
+            return list(cached)
+        prompt = (
+            "Rewrite the question below as 3 to 5 separate search "
+            "phrasings, one per line, each phrased in the "
+            "vocabulary an Indiana Medicaid / FSSA policy manual "
+            "or program document would use for the same question "
+            "(program names, manual terms, service names). "
+            "Output ONLY the phrasings, one per line, no "
+            "numbering, no explanations.\n\n"
+            f"Question: {question}")
+        payload = {
+            "model": _cerebras_model(),
+            "messages": [
+                {"role": "system",
+                 "content": "You are a precise retrieval utility. "
+                            "Reply with only the requested "
+                            "output, no explanations."},
+                {"role": "user", "content": prompt}],
+            "temperature": 0.2,
+            "max_tokens": CEREBRAS_MAX_TOKENS,
+        }
+        text = _cerebras_post(payload, timeout=CEREBRAS_TIMEOUT_S)
+        phrasings = _cerebras_parse_phrasings(text)
+        if len(phrasings) < 3:
+            # Unparseable as a 3-5 phrasing list: treat as the
+            # empty result (fail-open), and do not cache it.
+            return []
+        _cache_put(_CEREBRAS_EXPAND_CACHE, cache_key, phrasings)
+        return list(phrasings)
+    except Exception:
+        return []
+
+
 # The xAI grant-mode credit ledger (visibility only; only
 # accrues when XAI_FREE_CREDITS is True — see above).
 _XAI_CREDIT_FILE = "xai_spend.json"
@@ -5636,7 +6391,11 @@ class _AskContext:
                  # (per-unit section states for the job
                  # snapshot, §6.4) and the job record whose
                  # "cancel" flag the Stop button sets (§5.2).
-                 "tracker", "cancel_rec")
+                 "tracker", "cancel_rec",
+                 # v27 (Changes 1+2): per-ask seat/wider-pass
+                 # state (the seat runs at most once per ask,
+                 # the wider pass at most once per ask).
+                 "v27_cerebras_ran", "v27_wider_ran")
 
     def __init__(self):
         self.cost = 0.0
@@ -5685,6 +6444,9 @@ class _AskContext:
         # v24: see __slots__ note.
         self.tracker = None
         self.cancel_rec = None
+        # v27 (Changes 1+2): see __slots__ note.
+        self.v27_cerebras_ran = False
+        self.v27_wider_ran = False
 
 
 _ASK_CTX_VAR = contextvars.ContextVar("fssa_ask_ctx", default=None)
