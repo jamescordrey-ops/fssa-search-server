@@ -12268,6 +12268,21 @@ def _record_ask(record):
 # Claimed answers ship under the badge "code" with their
 # figures, arithmetic, and source line in the answer text;
 # they cost $0 and never enter the AI answer cache.
+#
+# v27.2 (BUG-1): the router no longer claims in file order.
+# It collects every candidate whose triggers match AND whose
+# engine can answer, then applies a specificity guard:
+# candidates are scored by (matched phrase count, matched
+# phrase characters, longest matched first-group phrase);
+# rows flagged "general" in the data (fs_annual_cap) rank
+# below every specific row and are blocked outright when
+# the question names a service or topic another row's
+# first trigger group covers; an exact specificity tie
+# between specific rows falls through rather than guess.
+# Trigger phrases were widened for all 21 rows in the data
+# (natural phrasings, article and word-order variants,
+# plurals, plain-words synonyms); the conjunctive
+# all-groups structure is unchanged.
 
 _FRONT_DOOR_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -12337,6 +12352,62 @@ def _fd_triggers_match(row, qn):
         if not any(p in qn for p in group):
             return False
     return True
+
+
+# v27.2 specificity guard (BUG-1 in v27.1/BUGS.md). A row
+# flagged "general" in the data (fs_annual_cap) answers
+# program-general questions; it may NOT claim a question
+# that names a specific service or topic another row
+# covers. The detectors are the other rows' FIRST
+# trigger-group phrases (the group that names each row's
+# own topic), minus program words too broad to name a
+# service and phrases too short to mean anything alone.
+_FD_GENERAL_STOPWORDS = frozenset(("waiver", "able", "hip"))
+
+
+def _fd_match_specificity(row, qn):
+    """Specificity of a matched row for this question:
+    (matched phrase count, matched phrase chars, longest
+    matched first-group phrase). More matched topic
+    language is a more specific claim on the question."""
+    count = 0
+    chars = 0
+    first_best = 0
+    for gi, group in enumerate(row["triggers"]["all"]):
+        hits = [p for p in group if p in qn]
+        count += len(hits)
+        chars += sum(len(p) for p in hits)
+        if gi == 0 and hits:
+            first_best = max(len(p) for p in hits)
+    return (count, chars, first_best)
+
+
+def _fd_names_covered_topic(qn, general_row):
+    """True when the question names a service/topic that
+    some specific row's first trigger group covers: the
+    general row must not claim it. A phrase that merely
+    names the general row's own program (it contains, or
+    is contained in, one of the general row's first-group
+    phrases) is not a service name and never blocks."""
+    gen_phrases = []
+    for row in _FRONT_DOOR_ROWS:
+        if row.get("general"):
+            gen_phrases.extend(row["triggers"]["all"][0])
+    for row in _FRONT_DOOR_ROWS:
+        if row is general_row or row.get("general"):
+            continue
+        groups = row["triggers"]["all"]
+        if not groups:
+            continue
+        for phrase in groups[0]:
+            if len(phrase) < 4 or phrase in _FD_GENERAL_STOPWORDS:
+                continue
+            if any(gp in phrase or phrase in gp
+                   for gp in gen_phrases):
+                continue
+            if phrase in qn:
+                return True
+    return False
 
 
 def _fd_row_active(row, today):
@@ -12746,6 +12817,15 @@ def _front_door_try(question):
         qn = _fd_norm(question)
         amounts = _fd_amounts(question)
         today = datetime.date.today().isoformat()
+        # v27.2: collect every candidate (triggers match AND
+        # the engine proves it can answer), then pick by the
+        # specificity guard instead of file order. Specific
+        # rows outrank general rows; a general row is blocked
+        # outright when the question names a covered
+        # service/topic; an exact specificity tie between
+        # specific rows is ambiguity and falls through.
+        specific = []
+        general = []
         for row in _FRONT_DOOR_ROWS:
             if not _fd_row_active(row, today):
                 continue
@@ -12757,6 +12837,22 @@ def _front_door_try(question):
             got = engine(row, question, amounts)
             if got is None:
                 continue
+            entry = (_fd_match_specificity(row, qn), row, got)
+            if row.get("general"):
+                general.append(entry)
+            else:
+                specific.append(entry)
+        winner = None
+        if specific:
+            specific.sort(key=lambda e: e[0], reverse=True)
+            if (len(specific) == 1
+                    or specific[0][0] != specific[1][0]):
+                winner = specific[0]
+        elif general:
+            if not _fd_names_covered_topic(qn, general[0][1]):
+                winner = general[0]
+        if winner is not None:
+            _spec, row, got = winner
             text, inputs = got
             answer = text + "\n\n" + _fd_source_line(row)
             _fd_log({"decision": "claimed", "row": row["id"],

@@ -1,7 +1,7 @@
 {
  "schema": 1,
  "generated": "2026-10-16",
- "notes": "v27.1 front door WIRED rows. Every row traces to FRONT_DOOR_DATA.md in this tree; UNVERIFIED rows are absent on purpose.",
+ "notes": "v27.1 front door WIRED rows, trigger phrases widened in v27.2 (BUG-1). Every row traces to FRONT_DOOR_DATA.md in the v27.1 tree; UNVERIFIED rows are absent on purpose. fs_annual_cap is flagged general: the router's specificity guard keeps it from claiming a question that names a service or topic another row covers.",
  "rows": [
   {
    "id": "csra",
@@ -29,7 +29,10 @@
       "my spouse",
       "spouse",
       "community spouse",
-      "csra"
+      "csra",
+      "community spouse resource allowance",
+      "spouse resource allowance",
+      "spousal resource allowance"
      ],
      [
       "savings",
@@ -37,7 +40,18 @@
       "asset",
       "resources",
       "resource",
-      "countable"
+      "countable",
+      "money",
+      "our money",
+      "bank",
+      "bank account",
+      "bank accounts",
+      "accounts",
+      "funds",
+      "investments",
+      "savings account",
+      "checking account",
+      "retirement accounts"
      ]
     ]
    },
@@ -87,14 +101,50 @@
     "all": [
      [
       "liability",
+      "patient liability",
+      "my liability",
+      "his liability",
+      "her liability",
+      "their liability",
+      "liability amount",
       "mmmna",
+      "mmna",
       "monthly maintenance",
+      "monthly maintenance needs",
+      "maintenance needs allowance",
+      "maintenance allowance",
+      "minimum monthly maintenance",
       "spousal allocation",
       "spouse allocation",
       "allocation",
+      "spousal impoverishment",
+      "income allowance",
       "owe the nursing home",
+      "owe the nursing",
+      "how much will i owe",
+      "how much do i owe",
+      "how much does he owe",
+      "how much does she owe",
+      "how much will he owe",
+      "how much will she owe",
+      "amount i owe",
       "pay the nursing home",
-      "share of cost"
+      "pay for nursing home",
+      "nursing home bill",
+      "nursing home gets",
+      "goes to the nursing home",
+      "go to the nursing home",
+      "cost of the nursing home",
+      "share of cost",
+      "share toward",
+      "contribute toward",
+      "contribution toward",
+      "keep from my income",
+      "keep from his income",
+      "keep from her income",
+      "of my income can",
+      "of his income can",
+      "of her income can"
      ]
     ]
    },
@@ -146,17 +196,34 @@
     "all": [
      [
       "transfer",
+      "transferred",
+      "transferring",
+      "transfers",
       "gave",
+      "give",
+      "giving",
       "give away",
       "giving away",
       "gave away",
+      "given away",
+      "gives away",
+      "gifted",
+      "gift",
       "signed over",
+      "signed the house over",
       "deeded",
-      "gift"
+      "deeded over",
+      "put the house in",
+      "sold for less",
+      "sold below",
+      "handed over",
+      "donated",
+      "donation"
      ],
      [
       "penalty",
       "penalized",
+      "penalty period",
       "medicaid",
       "nursing home",
       "long-term care",
@@ -164,7 +231,23 @@
       "waiver",
       "benefits",
       "apply",
-      "applying"
+      "applying",
+      "lookback",
+      "look-back",
+      "look back",
+      "ineligibility",
+      "disqualified",
+      "disqualify",
+      "how long",
+      "waiting period",
+      "wait",
+      "qualify for medicaid",
+      "get medicaid",
+      "before applying",
+      "five year",
+      "five-year",
+      "5 year",
+      "5-year"
      ]
     ]
    },
@@ -173,11 +256,22 @@
     "gives me",
     "giving me",
     "give us",
+    "gives us",
+    "giving us",
+    "gave me",
+    "given me",
+    "given to me",
+    "gave to me",
     "wants to give me",
     "going to give me",
+    "will give me",
+    "will give us",
     "gift to me",
     "left me",
-    "inherit"
+    "left to me",
+    "inherit",
+    "inherited",
+    "inheritance"
    ],
    "golden": [
     {
@@ -224,18 +318,45 @@
    "triggers": {
     "all": [
      [
-      "able"
+      "able",
+      "able account",
+      "able accounts",
+      "my able",
+      "an able",
+      "the able",
+      "indiana able",
+      "investable",
+      "529a",
+      "able plan"
      ],
      [
       "contribution",
+      "contributions",
       "contribute",
+      "contribution limit",
       "put in",
+      "put into",
+      "put money",
+      "add money",
+      "add to",
       "deposit",
+      "deposit limit",
       "limit",
       "cap",
       "annual",
+      "annual limit",
+      "yearly",
+      "yearly limit",
       "per year",
-      "max"
+      "each year",
+      "a year",
+      "max",
+      "maximum contribution",
+      "how much can i put",
+      "how much can we put",
+      "most i can put",
+      "allowed to contribute",
+      "allowed to put"
      ]
     ]
    },
@@ -281,15 +402,45 @@
    "triggers": {
     "all": [
      [
-      "waiver"
+      "waiver",
+      "medicaid waiver",
+      "hcbs waiver",
+      "hcbs",
+      "home and community waiver",
+      "family supports waiver",
+      "cih waiver",
+      "health and wellness waiver"
      ],
      [
       "income limit",
       "income cap",
+      "monthly income limit",
+      "gross income limit",
       "how much income",
+      "income allowed",
+      "income i can have",
+      "income can i have",
+      "income can he have",
+      "income can she have",
+      "allowed to earn",
+      "allowed to make",
+      "how much can i earn",
+      "how much can i make",
+      "how much money can i make",
+      "how much money can i earn",
+      "earn and still",
+      "make and still",
       "earn too much",
       "make too much",
-      "income can"
+      "too much income",
+      "over the income",
+      "income can",
+      "income test",
+      "special income level",
+      "income qualification",
+      "qualify on income",
+      "300 percent",
+      "300%"
      ]
     ]
    },
@@ -330,9 +481,34 @@
     "all": [
      [
       "home equity",
+      "home equity limit",
+      "how much equity",
+      "equity can i have",
+      "equity can we have",
+      "equity can he have",
+      "equity can she have",
+      "equity allowed",
       "equity in my home",
       "equity in our home",
-      "equity limit"
+      "equity in the home",
+      "equity in his home",
+      "equity in her home",
+      "equity in their home",
+      "equity in your home",
+      "equity in a home",
+      "equity limit",
+      "equity cap",
+      "equity ceiling",
+      "too much equity",
+      "value of my home",
+      "value of our home",
+      "value of his home",
+      "value of her home",
+      "my home is worth",
+      "our home is worth",
+      "home is worth",
+      "house is worth",
+      "house worth"
      ]
     ]
    },
@@ -378,14 +554,38 @@
      [
       "asset limit",
       "resource limit",
+      "asset test",
+      "resource test",
+      "asset cap",
+      "resource cap",
+      "maximum assets",
+      "max assets",
       "assets can i have",
+      "assets can i keep",
+      "assets am i allowed",
+      "resources am i allowed",
       "money in the bank",
+      "money can i keep",
       "savings can i have",
+      "savings can i keep",
       "in the bank and still",
       "how much can i have in the bank",
       "keep in the bank",
-      "assets am i allowed",
-      "resources am i allowed"
+      "how much money can i have",
+      "how much cash",
+      "cash can i have",
+      "how much am i allowed to have",
+      "am i allowed to keep",
+      "allowed to keep in the bank",
+      "bank balance",
+      "have in savings",
+      "in savings and still",
+      "keep in savings",
+      "money in savings",
+      "count as assets",
+      "countable asset limit",
+      "assets and still qualify",
+      "assets and still get"
      ]
     ]
    },
@@ -396,7 +596,9 @@
     "qmb",
     "slmb",
     "qualified medicare",
-    "medicare savings"
+    "medicare savings",
+    "community spouse",
+    "csra"
    ],
    "golden": [
     {
@@ -437,7 +639,32 @@
      [
       "personal needs allowance",
       "personal needs",
-      "pna"
+      "personal needs money",
+      "personal allowance",
+      "needs allowance",
+      "pna",
+      "money for personal needs",
+      "spending money",
+      "keep for personal needs",
+      "keep for myself",
+      "keep for himself",
+      "keep for herself",
+      "how much do i keep",
+      "how much can i keep",
+      "how much does he keep",
+      "how much does she keep",
+      "how much will i keep",
+      "how much of my income do i keep",
+      "how much of my check",
+      "keep from my check",
+      "keep from his check",
+      "keep from her check",
+      "allowance in the nursing home",
+      "nursing home allowance",
+      "monthly allowance",
+      "keep each month",
+      "keep every month",
+      "keep per month"
      ]
     ]
    },
@@ -478,7 +705,12 @@
     "all": [
      [
       "snap",
+      "snap benefits",
+      "snap program",
+      "my snap",
+      "indiana snap",
       "food stamps",
+      "food stamp",
       "food assistance",
       "ebt"
      ],
@@ -487,7 +719,16 @@
       "asset",
       "limit",
       "bank",
-      "savings"
+      "savings",
+      "money",
+      "cash",
+      "in the bank",
+      "have in savings",
+      "how much can i have",
+      "allowed to have",
+      "counts toward",
+      "count toward",
+      "counts against"
      ]
     ]
    },
@@ -504,6 +745,7 @@
    "id": "fs_annual_cap",
    "engine": "coverage",
    "topic": "P2-3",
+   "general": true,
    "title": "Family Supports Waiver annual cap",
    "values": {
     "covered": true,
@@ -525,7 +767,11 @@
     "all": [
      [
       "family supports",
-      "fs waiver"
+      "family supports waiver",
+      "the family supports",
+      "family support waiver",
+      "fs waiver",
+      "fs program"
      ],
      [
       "cap",
@@ -533,8 +779,27 @@
       "per year",
       "each year",
       "spending",
+      "spending cap",
+      "spending limit",
       "budget",
-      "how much"
+      "total budget",
+      "overall cap",
+      "overall budget",
+      "how much",
+      "annual",
+      "annual cap",
+      "yearly",
+      "yearly cap",
+      "a year",
+      "in a year",
+      "for the year",
+      "spend",
+      "maximum",
+      "max",
+      "allowed",
+      "per plan year",
+      "plan year",
+      "each plan year"
      ]
     ]
    },
@@ -573,10 +838,33 @@
     "all": [
      [
       "pest control",
+      "pest control service",
+      "pest control treatment",
       "pest",
       "pests",
+      "pest service",
+      "pest treatment",
+      "pest removal",
       "exterminator",
+      "exterminators",
       "bugs",
+      "bed bugs",
+      "bedbugs",
+      "bed bug",
+      "roaches",
+      "cockroach",
+      "cockroaches",
+      "ant problem",
+      "mice",
+      "rats",
+      "rodent",
+      "rodents",
+      "termites",
+      "termite",
+      "infestation",
+      "infested",
+      "spray for bugs",
+      "bug problem",
       "insects"
      ],
      [
@@ -584,7 +872,21 @@
       "medicaid",
       "cover",
       "covered",
-      "coverage"
+      "coverage",
+      "pay",
+      "pays",
+      "pay for",
+      "will pay",
+      "help pay",
+      "help with",
+      "get rid of",
+      "program",
+      "service",
+      "does medicaid",
+      "through medicaid",
+      "through the waiver",
+      "on the waiver",
+      "under the waiver"
      ]
     ]
    },
@@ -624,12 +926,67 @@
     "all": [
      [
       "vehicle modification",
+      "vehicle modifications",
       "van modification",
+      "van modifications",
       "car modification",
+      "car modifications",
       "modify my vehicle",
       "modify our vehicle",
+      "modify a vehicle",
+      "modify the vehicle",
+      "modify my van",
+      "modify our van",
+      "modify a van",
+      "modify the van",
+      "modify my car",
+      "modify our car",
+      "modify a car",
+      "modify the car",
+      "modifying a vehicle",
+      "modifying my vehicle",
+      "modifying the vehicle",
+      "modifying my van",
+      "vehicle mods",
+      "van mods",
+      "car mods",
+      "adapt a vehicle",
+      "adapt the vehicle",
+      "adapt my vehicle",
+      "adapt our vehicle",
+      "adapt a van",
+      "adapt my van",
+      "adapt our van",
+      "adapt a car",
+      "vehicle adaptation",
+      "vehicle adaptations",
+      "van adaptation",
+      "vehicle conversion",
+      "van conversion",
+      "wheelchair van conversion",
+      "accessible van conversion",
+      "make my van accessible",
+      "make our van accessible",
+      "make my vehicle accessible",
+      "make a vehicle accessible",
+      "make my car accessible",
       "wheelchair lift",
-      "hand controls"
+      "lift for my van",
+      "lift for our van",
+      "lift for my vehicle",
+      "lift in my van",
+      "ramp for my van",
+      "vehicle ramp",
+      "lowered floor",
+      "raised roof",
+      "power transfer seat",
+      "transfer seat",
+      "tie-downs",
+      "tie downs",
+      "wheelchair hoist",
+      "scooter hoist",
+      "hand controls",
+      "hand control"
      ],
      [
       "waiver",
@@ -641,7 +998,24 @@
       "cap",
       "limit",
       "cost",
-      "pay for"
+      "pay for",
+      "pay",
+      "pays",
+      "will pay",
+      "would pay",
+      "help pay",
+      "help with the cost",
+      "how much",
+      "how often",
+      "again",
+      "every",
+      "once every",
+      "cost of",
+      "price",
+      "program",
+      "does the waiver",
+      "through the waiver",
+      "on the waiver"
      ]
     ]
    },
@@ -682,18 +1056,68 @@
     "all": [
      [
       "relative",
+      "a relative",
       "family member",
+      "family members",
+      "member of my family",
+      "someone in my family",
       "daughter",
+      "my daughter",
       "son",
+      "my son",
       "parent",
       "brother",
-      "sister"
+      "my brother",
+      "sister",
+      "my sister",
+      "mother",
+      "my mother",
+      "father",
+      "my father",
+      "mom",
+      "my mom",
+      "dad",
+      "my dad",
+      "granddaughter",
+      "my granddaughter",
+      "grandson",
+      "my grandson",
+      "niece",
+      "my niece",
+      "nephew",
+      "my nephew",
+      "aunt",
+      "my aunt",
+      "uncle",
+      "my uncle",
+      "cousin",
+      "my cousin"
      ],
      [
       "paid",
       "pay",
+      "get paid",
+      "be paid",
+      "paid to care",
+      "paid caregiver",
       "hours",
-      "caregiver"
+      "hours a week",
+      "hours per week",
+      "hours each week",
+      "a week",
+      "per week",
+      "weekly",
+      "caregiver",
+      "work as",
+      "working as",
+      "care for me",
+      "take care of me",
+      "care for him",
+      "care for her",
+      "help me at home",
+      "provide care",
+      "hire",
+      "hired"
      ]
     ]
    },
@@ -748,14 +1172,51 @@
      [
       "nemt",
       "verida",
+      "verida ride",
+      "verida rides",
       "southeastrans",
       "book a ride",
+      "book my ride",
+      "booking a ride",
+      "booking my ride",
+      "book rides",
+      "schedule a ride",
+      "schedule my ride",
+      "schedule rides",
+      "arrange a ride",
+      "arrange my ride",
+      "get a ride",
+      "getting a ride",
       "ride to my appointment",
+      "a ride to my appointment",
       "rides to my appointments",
+      "ride to appointments",
+      "rides to appointments",
       "medical transportation",
+      "non-emergency medical transportation",
+      "nonemergency medical transportation",
+      "non-emergency transportation",
+      "transportation to my appointment",
+      "transportation to appointments",
+      "transportation to the doctor",
+      "book transportation",
+      "schedule transportation",
       "ride to the doctor",
+      "rides to the doctor",
+      "ride to the hospital",
       "ride to dialysis",
-      "ride to my doctor"
+      "ride to my dialysis",
+      "ride to my doctor",
+      "medical ride",
+      "medical rides",
+      "ride benefit",
+      "rides benefit",
+      "ride service",
+      "appointment ride",
+      "doctor ride",
+      "dialysis ride",
+      "trip to my appointment",
+      "trips to my appointments"
      ]
     ]
    },
@@ -813,18 +1274,53 @@
    "triggers": {
     "all": [
      [
-      "appeal"
+      "appeal",
+      "appeals",
+      "appealing",
+      "appealed",
+      "appeal process",
+      "file an appeal",
+      "filing an appeal",
+      "dispute",
+      "contest a decision",
+      "challenge the decision"
      ],
      [
       "how long",
+      "how many days",
+      "how much time",
       "days",
+      "days do i have",
+      "days to appeal",
+      "days to file",
       "deadline",
+      "appeal deadline",
+      "filing deadline",
+      "file by",
       "time to appeal",
       "time limit",
+      "time frame",
+      "timeframe",
+      "window to appeal",
+      "calendar days",
+      "from the notice",
+      "notice date",
+      "date on the notice",
+      "decision date",
       "service authorization",
       "reserved capacity",
       "allocation",
-      "level of care"
+      "level of care",
+      "denied",
+      "denial",
+      "service denial",
+      "services denied",
+      "waiver decision",
+      "waiver service",
+      "eligibility decision",
+      "oba",
+      "dd eligibility",
+      "days after"
      ]
     ]
    },
@@ -877,7 +1373,15 @@
     "all": [
      [
       "qmb",
-      "qualified medicare beneficiary"
+      "qmb program",
+      "qmb plan",
+      "qmb limits",
+      "qmb in indiana",
+      "qmb eligibility",
+      "qualify for qmb",
+      "the qmb",
+      "qualified medicare beneficiary",
+      "qualified medicare beneficiaries"
      ]
     ]
    },
@@ -923,14 +1427,37 @@
     "all": [
      [
       "hip",
-      "healthy indiana"
+      "hip program",
+      "hip plan",
+      "my hip",
+      "the hip",
+      "indiana hip",
+      "healthy indiana",
+      "healthy indiana plan"
      ],
      [
       "work requirement",
       "work requirements",
       "hours do i have to work",
       "work rules",
-      "working requirement"
+      "working requirement",
+      "have to work",
+      "need to work",
+      "required to work",
+      "must work",
+      "work activity",
+      "work activities",
+      "job requirement",
+      "employment requirement",
+      "hours of work",
+      "hours worked",
+      "work or earn",
+      "earn to keep",
+      "keep my hip",
+      "keep hip",
+      "lose my hip",
+      "gateway to work",
+      "community engagement"
      ]
     ]
    },
@@ -977,16 +1504,42 @@
    "triggers": {
     "all": [
      [
-      "able"
+      "able",
+      "able account",
+      "able accounts",
+      "my able",
+      "an able",
+      "the able"
      ],
      [
       "onset",
+      "onset age",
+      "age of onset",
       "became disabled",
       "disability started",
       "disability began",
+      "how old",
+      "old was i",
+      "old could i be",
+      "old could i have been",
+      "age when",
+      "age i became",
+      "age he became",
+      "age she became",
+      "became disabled at",
+      "disabled at",
       "oldest age",
       "age limit",
-      "age my disability"
+      "age my disability",
+      "before age",
+      "turn 46",
+      "age 46",
+      "age 26",
+      "qualify for an able",
+      "eligible for an able",
+      "open an able",
+      "who can open",
+      "who qualifies"
      ]
     ]
    },
@@ -1026,15 +1579,49 @@
    "triggers": {
     "all": [
      [
-      "able"
+      "able",
+      "able account",
+      "able accounts",
+      "my able",
+      "an able",
+      "the able",
+      "able balance",
+      "able savings"
      ],
      [
       "ssi",
       "disregard",
+      "disregarded",
       "balance",
       "count against",
       "count toward",
-      "affect my benefits"
+      "count",
+      "counts",
+      "counted",
+      "against my ssi",
+      "against ssi",
+      "affect ssi",
+      "affect my ssi",
+      "affect my benefits",
+      "ssi benefits",
+      "ssi check",
+      "lose my ssi",
+      "lose ssi",
+      "resource for ssi",
+      "ssi resource",
+      "ssi limit",
+      "does ssi count",
+      "will ssi count",
+      "can ssi count",
+      "ignored by ssi",
+      "ssi ignore",
+      "excluded for ssi",
+      "exempt for ssi",
+      "over the limit",
+      "too much in my able",
+      "how much can i have in my able",
+      "saved in my able",
+      "money in my able"
      ]
     ]
    },
@@ -1082,18 +1669,42 @@
    "triggers": {
     "all": [
      [
-      "2027"
+      "2027",
+      "in 2027",
+      "for 2027",
+      "next year",
+      "coming year"
      ],
      [
       "social security",
+      "social security amount",
+      "social security increase",
       "ssi",
+      "ssi amount",
+      "ssi payment",
+      "ssi check",
       "ssdi",
+      "ssdi amount",
       "cola",
+      "cola increase",
       "cost-of-living",
       "cost of living",
+      "cost-of-living increase",
+      "cost of living increase",
       "substantial gainful",
+      "gainful activity",
       "trial work",
-      "federal benefit"
+      "trial work period",
+      "twp",
+      "federal benefit",
+      "federal benefit rate",
+      "benefit rate",
+      "fbr",
+      "benefit amount",
+      "payment standard",
+      "how much is ssi",
+      "how much will ssi",
+      "increase for ssi"
      ]
     ]
    },
@@ -1138,9 +1749,33 @@
      [
       "paid",
       "pay",
+      "get paid",
+      "be paid",
+      "paid for caring",
+      "paid for care",
+      "pay her",
+      "pay him",
+      "pay my wife",
+      "pay my husband",
+      "pay my spouse",
       "caregiver",
+      "caregiver pay",
+      "caregiving",
+      "paid through",
+      "per diem",
+      "structured family",
+      "sfc",
       "care for",
-      "take care"
+      "care for him",
+      "care for her",
+      "take care",
+      "take care of him",
+      "take care of her",
+      "look after me",
+      "look after him",
+      "look after her",
+      "help me at home",
+      "helps me at home"
      ]
     ]
    },
