@@ -511,6 +511,19 @@ else falls through to Quick/Deep untouched and is logged
 by topic to front_door_log.jsonl as the expansion queue.
 Code answers ship under the badge "code" with their
 figures and source in the answer text, at $0.
+
+v27.2 (2026-10-16): front-door trigger widening for all
+21 rows + the router specificity guard (BUG-1).
+
+v28 (2026-10-16): corpus generation g0006 (the v28 scrape:
+WIC, childcare/children and behavioral-health member
+layers, VR/BRS, safety & aging front doors, energy &
+housing, child support, disaster, SHIP, school meals,
+Tier 3 trees) plus the tax-credit registry entries
+(decision f6: EITC as a dated TY2025/TY2026 pair, Child
+Tax Credit / ACTC, and the Indiana ABLE contribution
+credit) — registry only, no front-door rows for tax
+credits, every figure traced to a source in v28/sources/.
 """
 
 import datetime
@@ -4668,6 +4681,166 @@ VERIFIED_FIGURES += [
                    "Section 7 (Appeal Process), time limits for "
                    "requesting appeals"),
         "figures": (),
+    },
+]
+
+# v28 (decision f6): tax credits join the registry as
+# verified figures, NOT corpus text — the figures change
+# every tax year and stale corpus text is exactly how the
+# section 3006 divisor went wrong. Every figure below is
+# traced to a source saved in v28/sources/ (IRS EITC tables
+# page for TY2025; Rev. Proc. 2025-32 + IRS newsroom
+# IR-2025-103 for TY2026; IRS Child Tax Credit page for
+# TY2025; Indiana LSA fiscal note LS 6935 for HB 1303 +
+# Indiana DOR Schedule IN-ABLE for the Indiana ABLE
+# credit). No front-door rows: registry entries only.
+_EITC_GROUPS = [
+    {"tokens": {"eitc"},
+     "phrases": ("earned income tax credit",
+                 "earned income credit",
+                 "earned income tax credits")},
+]
+VERIFIED_FIGURES += [
+    {
+        "id": "eitc_amounts_2026",
+        "family": "eitc_amounts",
+        "title": ("Earned Income Tax Credit maximums "
+                  "(tax year 2026)"),
+        "groups": _EITC_GROUPS,
+        "statement": (
+            "For tax year 2026 the federal Earned Income "
+            "Tax Credit (EITC) maximums are $8,231 (three "
+            "or more qualifying children), $7,316 (two), "
+            "$4,427 (one), and $664 (none). The credit "
+            "reaches zero at AGI of $70,244 / $65,899 / "
+            "$58,863 / $26,820 for married filing jointly "
+            "(three or more / two / one / none) and "
+            "$62,974 / $58,629 / $51,593 / $19,540 for "
+            "other filing statuses. Investment income over "
+            "$12,200 disqualifies the credit entirely. "
+            "For tax year 2025 the maximums were $8,046 / "
+            "$7,152 / $4,328 / $649."),
+        "source": ("IRS Revenue Procedure 2025-32, "
+                   "section .06 (TY2026 EITC table); IRS "
+                   "newsroom IR-2025-103 (TY2026 maximum "
+                   "$8,231, up from $8,046 for TY2025)"),
+        "figures": (8231.0, 7316.0, 4427.0, 664.0, 12200.0,
+                    70244.0, 65899.0, 58863.0, 26820.0,
+                    62974.0, 58629.0, 51593.0, 19540.0),
+        "valid_from": "2026-01-01", "valid_to": "2026-12-31",
+    },
+    {
+        "id": "eitc_amounts_2025",
+        "family": "eitc_amounts",
+        "title": ("Earned Income Tax Credit maximums "
+                  "(tax year 2025)"),
+        "groups": _EITC_GROUPS,
+        "statement": (
+            "For tax year 2025 the federal Earned Income "
+            "Tax Credit (EITC) maximums were $8,046 "
+            "(three or more qualifying children), $7,152 "
+            "(two), $4,328 (one), and $649 (none). AGI "
+            "had to be under $61,555 / $57,310 / $50,434 "
+            "/ $19,104 filing single, head of household, "
+            "or married filing separately (three or more "
+            "/ two / one / none), or $68,675 / $64,430 / "
+            "$57,554 / $26,214 married filing jointly, "
+            "and investment income could not exceed "
+            "$11,950. For tax year 2026 the maximums are "
+            "$8,231 / $7,316 / $4,427 / $664."),
+        "source": ("IRS Earned Income Tax Credit tables "
+                   "page, tax year 2025 (AGI limits, "
+                   "investment income limit $11,950, "
+                   "maximum credit amounts)"),
+        "figures": (8046.0, 7152.0, 4328.0, 649.0, 11950.0,
+                    61555.0, 57310.0, 50434.0, 19104.0,
+                    68675.0, 64430.0, 57554.0, 26214.0),
+        "valid_from": "2025-01-01", "valid_to": "2025-12-31",
+    },
+    {
+        "id": "child_tax_credit_amounts",
+        "title": ("Child Tax Credit / Additional Child Tax "
+                  "Credit ($2,200 / $1,700)"),
+        "groups": [
+            {"tokens": {"ctc"},
+             "phrases": ("child tax credit",
+                         "additional child tax credit")},
+        ],
+        "statement": (
+            "The federal Child Tax Credit is worth up to "
+            "$2,200 per qualifying child (under 17 at "
+            "year-end) for tax year 2025. The refundable "
+            "Additional Child Tax Credit (ACTC) is up to "
+            "$1,700 per qualifying child and requires at "
+            "least $2,500 of earned income; the section "
+            "24(d) refundable amount stays $1,700 for tax "
+            "year 2026. The full credit runs up to AGI of "
+            "$200,000 ($400,000 married filing jointly), "
+            "with a partial credit above that, and the "
+            "Credit for Other Dependents is up to $500 "
+            "per dependent. The pre-2025 Child Tax Credit "
+            "figure of $2,000 is stale and must not be "
+            "given as the current amount."),
+        "source": ("IRS Child Tax Credit page (TY2025: "
+                   "$2,200 per qualifying child, ACTC up "
+                   "to $1,700, $2,500 earned-income floor, "
+                   "$200,000 / $400,000 full-credit AGI "
+                   "limits, $500 Credit for Other "
+                   "Dependents); IRS Revenue Procedure "
+                   "2025-32, section .05(2) (TY2026 "
+                   "section 24(d) amount $1,700)"),
+        "figures": (2200.0, 1700.0, 500.0, 2500.0,
+                    200000.0, 400000.0),
+        "valid_from": "2025-01-01", "valid_to": None,
+        "topic": {"phrases": (("child tax credit", 3.0),
+                              ("additional child tax credit",
+                               2.5),
+                              ("credit for other dependents",
+                               2.0),
+                              ("qualifying child credit",
+                               1.5)),
+                  "doc_hint": {"title": "child tax credit",
+                               "url": "irs.gov"}},
+    },
+    {
+        "id": "indiana_able_tax_credit",
+        "title": ("Indiana income tax credit for ABLE "
+                  "contributions (Schedule IN-ABLE)"),
+        "groups": [
+            {"tokens": {"able"},
+             "phrases": ("able account", "able accounts",
+                         "investable", "529a", "able 529a")},
+            {"tokens": set(),
+             "phrases": ("tax credit", "state tax credit",
+                         "indiana tax credit",
+                         "credit for contributing",
+                         "credit for contributions",
+                         "tax break for contributing")},
+        ],
+        "statement": (
+            "Indiana's income tax credit for ABLE "
+            "contributions is claimed on Schedule "
+            "IN-ABLE: 20% of the contributions made "
+            "during the tax year to INvestABLE, the "
+            "state's ABLE program, up to $1,000 per "
+            "return ($500 if married filing "
+            "separately), and never more than the "
+            "filer's Indiana income tax after other "
+            "credits. The credit is nonrefundable, "
+            "with no carryover or carryback, and a "
+            "later nonqualified withdrawal can "
+            "require repaying part of it. (The $500 "
+            "cap sometimes quoted is only the "
+            "married-filing-separately cap.)"),
+        "source": ("Indiana HB 1303 (2022), Legislative "
+                   "Services Agency fiscal note LS 6935 "
+                   "(20% of contributions; $1,000 cap, "
+                   "$500 married filing separately; "
+                   "effective January 1, 2023); Indiana "
+                   "DOR Schedule IN-ABLE (State Form "
+                   "57379)"),
+        "figures": (1000.0, 500.0),
+        "valid_from": "2023-01-01", "valid_to": None,
     },
 ]
 

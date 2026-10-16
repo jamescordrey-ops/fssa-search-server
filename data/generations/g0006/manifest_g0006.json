@@ -1,0 +1,16 @@
+{
+ "generation": "g0006",
+ "purpose": "v23.1 WS-E: g0003 + targeted registry-carrier enrichment delta (17 sections, 250 questions) lifting the generated registry-vocab audit from 10/14 + 3/5 to 14/14 + 5/5 on the live base. No chunk text changed. Wave 2 (same day): targeted mmmna-carrier enrichment (6 sections) fixing the live-base audit's sole miss (mmmna woke the transfer-penalty divisor pair); the 7th carrier (a Minnesota waiver-listing page) has no MMMNA content and was left untouched.",
+ "base_generation": "g0005",
+ "delta": "v28: +898 scraped docs (WIC, childcare/children + behavioral-health member layers, VR/BRS, CSHCS, safety & aging front doors, energy & housing incl. the 2026 HCV Admin Plan, child support, disaster, SHIP, school meals + SUN Bucks status, Tier 3: unemployment, veterans, ACA basics, legal aid, DCS child welfare, MCE handbooks; 5 hand-authored docs)",
+ "chunks": 95642,
+ "sections": 7153,
+ "synthq_rows": 60370,
+ "synthq_reused": 57676,
+ "synthq_embedded_fresh": 2694,
+ "canary_min_cosine": 1.0,
+ "embedding_digest": "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+ "vectors_state": "ready",
+ "built": "2026-10-16",
+ "docs": 6145
+}

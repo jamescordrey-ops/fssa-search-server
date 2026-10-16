@@ -1,0 +1,12 @@
+{
+ "chunk_vectors": {
+  "total": 95642,
+  "fresh": 18041,
+  "reused": 77601
+ },
+ "synthq_vectors": {
+  "total": 60370,
+  "fresh": 2694,
+  "reused": 57676
+ }
+}
