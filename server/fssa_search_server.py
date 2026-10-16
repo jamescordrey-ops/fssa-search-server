@@ -415,6 +415,42 @@ Quick draft now carries a self-audit contract, and a draft
 that still fails the floor gets ONE repair call (same
 seat, failures listed) before the unit IDKs — the Quick
 draft cap is 2. Deep is behavior-identical to v25.
+
+v26 (2026-10-15): the audit-fix release (see v26/BUILD.md
+for the per-finding record; findings F1-F16 + N1/N2 from
+v26-planning/V26_PATCH_PLAN.md, decisions D1-D6 ruled by
+the operator 2026-10-15). Header correction carried from
+Claude's review: the v25.1 line above ("Deep is
+behavior-identical to v25") was never literally true —
+block attribution and date masking are shared code and
+changed Deep too; only the pooled figure scope is
+Quick-only. v26 continues that pattern deliberately:
+its shared-checker fixes (N1, F4, F6, F7) change Deep's
+checking, and Deep's own seams change too (F1 ceiling,
+F5 family exclusion). Money: the $1/ask ceiling is
+consulted at every paid-leg start seam in both lanes
+(F1); the Tavily counter claims before searching and
+fails closed on a corrupt state file (F2). Wrong-answer
+class: the legacy local mapping validates its model
+against the seat allowlist (F3); both verbatim-ship
+guards test the full ship test (F4); the draft-family
+exclusion is enforced at intake and at the verdict legs
+(F5); Deep's scoped figure grounding is sentence-local
+again (own-marker sources; block attribution still
+governs citation credit) (F6); the factual-sentence
+pattern knows the coverage verbs (F7). Fail-closed
+class: the ROUTED_MODEL route is retired (legacy local
+judging defaults to the installed 9B) (F8); Quick units
+get a per-part draft budget (F9); checker exceptions
+final as recorded IDKs, not bare 500s (F10); the search
+cache key carries use_rewrite (F11); a failed vector
+store open retries on a cooldown (F12); Groq quota
+counts HTTP attempts (F13). Cosmetic: a final cancel
+check at response assembly (F14); abandoned jobs write
+neither cache nor record (F15); dead code removed (F16);
+request validation returns 400 before the async branch
+(N2); the arithmetic checker no longer reads bare date
+or fraction parentheticals as equations (N1).
 """
 
 import datetime
@@ -546,10 +582,11 @@ LOCAL_MODEL = "qwen3.5:9b"
 # abliterated 8Bs (safety tuning removed by design). New models
 # join only by a deliberate edit here (e.g. after a bake-off).
 LOCAL_SEAT_ALLOWLIST = ("qwen3.5:9b", "qwen3.5:4b")
-# v13: contested-figure and bundled questions asked of the local default
-# route to the 14B (strongest local reasoner in the v12 bake-off). The 9B
-# is unloaded before a routed call so the two never share the 8GB VRAM.
-ROUTED_MODEL = "qwen3:14b"
+# v26 (F8, D2 = RETIRE): the v13 ROUTED_MODEL route
+# (qwen3:14b) is deleted — the constant, route_local_model,
+# and every live-path reference. The 14B was deleted from
+# the PC in the 2026-10-15 cleanup; local defaults now
+# name the installed 9B (LOCAL_MODEL) explicitly.
 # Feature toggles (can be overridden via /ask body: {"rewrite": false, "rerank": false})
 REWRITE_ENABLED = True
 RERANK_ENABLED = True
@@ -601,6 +638,11 @@ ASK_BUDGET_HARD_S = 285
 # (rescue / branch). At the cap the best judged draft on hand
 # ships through normal finalization.
 DRAFT_CALL_CAP = 4
+# v26 (F9, D5 = PER-PART): a Quick unit's own draft budget
+# (initial draft + the lane's one repair). Quick claims no
+# longer draw on the shared DRAFT_CALL_CAP above — that
+# cap stays exactly as BUG-11 set it for the Deep ladder.
+QUICK_UNIT_DRAFT_CAP = 2
 # v23.2 (F1): a provider call may start only when at least
 # this much budget remains; below it the call cannot produce
 # a usable result inside its bounded (deadline-clamped)
@@ -939,26 +981,6 @@ def rewrite_query(question):
         return []
 
 
-def rewrite_policy_phrase(question):
-    """Rewrite a life-situation question as a policy-manual topic phrase.
-
-    Users ask 'does buying a van count'; the manuals are organized as
-    'exempt vehicles', 'disaster assistance payments', 'non-recurring
-    lump sum payments'. Searching the manual's own phrasing surfaces the
-    manual sections that the raw question misses (situational test,
-    2026-10-12: Q1/Q2/Q4 retrieval failures)."""
-    try:
-        prompt = ("Rewrite this question as a short formal policy-manual topic "
-                  "phrase, using terms like resources, income, excluded, "
-                  "countable, eligibility, transfer of assets, benefits. "
-                  "Output ONLY the phrase, no other text.\n\n"
-                  f"Question: {question}\nPhrase:")
-        text = _utility_text(prompt, max_tokens=128,
-                             timeout=30).strip().split("\n")[0]
-        text = text.strip().strip('"').strip()
-        return text if 3 < len(text) < 120 else ""
-    except Exception:
-        return ""
 
 
 # v23 (WS3.2): the deterministic topic bridges are DELETED
@@ -983,34 +1005,8 @@ US_STATES = (
 )
 
 
-def _title_family(title):
-    """Normalize a title to its document family: drop state names, dates,
-    parentheticals, and site suffixes so near-identical documents (the
-    Section 1135 state variants, disaster-relief duplicates) group
-    together for diversity capping."""
-    t = title.lower()
-    t = re.sub(r"\([^)]*\)", " ", t)
-    t = re.sub(r"\|.*$", " ", t)
-    for s in US_STATES:
-        t = re.sub(r"\b" + re.escape(s) + r"\b", " ", t)
-    t = re.sub(r"\b(19|20)\d{2}\b", " ", t)
-    t = re.sub(r"[^a-z0-9]+", " ", t)
-    return re.sub(r"\s+", " ", t).strip()
 
 
-def _is_table_chunk(text):
-    """Detect table-like content: multiple lines with consistent delimiters."""
-    lines = [l for l in text.split("\n") if l.strip()]
-    if len(lines) < 3:
-        return False
-    # check for pipe or tab delimiters, or multiple dollar amounts in aligned rows
-    pipe_lines = sum(1 for l in lines if l.count("|") >= 2)
-    if pipe_lines >= 3:
-        return True
-    dollar_lines = sum(1 for l in lines if re.search(r"\$[\d,]+", l))
-    if dollar_lines >= 4 and len(lines) <= 20:
-        return True
-    return False
 
 
 def _has_figure(text):
@@ -1089,26 +1085,6 @@ def _classify_hit(h):
     return prog, dtype
 
 
-def _question_programs(q):
-    """Which programs a question is about, from its own wording."""
-    ql = q.lower()
-    toks = set(re.findall(r"[a-z]+", ql))
-    progs = set()
-    if "medicaid" in toks or "nursing home" in ql or \
-            "community spouse" in ql or "estate recovery" in ql or \
-            "lookback" in ql or "look-back" in ql or "waiver" in toks:
-        progs.add("Medicaid")
-    if toks & {"ssi", "ssdi"} or "supplemental security" in ql or \
-            "social security" in ql:
-        progs.add("SSI/SSDI")
-    if "snap" in toks or "food stamps" in ql or "food assistance" in ql:
-        progs.add("SNAP")
-    if "medicare" in toks or "part b" in ql or "part d" in ql:
-        progs.add("Medicare")
-    if "hip" in toks or "healthy indiana" in ql or "magi" in ql or \
-            "household income" in ql:
-        progs.add("MAGI")
-    return progs
 
 
 def _hit_year(h):
@@ -1120,22 +1096,6 @@ def _hit_year(h):
     return max(years) if years else None
 
 
-def _hit_tags(h):
-    """(program, doc_type, year) for a hit (v13). Prefers the ingest-time
-    tags tag_docs.py stamps on corpus docs (h['tags']); falls back to
-    the search-time classifiers, which are the same functions the
-    tagger imports, so the two can never drift."""
-    tags = h.get("tags") or {}
-    prog = tags.get("program") or h.get("program")
-    dtype = tags.get("doc_type") or h.get("dtype")
-    if not prog or not dtype:
-        c_prog, c_dtype = _classify_hit(h)
-        prog = prog or c_prog
-        dtype = dtype or c_dtype
-    year = tags.get("year")
-    if year is None:
-        year = _hit_year(h)
-    return prog, dtype, year
 
 
 def _is_indiana_source(h):
@@ -1216,6 +1176,22 @@ def _arithmetic_errors(answer):
             continue
     for m in _PAREN_EQ_RE.finditer(answer or ""):
         try:
+            # v26 (N1; Claude's v25.2 handoff via plan §7): a
+            # parenthetical holding a bare date or fraction
+            # after a figure — (7/2026), (2026-07), (1/2) —
+            # is not an equation, but the pattern reads it as
+            # one and flags a false arithmetic error (which
+            # then fails the quantity gate). When the
+            # operator is a slash or dash and the
+            # parenthetical carries no money marker (no $,
+            # no thousands comma, no decimal point), skip
+            # it; real parenthesized equations state money
+            # and keep the check.
+            _inner = m.group(0)[m.group(0).index("("):]
+            if m.group(3) in ("/", "÷", "-", "−") \
+                    and "$" not in _inner and "," not in _inner \
+                    and not re.search(r"\d\.\d", _inner):
+                continue
             consider(float(m.group(2).replace(",", "")), m.group(3),
                      float(m.group(4).replace(",", "")),
                      float(m.group(1).replace(",", "")), m.group(0))
@@ -1389,48 +1365,6 @@ def _rescue_search(question, corpus, exclude_keys=(), limit=4):
     return out, terms
 
 
-def _registry_pin_hits(question, corpus, on_date=None):
-    """v21 (WS1b): registry-driven retrieval. For each
-    registry entry the question matches (date-aware, WS2),
-    find the chunk that carries its figure: search the
-    entry's topic phrases, then choose doc-hint match first,
-    pin-term match second, top hit last (the bridge pin
-    selection order). Returns [(entry, hit), ...]."""
-    out = []
-    for entry in _registry_matches(question, on_date=on_date):
-        topic = entry.get("topic") or {}
-        phrases = topic.get("phrases") or ()
-        if not phrases:
-            continue
-        hint = topic.get("doc_hint") or {}
-        ht = (hint.get("title") or "").lower()
-        hu = (hint.get("url") or "").lower()
-        chosen = None
-        for phrase, pin_term in phrases:
-            found = search(phrase, corpus, n=24)
-            if not found:
-                continue
-            cand = None
-            if ht or hu:
-                cand = next(
-                    (f for f in found
-                     if (ht and ht in (f["title"] or "").lower())
-                     or (hu and hu in (f["url"] or "").lower())),
-                    None)
-            if cand is None and pin_term:
-                pt = pin_term.lower()
-                cand = next(
-                    (f for f in found
-                     if pt in ((f["title"] or "") + " "
-                               + (f["excerpt"] or "")).lower()),
-                    None)
-            if cand is None:
-                cand = found[0]
-            chosen = cand
-            break
-        if chosen is not None:
-            out.append((entry, chosen))
-    return out
 
 
 
@@ -1462,7 +1396,17 @@ _V2 = {"requested": None, "effective": "down", "fts5": None,
        "drift": False, "fail_reason": None, "profile": None,
        "conn": None, "sections": {}, "docs": {}, "enrich": {},
        "vec_mat": None, "vec_rows": None, "synth_mat": None,
-       "synth_sections": None, "vocab": None, "pins": []}
+       "synth_sections": None, "vocab": None, "pins": [],
+       # v26 (F12): the bounded re-open bookkeeping.
+       "fail_ts": None, "open_attempts": 0}
+# v26 (F12): a failed store open may be retried after this
+# cooldown, at most this many attempts per process. The
+# bound keeps a persistently broken store failing closed
+# (every ask 503s) without a restart being the only cure
+# for a transient one (a generation still being written
+# when the server started).
+_V2_REOPEN_COOLDOWN_S = 30.0
+_V2_REOPEN_MAX_ATTEMPTS = 4
 
 
 def _v2_fts5_ok():
@@ -1549,19 +1493,42 @@ def _v2_canary_thread():
 
 
 def _v2_open():
-    """Open the generation store once. Returns True when the
+    """Open the generation store. Returns True when the
     v2 path may serve. v23 (WS3.2): there is no RETRIEVAL
     flag and no legacy engine behind it; any failure leaves
     the engine DOWN (effective='down', fail_reason set) and
-    retrieval calls fail closed."""
+    retrieval calls fail closed. v26 (F12): a failed open
+    is no longer single-attempt-forever — the failure time
+    is recorded and the open retries after a short
+    cooldown, a small number of attempts per process
+    (_V2_REOPEN_*). While unopened, asks still fail closed
+    exactly as before; a retry either completes the open
+    and swaps the store in, or the down verdict stands."""
     with _V2_LOCK:
+        if _V2["effective"] == "v2":
+            return True
         if _V2["requested"] is not None:
-            return _V2["effective"] == "v2"
+            _now = time.monotonic()
+            if _V2["open_attempts"] >= _V2_REOPEN_MAX_ATTEMPTS \
+                    or _V2["fail_ts"] is None \
+                    or (_now - _V2["fail_ts"]) \
+                    < _V2_REOPEN_COOLDOWN_S:
+                return False
+            # A retry: drop any half-open connection from
+            # the failed attempt before re-running the open.
+            if _V2["conn"] is not None:
+                try:
+                    _V2["conn"].close()
+                except Exception:
+                    pass
+                _V2["conn"] = None
         _V2["requested"] = "v2"
+        _V2["open_attempts"] += 1
         _V2["fts5"] = _v2_fts5_ok()
         if not _V2["fts5"]:
             _V2["fail_reason"] = "FTS5 unavailable in this sqlite3"
             _V2["effective"] = "down"
+            _V2["fail_ts"] = time.monotonic()
             print("[v23] FTS5 unavailable in this sqlite3; "
                   "the retrieval engine is DOWN", flush=True)
             return False
@@ -1639,6 +1606,7 @@ def _v2_open():
         except Exception as e:
             _V2["fail_reason"] = f"{type(e).__name__}: {e}"
             _V2["effective"] = "down"
+            _V2["fail_ts"] = time.monotonic()
             print(f"[v23] generation store failed to open "
                   f"({_V2['fail_reason']}); the retrieval "
                   f"engine is DOWN", flush=True)
@@ -1961,7 +1929,10 @@ def _hybrid_search_v2(query, corpus, n, use_rewrite, use_rerank):
     _t0 = time.monotonic()
     scope = _v2_scope(corpus)
     gen = _V2["generation"]
-    cache_key = (query, scope, n, use_rerank, gen)
+    # v26 (F11): use_rewrite rides the key — through v25.1
+    # a rewrite-on pool could serve a rewrite-off ask (and
+    # vice versa) whenever the other inputs matched.
+    cache_key = (query, scope, n, use_rewrite, use_rerank, gen)
     cached = _cache_get(_V2_CACHE, cache_key)
     if cached:
         _retr_pool_note({"q": query[:80], "n": n, "cached": True,
@@ -3217,7 +3188,25 @@ def _check_figures(answer, question, hits, extra_allowed=(),
     for s in parsed["sentences"]:
         text_s = s["text"]
         scope = set(base) | derived
-        for j in s["sources"]:
+        # v26 (F6, D6 ruled 2026-10-15): sentence-local scope
+        # for FIGURE grounding in scoped mode. Through v25.1
+        # the scope was the sentence's block-attributed
+        # sources, so a citation block at a group's end
+        # widened every earlier sentence's figure scope to
+        # the block's excerpts — a wrong figure in an early
+        # sentence grounded against a later block's excerpt
+        # and the unit shipped it `checked` (Phase 0 probe
+        # F6). In scoped mode figures now ground against the
+        # excerpts the sentence's OWN in-text markers cite
+        # (own_sources, kept by _parse_citations). Block
+        # attribution itself is unchanged (citation credit,
+        # cited_claims, the uncited gate — the c3b7 fix),
+        # and pooled mode (pool_all, Quick) keeps the block
+        # scope exactly as designed.
+        _scope_srcs = s["sources"] if pool_all else (
+            s["own_sources"] if "own_sources" in s
+            else s["sources"])
+        for j in _scope_srcs:
             if 0 <= j < len(hits or []):
                 scope |= _grab(hits[j].get("excerpt", ""))
         eqs = []
@@ -4791,19 +4780,6 @@ def is_hard_question(question):
     return ""
 
 
-def route_local_model(question, requested):
-    """Decide the serving local model for an /ask (v13). Only the local
-    default is routable: hard questions go to ROUTED_MODEL, everything
-    else stays on LOCAL_MODEL. Explicit model picks are returned
-    untouched. Returns (model, route_reason)."""
-    if requested not in ("", "default", LOCAL_MODEL):
-        return requested, ""
-    reason = is_hard_question(question)
-    if reason:
-        return ROUTED_MODEL, reason
-    return LOCAL_MODEL, ""
-
-
 def ollama_unload(model):
     """Ask Ollama to unload a resident model (keep_alive 0) so a routed
     larger model does not fight it for the 8GB VRAM (the v12 bake-off
@@ -5342,6 +5318,30 @@ def _claim_draft_call():
         return True
 
 
+def _claim_quick_draft_call():
+    """v26 (F9, D5 = PER-PART): claim one drafting call
+    from the CURRENT Quick unit's own budget
+    (QUICK_UNIT_DRAFT_CAP: the initial draft + the lane's
+    one repair). Through v25.1 Quick claims drew on the
+    shared per-ask counter above, so in a multi-part Quick
+    ask the early parts' repairs could starve a later part
+    of its FIRST draft — the shared cap is BUG-11's
+    invariant for the Deep ladder and stays exactly as it
+    was; only Quick's accounting moves. The claim still
+    counts on the ask-wide draft_calls total (the ask
+    record stays an honest count of drafting calls made);
+    the CAP check is the per-unit one. _run_unit_quick
+    resets the per-unit counter at entry."""
+    ctx = _ask_ctx()
+    with ctx.lock:
+        if ctx.quick_unit_calls >= QUICK_UNIT_DRAFT_CAP:
+            ctx.draft_capped = True
+            return False
+        ctx.quick_unit_calls += 1
+        ctx.draft_calls += 1
+        return True
+
+
 def _roster_health_block():
     """GET /health's roster block (v23.1): the ask path's
     configured servers, stated plainly so a health read shows
@@ -5397,6 +5397,9 @@ class _AskContext:
                  # truthfully on the ask record).
                  "ask_t0", "ask_deadline", "class_deadline",
                  "draft_calls", "draft_capped",
+                 # v26 (F9): the running Quick unit's own
+                 # draft-claim count (reset per unit).
+                 "quick_unit_calls",
                  "budget_cut", "cut_phase",
                  # v24: the progress tracker's shared state
                  # (per-unit section states for the job
@@ -5445,6 +5448,7 @@ class _AskContext:
         self.class_deadline = None
         self.draft_calls = 0
         self.draft_capped = False
+        self.quick_unit_calls = 0
         self.budget_cut = False
         self.cut_phase = None
         # v24: see __slots__ note.
@@ -5852,30 +5856,63 @@ def _tavily_key():
     return _nim_key_for(TAVILY_KEY_ENV, TAVILY_KEY_FILE)
 
 
+def _tavily_state():
+    """(Caller holds _TAVILY_LOCK.) The monthly counter,
+    read with the spend ledger's house rule (v26, F2 —
+    the mirror of _or_load_locked): a MISSING state
+    file is a legitimate fresh zero; a file that exists
+    but cannot be parsed marks the counter BROKEN and
+    the web branch fails closed until the file is
+    repaired. Through v25.1 any read error silently
+    reset the month to zero, and the 800-credit stop
+    stopped binding."""
+    month = time.strftime("%Y-%m")
+    try:
+        with open(_TAVILY_STATE_FILE, encoding="utf-8") as f:
+            st = json.load(f)
+    except FileNotFoundError:
+        return {"month": month, "credits": 0}
+    except Exception:
+        return {"month": month, "credits": 0, "broken": True}
+    if not isinstance(st, dict) or st.get("month") != month:
+        return {"month": month, "credits": 0}
+    try:
+        credits = int(st.get("credits") or 0)
+    except (TypeError, ValueError):
+        return {"month": month, "credits": 0, "broken": True}
+    return {"month": month, "credits": credits}
+
+
 def _tavily_credits():
     with _TAVILY_LOCK:
-        month = time.strftime("%Y-%m")
-        try:
-            with open(_TAVILY_STATE_FILE, encoding="utf-8") as f:
-                st = json.load(f)
-            if st.get("month") != month:
-                st = {"month": month, "credits": 0}
-        except Exception:
-            st = {"month": month, "credits": 0}
-        return st
+        return _tavily_state()
 
 
-def _tavily_spend(n):
+def _tavily_claim():
+    """v26 (F2): check-and-increment ONE credit under
+    the lock, BEFORE a search is attempted, so two
+    concurrent branch attempts can no longer both pass
+    the stop check on the same credits. A credit
+    claimed for a search that then fails in transport
+    stays counted — the conservative direction, since
+    Tavily may have served it. Returns False when the
+    counter is broken or the monthly stop is already
+    reached (the caller then issues no search)."""
     with _TAVILY_LOCK:
-        st = _tavily_credits()
-        st["credits"] += n
+        st = _tavily_state()
+        if st.get("broken") \
+                or st["credits"] >= BRANCH_MONTHLY_STOP:
+            return False
+        st["credits"] += 1
         try:
             # v18: atomic write, like the spend ledger (a crash
             # mid-write must not zero the monthly counter).
-            _atomic_write_json(_TAVILY_STATE_FILE, st)
+            _atomic_write_json(_TAVILY_STATE_FILE,
+                               {"month": st["month"],
+                                "credits": st["credits"]})
         except Exception:
             pass
-        return st["credits"]
+        return True
 
 
 def _tavily_post(path, payload, timeout=45):
@@ -5966,18 +6003,26 @@ def _branch_out_hits(question, claims):
     if not _tavily_key():
         rec["unavailable"] = "no tavily key"
         return [], rec
-    if _tavily_credits()["credits"] >= BRANCH_MONTHLY_STOP:
+    _tst = _tavily_credits()
+    if _tst.get("broken"):
+        rec["unavailable"] = ("monthly counter state "
+                              "unreadable; web branch "
+                              "fails closed (v26 F2)")
+        return [], rec
+    if _tst["credits"] >= BRANCH_MONTHLY_STOP:
         rec["unavailable"] = "monthly credit budget reached"
         return [], rec
     queries = _branch_queries(question, claims)
     urls, seen, titles = [], set(), {}
     try:
         for q in queries:
+            if not _tavily_claim():
+                raise RuntimeError(
+                    "monthly credit budget reached")
             d = _tavily_post("/search", {
                 "query": q, "search_depth": "basic",
                 "include_domains": list(BRANCH_WHITELIST),
                 "max_results": 5})
-            _tavily_spend(1)
             rec["credits"] += 1
             rec["queries"].append(q)
             for r in d.get("results", []):
@@ -6001,13 +6046,13 @@ def _branch_out_hits(question, claims):
         return [], rec
     texts = {}
     try:
-        d = _tavily_post("/extract", {"urls": urls,
-                                      "extract_depth": "basic"})
-        _tavily_spend(1)
-        rec["credits"] += 1
-        for r in d.get("results", []):
-            if r.get("url") and r.get("raw_content"):
-                texts[r["url"]] = r["raw_content"]
+        if _tavily_claim():
+            d = _tavily_post("/extract", {"urls": urls,
+                                          "extract_depth": "basic"})
+            rec["credits"] += 1
+            for r in d.get("results", []):
+                if r.get("url") and r.get("raw_content"):
+                    texts[r["url"]] = r["raw_content"]
     except Exception:
         pass  # direct fetch below covers what extract missed
     web_hits = []
@@ -6289,12 +6334,6 @@ def _or_spend_today():
         return _OR_STATE["spend"]
 
 
-def _or_committed():
-    """Settled (reconciled) + outstanding reservations: the
-    number the gate enforces the ceiling against."""
-    with _OR_LOCK:
-        _or_load_locked()
-        return _or_committed_locked()
 
 
 def _max_cost_from(prices, default, model, system, user,
@@ -6382,19 +6421,6 @@ def _or_settle(rid, actual):
               f"the NIM fallback chain takes over", flush=True)
 
 
-def _or_note_cost(cost):
-    """Compatibility shim for any v17-era caller: record a
-    settled cost with no reservation. v18 code settles through
-    _or_settle; nothing on the OpenRouter path calls this."""
-    if not cost or cost <= 0:
-        return
-    with _OR_LOCK:
-        _or_load_locked()
-        _OR_STATE["spend"] += float(cost)
-        _or_persist_locked()
-    ctx = _ask_ctx()
-    with ctx.lock:
-        ctx.cost += float(cost)
 
 
 def _or_reset_ask():
@@ -6580,14 +6606,22 @@ def _groq_guard_tripped():
         return _GROQ_STATE["requests"] >= GROQ_DAILY_SOFT_CAP
 
 
-def _groq_count_one():
-    """Count one Groq request (counted at attempt time: the
-    free plan's daily quota counts requests, not successes)."""
+def _groq_count(n):
+    """Count n Groq requests against the day (v26 F13: the
+    transport counts ATTEMPTS — a 5xx-retried logical call
+    is two requests against the org quota, and through
+    v25.1 the counter saw only one)."""
     with _GROQ_LOCK:
         _groq_load_locked()
-        _GROQ_STATE["requests"] += 1
+        _GROQ_STATE["requests"] += int(n)
         _groq_persist_locked()
         return _GROQ_STATE["requests"]
+
+
+def _groq_count_one():
+    """Count one Groq request (kept for callers that make
+    exactly one attempt)."""
+    return _groq_count(1)
 
 
 def _groq_note_cost(cost):
@@ -6748,8 +6782,10 @@ def _xai_text(model, system, user, temperature=0, max_tokens=2048,
     """One xAI chat call. Default (paid) mode: the call
     reserves its provable maximum against the shared
     real-money ledger BEFORE it starts — a refusal means the
-    $2.00 ceiling would be crossed and the seat behaves as
-    unavailable, exactly like an OpenRouter call — and
+    daily ceiling (OPENROUTER_DAILY_CAP_USD, $10.00 since
+    v21; corrected v26/F16 — older comments said $2.00)
+    would be crossed and the seat behaves as unavailable,
+    exactly like an OpenRouter call — and
     settles to the billed cost computed from the response's
     token usage, or at the full reserved maximum when the
     call fails or reports no usage (F11-1). Grant mode
@@ -6768,12 +6804,14 @@ def _xai_text(model, system, user, temperature=0, max_tokens=2048,
             raise RuntimeError(
                 "xai daily ceiling reached (reservation refused)")
     usage = {}
+    _attempts = []
     try:
         content = _nim_text(
             XAI_BASE_URL, XAI_KEY_ENV, XAI_KEY_FILE, model,
             system, user, temperature=temperature,
             max_tokens=max_tokens, timeout=timeout,
-            provider="xai", usage_out=usage, deadline=deadline)
+            provider="xai", usage_out=usage, deadline=deadline,
+            attempts_out=_attempts)
     except Exception:
         # Settle at the full reserved maximum (F11-1); a
         # grant-mode call records nothing on failure.
@@ -6786,6 +6824,20 @@ def _xai_text(model, system, user, temperature=0, max_tokens=2048,
                          else _max_cost_from(
                              _XAI_PRICES, _XAI_PRICE_DEFAULT,
                              model, system, user, max_tokens))
+    elif len(_attempts) > 1:
+        # v26 (F13 extension, plan §7): ONE reservation
+        # covers this logical call, but the transport
+        # retried — the first attempt may have consumed
+        # tokens the successful attempt's usage never
+        # reports, so settling at `actual` could undercount
+        # the ledger by up to one max-cost attempt. Settle
+        # at the full reserved maximum instead (the same
+        # conservative direction as a total failure). The
+        # alternative the plan allowed — accept and document
+        # the bound — was not taken: the attempt count is
+        # observable for free, so the ledger takes no
+        # undercount it can avoid.
+        _or_settle(reservation, None)
     else:
         _or_settle(reservation, actual)
     return content
@@ -6806,13 +6858,22 @@ def _groq_text(model, system, user, temperature=0, max_tokens=2048,
         _note_groq_shed("transport")
         raise RuntimeError(
             "groq daily soft cap reached (guard shed)")
-    _groq_count_one()
     usage = {}
-    content = _nim_text(
-        GROQ_BASE_URL, GROQ_KEY_ENV, GROQ_KEY_FILE, model,
-        system, user, temperature=temperature,
-        max_tokens=max_tokens, timeout=timeout,
-        provider="groq", usage_out=usage, deadline=deadline)
+    # v26 (F13): count ATTEMPTS, not logical calls — the
+    # transport may retry once on 5xx and the org quota
+    # counts both. The count lands in a finally so a failed
+    # call's attempts count too (the quota saw them).
+    _attempts = []
+    try:
+        content = _nim_text(
+            GROQ_BASE_URL, GROQ_KEY_ENV, GROQ_KEY_FILE, model,
+            system, user, temperature=temperature,
+            max_tokens=max_tokens, timeout=timeout,
+            provider="groq", usage_out=usage, deadline=deadline,
+            attempts_out=_attempts)
+    finally:
+        if _attempts:
+            _groq_count(len(_attempts))
     cost = _usage_cost(_GROQ_PRICES, _GROQ_PRICE_DEFAULT,
                        model, usage)
     if cost is None:
@@ -6825,7 +6886,7 @@ def _groq_text(model, system, user, temperature=0, max_tokens=2048,
 def _nim_text(base_url, key_env, key_file, model, system, user,
               temperature=0, max_tokens=2048, timeout=60,
               provider="nim", extra=None, or_route=False,
-              usage_out=None, deadline=None):
+              usage_out=None, deadline=None, attempts_out=None):
     """One chat call to a hosted OpenAI-compatible provider (the
     NIM layer's seats), over the keep-alive pool (v15 S3).
     Returns the reply text; raises RuntimeError when the seat
@@ -6882,9 +6943,10 @@ def _nim_text(base_url, key_env, key_file, model, system, user,
             # v18 (§B hard stop): every OpenRouter HTTP attempt
             # takes its own reservation at the call's provable
             # maximum BEFORE it starts. A refusal means the
-            # $2.00 ceiling would be crossed: the call never
-            # starts and the seat behaves as unavailable,
-            # exactly like a v17 cap trip.
+            # daily ceiling (OPENROUTER_DAILY_CAP_USD, $10.00
+            # since v21; corrected v26/F16) would be crossed:
+            # the call never starts and the seat behaves as
+            # unavailable, exactly like a v17 cap trip.
             reservation = _or_reserve(
                 _or_max_cost(model, system, user, max_tokens))
             if reservation is None:
@@ -6892,6 +6954,11 @@ def _nim_text(base_url, key_env, key_file, model, system, user,
                     "openrouter daily ceiling reached "
                     "(reservation refused)")
         try:
+            # v26 (F13): an HTTP attempt is being made; the
+            # caller that accounts per attempt (Groq's quota
+            # counter, the xAI settlement) reads the count.
+            if attempts_out is not None:
+                attempts_out.append(1)
             status, raw = _https_post(
                 host, path, payload,
                 {"Content-Type": "application/json",
@@ -7103,11 +7170,10 @@ def _judge_num_ctx(system, user, num_predict):
 
 def _ollama_chat_raw(model, system, user, timeout=300, num_predict=1536):
     """One bare Ollama chat call for judge work (temperature 0)."""
-    if model == ROUTED_MODEL:
-        # v14.1: the local judge gets the GPU to itself; any other
-        # resident chat model (the 9B drafter above all) is unloaded
-        # first, on every judge path, not just local-drafted asks.
-        _unload_others(model)
+    # v26 (F8): the v14.1 special case that unloaded every
+    # other resident model before a routed-14B judge call is
+    # deleted with the route; no model gets that treatment
+    # now (the 14B is not installed in any case).
     payload = json.dumps({
         "model": model,
         "messages": [{"role": "system", "content": system},
@@ -7242,11 +7308,12 @@ def _primary_judgment(engine, question, hits, answer, mech_block,
         '"verdict": "supported", "note": "...", '
         '"sources": [1]}]}')
     # v24 (§8): a seat pick names the local model explicitly;
-    # without one the local engine keeps its v23.2 default
-    # (ROUTED_MODEL), so every pre-v24 caller is unchanged.
+    # without one the local engine defaults to the installed
+    # 9B (v26 F8: the v23.2 default here was the retired
+    # routed 14B).
     model = {"lite": GEMINI_CHAIN[0],
              "backup": JUDGE_BACKUP_MODEL}.get(
-                 engine, local_model or ROUTED_MODEL)
+                 engine, local_model or LOCAL_MODEL)
     try:
         if engine == "lite":
             if _judge_leg_timeout(deadline, 45) <= 0:
@@ -7414,7 +7481,7 @@ def _second_verdicts(engine, question, hits, claims, mech_block,
             if _lt <= 0:
                 raise RuntimeError("judge leg budget spent")
             _note_local_load("local-verdicts")
-            text = _ollama_chat_raw(local_model or ROUTED_MODEL,
+            text = _ollama_chat_raw(local_model or LOCAL_MODEL,
                                     _JUDGE_SYSTEM,
                                     user, timeout=_lt,
                                     num_predict=1024)
@@ -7509,7 +7576,18 @@ _FACTUAL_RX = re.compile(
     r"\b(?:must|shall|counts?|excluded|exclusion|eligible|limit|"
     r"qualif\w+|requires?|prohibit\w+|allows?|not counted|"
     r"does not count|is not|are not|will|can|cannot|can't|won't|"
-    r"will not|is the|are the)\b)", re.IGNORECASE)
+    r"will not|is the|are the)\b|"
+    # v26 (F7, D6 ruled 2026-10-15): the coverage-verb
+    # family. Through v25.1 a plain statement of what a
+    # program covers carried NO factual signal — "The
+    # Health and Wellness Waiver provides pest control"
+    # matched nothing in this pattern, so the uncited gate
+    # never saw it and Quick shipped it verbatim
+    # (Phase 0 probe F7). The list stays conservative:
+    # program-fact verbs only (coverage, provision,
+    # inclusion, payment-for), no general vocabulary.
+    r"\b(?:covers?|covered|provides?|provided|includes?|"
+    r"included)\b|\bpays?\s+for\b)", re.IGNORECASE)
 
 
 def _parse_citations(answer, hits):
@@ -7530,7 +7608,15 @@ def _parse_citations(answer, hits):
     c3b7a02ec2c5 live Quick failure). A citation block now
     credits every sentence since the previous citation block,
     which is the span its markers were written to cover. A
-    sentence after the LAST citation block gains nothing."""
+    sentence after the LAST citation block gains nothing.
+    v26 (F6, D6 ruled 2026-10-15): each sentence ALSO keeps
+    its OWN-marker sources (own_sources: the markers written
+    in the sentence itself, before block attribution).
+    Citation credit, cited_claims and the uncited gate keep
+    block attribution; _check_figures' scoped mode grounds
+    figures against own_sources only, because block scope
+    let a wrong figure in an early sentence ground against
+    a later block's excerpt (Phase 0 probe F6)."""
     urls = {}
     for j, h in enumerate(hits or ()):
         if h.get("url"):
@@ -7541,7 +7627,8 @@ def _parse_citations(answer, hits):
     rows = []
     for s in _split_sentences(answer):
         if s.lower().startswith("confidence:"):
-            rows.append({"text": s, "sources": [], "cited": True,
+            rows.append({"text": s, "sources": [],
+                         "own_sources": [], "cited": True,
                          "factual": False, "_conf": True})
             continue
         srcs = []
@@ -7563,7 +7650,8 @@ def _parse_citations(answer, hits):
                     srcs.append(j)
         factual = bool(_FACTUAL_RX.search(s))
         cited = bool(srcs) or "[registry]" in s.lower()
-        rows.append({"text": s, "sources": srcs, "cited": cited,
+        rows.append({"text": s, "sources": srcs,
+                     "own_sources": list(srcs), "cited": cited,
                      "factual": factual, "_conf": False})
     # v25.1 block attribution: walk the rows; each row that
     # carries a citation flushes the pending run — the run's
@@ -7586,6 +7674,8 @@ def _parse_citations(answer, hits):
     for _row in rows:
         sentences.append({"text": _row["text"],
                           "sources": _row["sources"],
+                          "own_sources":
+                              _row.get("own_sources") or [],
                           "cited": _row["cited"],
                           "factual": _row["factual"]})
         if _row["factual"] and _row["cited"]:
@@ -8005,7 +8095,7 @@ def _extract_claims_only(engine, question, hits, answer, mech_block,
         '{"claims": [{"text": "...", "load_bearing": true, '
         '"sources": [1]}]}')
     model = GEMINI_CHAIN[0] if engine == "lite" \
-        else (local_model or ROUTED_MODEL)
+        else (local_model or LOCAL_MODEL)
     try:
         if engine == "lite":
             if _judge_leg_timeout(deadline, 45) <= 0:
@@ -8093,11 +8183,13 @@ def _check_round(question, hits, answer, hard, mech_block="",
     # v24 (§8): per-seat picks. judge_model / extract_model are
     # None for the hosted chain or a local model name (the
     # Models panel's allowlist, or the legacy local mapping).
-    # The legacy local_only flag with no seat picks keeps its
-    # v23.2 meaning exactly: both halves of the fused pass run
-    # on the local engine's default model (ROUTED_MODEL).
+    # The legacy local_only flag with no seat picks: both
+    # halves of the fused pass run on the local engine's
+    # default model — v26 (F8) names it explicitly as the
+    # installed 9B (through v25.1 it was the retired routed
+    # 14B, a model no longer installed).
     if judge_model is None and extract_model is None and local_only:
-        judge_model = extract_model = ROUTED_MODEL
+        judge_model = extract_model = LOCAL_MODEL
     checks["seats"] = {"extract": extract_model or "hosted",
                        "judge": judge_model or "hosted"}
     ctx = _ask_ctx()
@@ -8133,6 +8225,53 @@ def _check_round(question, hits, answer, hard, mech_block="",
         return _dl is not None \
             and (_dl - time.monotonic()) < MIN_CALL_START_S
 
+    def _ceiling():
+        # v26 (F1): the per-ask cost ceiling is a leg-start
+        # seam too. A leg that would start with the ask
+        # already at the ceiling does not start, and the
+        # round falls back to its deterministic disposition
+        # exactly as it does for a budget-spent leg. (The
+        # ceiling is consulted only at start seams: a leg
+        # already running settles at its actual cost, so one
+        # leg can still carry an ask past the line.)
+        return _or_ask_cost() >= PER_ASK_CEILING_USD
+
+    def _no_start():
+        return _spent() or _ceiling()
+
+    def _leg_skip():
+        # Why a judge leg did not start, for the record.
+        if _ceiling() and not _spent():
+            return "per-ask cost ceiling reached"
+        return "budget spent"
+
+    def _leg_skip_error():
+        if _leg_skip() == "budget spent":
+            return ("judge leg budget spent "
+                    "(round started past the deadline)")
+        return ("judge leg not started "
+                "(per-ask cost ceiling reached)")
+
+    def _family_blocked(model):
+        # v26 (F5, D3 = ENFORCE): §C's draft-family
+        # exclusion, enforced at the verdict legs. The
+        # drafting seat writes ctx.draft_family when a
+        # draft serves; through v25.1 nothing read it and
+        # the exclusion was dead code, so a seat assignment
+        # could put the drafting family on its own verdict
+        # and the verdict counted. A blocked leg never
+        # starts; the round degrades exactly as it does for
+        # a failed judge transport, never an assumed pass.
+        return bool(model) and bool(ctx.draft_family) \
+            and _model_family(model) == ctx.draft_family
+
+    def _refused_leg(model):
+        return {"available": False, "claims": [],
+                "model": model,
+                "error": "verdict leg refused: the drafting "
+                         "family (" + str(ctx.draft_family)
+                         + ") never judges its own draft"}
+
     def _claim_backup():
         """Atomically claim this ask's single backup-judge use."""
         with ctx.lock:
@@ -8151,11 +8290,13 @@ def _check_round(question, hits, answer, hard, mech_block="",
     if extract_model is not None and extract_model == judge_model:
         _note_local_load("local-ask-judge")
         _set_check_line("Fact check: local model")
-        if not _spent():
+        if _family_blocked(judge_model):
+            primary = _refused_leg(judge_model)
+        elif not _no_start():
             primary = _primary_judgment(
                 "local", question, hits, answer, mech_block,
                 deadline=deadline, local_model=judge_model)
-        else:
+        elif _spent():
             _note_budget_cut("extracting")
         if primary["available"]:
             engine = "local"
@@ -8163,17 +8304,18 @@ def _check_round(question, hits, answer, hard, mech_block="",
             engines_used.append("local")
         else:
             _perr = str(primary.get("error"))
-            if _perr == "not run" and _spent():
-                _perr = "judge leg budget spent " \
-                        "(round started past the deadline)"
+            if _perr == "not run" and _no_start():
+                _perr = _leg_skip_error()
             errors.append("local judge: " + _perr)
     elif extract_model is None and judge_model is None:
         _set_check_line("Fact check: Gemini Lite")
-        if not _spent():
+        if _family_blocked(GEMINI_CHAIN[0]):
+            primary = _refused_leg(GEMINI_CHAIN[0])
+        elif not _no_start():
             primary = _primary_judgment("lite", question, hits,
                                         answer, mech_block,
                                         deadline=deadline)
-        else:
+        elif _spent():
             _note_budget_cut("extracting")
         if primary["available"]:
             engine = "lite"
@@ -8188,9 +8330,8 @@ def _check_round(question, hits, answer, hard, mech_block="",
                 # failure when in fact no leg was ever tried.
                 # Name the real reason.
                 _perr = str(primary["error"])
-                if _perr == "not run" and _spent():
-                    _perr = "judge leg budget spent " \
-                            "(round started past the deadline)"
+                if _perr == "not run" and _no_start():
+                    _perr = _leg_skip_error()
                 errors.append("lite judge: " + _perr)
             # v23.2 (ABLE ask): the v23.1 condition
             # `_claim_backup() and not _spent()` evaluated the
@@ -8201,12 +8342,17 @@ def _check_round(question, hits, answer, hard, mech_block="",
             # Now: spent rounds record the skip explicitly and
             # never claim the backup; a live round claims it
             # only when the attempt will actually run.
-            if _spent():
-                _note_budget_cut("extracting")
+            if _no_start():
+                if _spent():
+                    _note_budget_cut("extracting")
+                checks["judge"]["backup_skip"] = _leg_skip()
+                errors.append("backup judge: not attempted ("
+                              + _leg_skip() + ")")
+            elif _family_blocked(JUDGE_BACKUP_MODEL):
                 checks["judge"]["backup_skip"] = \
-                    "budget spent"
+                    "drafting family"
                 errors.append("backup judge: not attempted "
-                              "(budget spent)")
+                              "(drafting family)")
             elif _claim_backup():
                 backup_used = True
                 _set_check_line(
@@ -8234,16 +8380,16 @@ def _check_round(question, hits, answer, hard, mech_block="",
         _set_check_line("Fact check: seats ("
                         + (extract_model or "hosted")
                         + " / " + (judge_model or "hosted") + ")")
-        if not _spent():
+        if not _no_start():
             _ext = _extract_claims_only(
                 _x_eng, question, hits, answer, mech_block,
                 deadline=deadline, local_model=extract_model)
         else:
-            _note_budget_cut("extracting")
+            if _spent():
+                _note_budget_cut("extracting")
             _ext = {"available": False, "claims": [],
                     "model": extract_model or GEMINI_CHAIN[0],
-                    "error": "judge leg budget spent "
-                             "(round started past the deadline)"}
+                    "error": _leg_skip_error()}
         checks["extract"] = {"seat": _x_eng,
                              "model": _ext.get("model")}
         if not _ext["available"]:
@@ -8254,12 +8400,25 @@ def _check_round(question, hits, answer, hard, mech_block="",
             _fake = [{"text": c["text"]} for c in _ext["claims"]]
             _vres = {"available": False, "verdicts": {},
                      "missed": [], "error": "not run"}
-            if not _spent():
+            _j_model = judge_model if _j_eng == "local" \
+                else (GEMINI_CHAIN[0] if _j_eng == "lite"
+                      else JUDGE_BACKUP_MODEL)
+            if _family_blocked(_j_model):
+                _vres = {"available": False, "verdicts": {},
+                         "missed": [],
+                         "error": "verdict leg refused: the "
+                                  "drafting family ("
+                                  + str(ctx.draft_family)
+                                  + ") never judges its own "
+                                  "draft"}
+            elif not _no_start():
                 _vres = _second_verdicts(
                     _j_eng, question, hits, _fake, mech_block,
                     deadline=deadline, local_model=judge_model)
             if not _vres["available"] and _j_eng == "lite" \
-                    and not _spent() and _claim_backup():
+                    and not _no_start() \
+                    and not _family_blocked(JUDGE_BACKUP_MODEL) \
+                    and _claim_backup():
                 backup_used = True
                 _j_eng = "backup"
                 _set_check_line(
@@ -8400,19 +8559,21 @@ def _check_round(question, hits, answer, hard, mech_block="",
     # covers the verdict stage instead.
     targets = [c for c in claims if c["judge"] is None
                and not c.get("meta")]
-    if engine is not None and targets and not _spent():
+    if engine is not None and targets and not _no_start():
         verd_engine = engine
         batches = [targets[i:i + 14]
                    for i in range(0, len(targets), 14)][:2]
         for batch in batches:
-            if _spent():
+            if _no_start():
                 break
             res = _second_verdicts(verd_engine, question, hits,
                                    batch, mech_block,
                                    deadline=deadline,
                                    local_model=judge_model)
             if not res["available"] and verd_engine == "lite" \
-                    and not local_only and _claim_backup():
+                    and not local_only and not _ceiling() \
+                    and not _family_blocked(JUDGE_BACKUP_MODEL) \
+                    and _claim_backup():
                 backup_used = True
                 if "backup" not in engines_used:
                     engines_used.append("backup")
@@ -8990,6 +9151,7 @@ def _run_unit(ctx):
     assembly_guard = None
     cost_capped = False
     conflict_fail = False
+    check_error = None  # v26 (F10): a checker exception's text
     judged_draft = None       # last draft that went through judging
     # v23: divergence-required points are gone with the
     # oracle; the ship tests keep no missing-points term.
@@ -9008,7 +9170,11 @@ def _run_unit(ctx):
             return "local", ctx["draft_seat_model"]
         if ctx["engine"] == "gemini" or ctx.get("explicit_model"):
             if rung > 0 and ctx["engine"] == "local":
-                return "local", ROUTED_MODEL  # v14 redraft rule
+                # v26 (F8): the v14 redraft rule escalated
+                # local redrafts to the routed 14B; the
+                # route is retired, so a redraft stays on
+                # the ask's own model.
+                return "local", ctx["draft_model"]
             return ctx["engine"], ctx["draft_model"]
         if rung == 0 and not hard:
             return "nimfast", XAI_HARD_MODEL
@@ -9028,8 +9194,13 @@ def _run_unit(ctx):
             if engine in ("nim", "nimfast"):
                 _note_local_load("fallback-draft")
                 if engine == "nim" or hard:
-                    _unload_others(ROUTED_MODEL)
-                    return _generate("local", ROUTED_MODEL,
+                    # v26 (F8): the hard-ask local fallback
+                    # drafted on the routed 14B through
+                    # v25.1; the route is retired and the
+                    # fallback is the installed 9B, with the
+                    # same VRAM courtesy for it.
+                    _unload_others(LOCAL_MODEL)
+                    return _generate("local", LOCAL_MODEL,
                                      ctx["unit_q"], ctx["hits"],
                                      instr)
                 return _generate("local", LOCAL_MODEL,
@@ -9066,10 +9237,16 @@ def _run_unit(ctx):
         if deadline and time.monotonic() > deadline:
             _mark_cap()
             break
-        if rung > 0 and _or_ask_cost() >= PER_ASK_CEILING_USD:
+        if _or_ask_cost() >= PER_ASK_CEILING_USD:
             # v18 (§B remainder): past the per-ask cost line the
             # ladder stops buying redrafts; the best judged
             # draft goes to the capped-partial path below.
+            # v26 (F1): the ceiling is consulted at EVERY rung
+            # top, rung 0 included — through v25.1 the
+            # rung > 0 condition made it a redraft brake only,
+            # so a first draft (or a re-run's first draft on an
+            # ask whose sibling units already spent) started
+            # past the line unchecked.
             cost_capped = True
             break
         rungs = rung + 1
@@ -9126,38 +9303,57 @@ def _run_unit(ctx):
             _actx.served_models["draft"] = _srv
         ctx["_served"], ctx["_dg"], ctx["_fb"] = served, dg, fb
         ctx["_prompt"] = prompt
-        _a, ungrounded = _check_figures(
-            draft, ctx["question"], ctx["hits"],
-            extra_allowed=ctx["allowed_extra"])
-        mech_failures = _mech_required_failures(
-            draft, ctx["mechanisms"], ctx.get("csra_comp"))
-        quantities = _quantities_for(draft)
-        parsed = _parse_citations(draft, ctx["hits"])
-        uncited_lb = parsed["uncited_lb"]
-        # v16 item 4: a mechanism-led answer's LEAD factual
-        # sentence is load-bearing by construction (it states
-        # the mechanism the whole answer hangs on). Track it for
-        # the micro-repair and the named-citation objection.
-        lead_sentence = None
-        if ctx["mechanisms"]:
-            for s in parsed["sentences"]:
-                if s["factual"]:
-                    lead_sentence = s["text"]
-                    break
-        lead_uncited = bool(lead_sentence
-                            and lead_sentence in uncited_lb)
-        c_claims, c_forced = _conflict_claims(conflicts, draft)
-        # v18 (F16): conflict claims are resolved IN CODE ONLY
-        # and never enter the judge-facing claim set (pass 2
-        # item F1): a draft that does not surface both values
-        # fails this gate whatever any judge says about it.
-        conflict_fail = bool(c_forced)
-        extra_claims = [dict(cc, span=cc["text"])
-                        for cc in parsed["cited_claims"]]
+        try:
+            _a, ungrounded = _check_figures(
+                draft, ctx["question"], ctx["hits"],
+                extra_allowed=ctx["allowed_extra"])
+            mech_failures = _mech_required_failures(
+                draft, ctx["mechanisms"], ctx.get("csra_comp"))
+            quantities = _quantities_for(draft)
+            parsed = _parse_citations(draft, ctx["hits"])
+            uncited_lb = parsed["uncited_lb"]
+            # v16 item 4: a mechanism-led answer's LEAD factual
+            # sentence is load-bearing by construction (it states
+            # the mechanism the whole answer hangs on). Track it for
+            # the micro-repair and the named-citation objection.
+            lead_sentence = None
+            if ctx["mechanisms"]:
+                for s in parsed["sentences"]:
+                    if s["factual"]:
+                        lead_sentence = s["text"]
+                        break
+            lead_uncited = bool(lead_sentence
+                                and lead_sentence in uncited_lb)
+            c_claims, c_forced = _conflict_claims(conflicts, draft)
+            # v18 (F16): conflict claims are resolved IN CODE ONLY
+            # and never enter the judge-facing claim set (pass 2
+            # item F1): a draft that does not surface both values
+            # fails this gate whatever any judge says about it.
+            conflict_fail = bool(c_forced)
+            extra_claims = [dict(cc, span=cc["text"])
+                            for cc in parsed["cited_claims"]]
+        except Exception as e:
+            # v26 (F10): a checker that RAISES fails closed
+            # like a checker that fails — the unit IDKs with
+            # the exception recorded, instead of the exception
+            # escaping to do_POST's generic handler (a bare
+            # 500, and no ask record was written). The catch
+            # is scoped to the checker invocations. Any prior
+            # judged draft is discarded too: the gate
+            # variables are mid-update for a draft that was
+            # never judged, so no disposition may read them
+            # against the older draft.
+            check_error = f"{type(e).__name__}: {e}"[:200]
+            judged_draft = None
+            break
         if served and served.startswith(LOCAL_MODEL):
             # A resident 9B draft is done; free its VRAM before
             # judging in case a local fallback seat is needed.
-            _unload_others(ROUTED_MODEL)
+            # v26 (F8): through v25.1 this kept the routed
+            # 14B and unloaded everything else (the 9B
+            # included, by indirection); it now unloads the
+            # 9B drafter itself, which is the stated intent.
+            ollama_unload(LOCAL_MODEL)
         _set_stage(f"checking round {rung + 1}")
         _set_phase("checking", round=rung + 1)
         jt0 = time.monotonic()
@@ -9196,6 +9392,11 @@ def _run_unit(ctx):
             # and starts only when the budget can cover it.
             if deadline and not _call_may_start(deadline):
                 _mark_cap()
+                new_lead = None
+            elif _or_ask_cost() >= PER_ASK_CEILING_USD:
+                # v26 (F1): a lead repair is a paid leg start;
+                # it does not start at the ceiling either.
+                cost_capped = True
                 new_lead = None
             elif not _claim_draft_call():
                 draft_capped = True
@@ -9316,15 +9517,25 @@ def _run_unit(ctx):
         if stripped_draft is not None:
             draft = stripped_draft
             judged_draft = stripped_draft
-            parsed = _parse_citations(stripped_draft, ctx["hits"])
-            uncited_lb = parsed["uncited_lb"]
-            _a, ungrounded = _check_figures(
-                stripped_draft, ctx["question"], ctx["hits"],
-                extra_allowed=ctx["allowed_extra"])
-            mech_failures = _mech_required_failures(
-                stripped_draft, ctx["mechanisms"],
-                ctx.get("csra_comp"))
-            quantities = _quantities_for(stripped_draft)
+            try:
+                parsed = _parse_citations(stripped_draft,
+                                          ctx["hits"])
+                uncited_lb = parsed["uncited_lb"]
+                _a, ungrounded = _check_figures(
+                    stripped_draft, ctx["question"], ctx["hits"],
+                    extra_allowed=ctx["allowed_extra"])
+                mech_failures = _mech_required_failures(
+                    stripped_draft, ctx["mechanisms"],
+                    ctx.get("csra_comp"))
+                quantities = _quantities_for(stripped_draft)
+            except Exception as e:
+                # v26 (F10): the strip's re-check is a checker
+                # invocation too — same fail-closed rule as
+                # the per-rung wrap above.
+                check_error = f"{type(e).__name__}: {e}"[:200]
+                judged_draft = None
+                stripped_draft = None
+        if stripped_draft is not None:
             # v18 (F7): the stripped draft is RE-CHECKED before
             # it can ship. Through v17.3 only the deterministic
             # gates re-ran and the ship test below read the
@@ -9332,24 +9543,32 @@ def _run_unit(ctx):
             # check-failed draft into a verified ship.
             _set_stage("checking (stripped draft)")
             _jt2 = time.monotonic()
-            jr = _check_round(
-                judge_q, ctx["hits"], stripped_draft, hard,
-                judge_block, corp=ctx.get("corp"),
-                mechanisms=ctx["mechanisms"],
-                extra_claims=[dict(cc, span=cc["text"])
-                              for cc in parsed["cited_claims"]],
-                local_only=bool(ctx.get("local_mode")),
-                          judge_model=ctx.get("judge_model"),
-                          extract_model=ctx.get("extract_model"),
-                use_cache=not ctx.get("fresh"), deadline=deadline)
+            try:
+                jr = _check_round(
+                    judge_q, ctx["hits"], stripped_draft, hard,
+                    judge_block, corp=ctx.get("corp"),
+                    mechanisms=ctx["mechanisms"],
+                    extra_claims=[dict(cc, span=cc["text"])
+                                  for cc in parsed["cited_claims"]],
+                    local_only=bool(ctx.get("local_mode")),
+                              judge_model=ctx.get("judge_model"),
+                              extract_model=ctx.get("extract_model"),
+                    use_cache=not ctx.get("fresh"), deadline=deadline)
+                _cc3, _cf3 = _conflict_claims(conflicts,
+                                              stripped_draft)
+                conflict_fail = bool(_cf3)
+            except Exception as e:
+                # v26 (F10): same fail-closed rule — a checker
+                # exception in the strip's re-judge IDKs the
+                # unit with the exception recorded.
+                check_error = f"{type(e).__name__}: {e}"[:200]
+                judged_draft = None
             judge_ms += int((time.monotonic() - _jt2) * 1000)
-            refute_ms += jr.get("refute_ms", 0)
-            judged_draft = stripped_draft
-            if deadline and time.monotonic() > deadline:
-                _mark_cap()
-            _cc3, _cf3 = _conflict_claims(conflicts,
-                                          stripped_draft)
-            conflict_fail = bool(_cf3)
+            if check_error is None:
+                refute_ms += jr.get("refute_ms", 0)
+                judged_draft = stripped_draft
+                if deadline and time.monotonic() > deadline:
+                    _mark_cap()
     # v23 (WS1): the ladder is done; what remains (capped
     # assembly, IDK assembly) is the final-checks phase on the
     # page's stepper.
@@ -9459,10 +9678,29 @@ def _run_unit(ctx):
             # round's judge coverage, as in the shipped exit)
             # and the guard's firing is logged on the record.
             _chk = jr.get("checks") or {}
-            _passed_checks = bool(jr.get("pass")) and not (
+            # v26 (F4): the guard's test is the FULL ship
+            # test (the rung loop's six terms), not part of
+            # it. Through v25.1 a draft failing ONLY the
+            # mechanism, quantity, conflict, or uncited gate
+            # rode this exit whole under a checked badge
+            # whenever the assembly was lossy — those
+            # failures live in unit variables, never in
+            # jr["checks"]. The answer-level figure term
+            # (ungrounded) is the ship test's own figure
+            # gate and belongs here for the same reason: the
+            # round's claim-level figure block can be clean
+            # while the shipped text carries an ungrounded
+            # figure (the F6 probe's exact shape). With all
+            # the terms, such drafts fall through to the
+            # partial assembly below, missing disclosure
+            # and all.
+            _passed_checks = bool(jr.get("pass")) \
+                and not ungrounded and not (
                 (_chk.get("figures") or {}).get("failed")) \
                 and not ((_chk.get("citations") or {}).get(
-                    "failed"))
+                    "failed")) \
+                and not mech_failures and not quantities \
+                and not conflict_fail and not uncited_lb
             if _passed_checks:
                 _supp_n = len([c for c in jr["claims"]
                                if not c.get("meta")
@@ -9542,10 +9780,14 @@ def _run_unit(ctx):
     if judged_draft is not None and jr is not None \
             and jr["mode"] != "none" and jr["claims"]:
         _chk2 = jr.get("checks") or {}
-        if jr.get("pass") and not (
+        # v26 (F4): the same full ship test as the first
+        # guard — see the note there.
+        if jr.get("pass") and not ungrounded and not (
                 (_chk2.get("figures") or {}).get("failed")) \
                 and not ((_chk2.get("citations") or {}).get(
-                    "failed")):
+                    "failed")) \
+                and not mech_failures and not quantities \
+                and not conflict_fail and not uncited_lb:
             assembly_guard = {
                 "fired": True,
                 "supported_claims": len([
@@ -9580,6 +9822,9 @@ def _run_unit(ctx):
     if gen_error:
         missing.append("the answering model could not run "
                        f"({gen_error})")
+    if check_error:
+        missing.append("the answer's checks could not run "
+                       f"({check_error})")
     if cost_capped:
         missing.append("the ask reached its per-ask cost ceiling "
                        f"(${PER_ASK_CEILING_USD:.2f}) before a "
@@ -9614,9 +9859,16 @@ def _run_unit(ctx):
                     gate = "grounding"
     if cap_hit:
         gate = "time"
+    # v26 (F10): a checker exception rides the judging
+    # errors, so the ask record's per-unit judge_errors
+    # carry it (the record does not copy unit missing).
+    _idk_errors = list((jr or {}).get("errors", []))
+    if check_error:
+        _idk_errors.insert(0, "checker exception: "
+                           + check_error)
     return dict(base, answer=None, badge="idk",
                 judging={"mode": (jr or {}).get("mode", "none"),
-                         "errors": (jr or {}).get("errors", []),
+                         "errors": _idk_errors,
                          "annotation": _checks_annotation(jr)
                          if jr else "",
                          "checks": (jr or {}).get("checks")},
@@ -9735,8 +9987,9 @@ def _run_unit_quick(ctx):
     ungrounded figures, no mechanism failures, no quantity
     failures, no uncited factual sentences, no conflict
     failure. The draft call is _generate itself (the seat's
-    own chain, counted once against the ask's shared
-    draft-call cap exactly as a Deep rung is); there is no
+    own chain; v26 F9: claimed against THIS unit's own
+    2-call budget, not the ask's shared Deep cap — the
+    claim still counts on the ask-wide total); there is no
     _try_generate local rescue — if the seat raises, the
     unit IDKs. Any material failure IDKs the unit, so a
     Quick answer the code checks cannot clear is never
@@ -9759,6 +10012,8 @@ def _run_unit_quick(ctx):
     deadline = ctx.get("deadline")
     budget_s = ASK_BUDGET_HARD_S if hard else ASK_BUDGET_SIMPLE_S
     _actx0 = _ask_ctx()
+    # v26 (F9): this unit's own draft budget starts here.
+    _actx0.quick_unit_calls = 0
     if _actx0.ask_t0 is not None:
         _ask_clock_class(hard)
         _cands = [d for d in (_actx0.class_deadline,
@@ -9790,6 +10045,7 @@ def _run_unit_quick(ctx):
     cap_hit = False
     cut_phase = None
     draft_capped = False
+    cost_capped = False
     gen_error = None
     draft = None
     served = None
@@ -9808,9 +10064,15 @@ def _run_unit_quick(ctx):
         _mark_cap()
     elif deadline and not _call_may_start(deadline):
         _mark_cap()
-    elif not _claim_draft_call():
+    elif _or_ask_cost() >= PER_ASK_CEILING_USD:
+        # v26 (F1): the per-ask ceiling is a start seam in
+        # this lane too — at the ceiling the first draft
+        # does not start and the unit IDKs on the ceiling.
+        cost_capped = True
+    elif not _claim_quick_draft_call():
         draft_capped = True
-    if draft is None and not (cap_hit or draft_capped):
+    if draft is None and not (cap_hit or draft_capped
+                              or cost_capped):
         instr = ctx["instructions"]
         if draft_extra:
             instr = (instr + "\n\n" + draft_extra).strip()
@@ -9862,6 +10124,7 @@ def _run_unit_quick(ctx):
     ungrounded, mech_failures, quantities = [], [], []
     uncited_lb, stripped = [], []
     conflict_fail = False
+    gate_error = None  # v26 (F10): a checker exception's text
 
     def _det_gates(text):
         _p = _parse_citations(text, ctx["hits"])
@@ -9897,13 +10160,24 @@ def _run_unit_quick(ctx):
         return text, _p, _ung, _mf, _qs, _cf, _unc, _str
 
     if draft is not None:
-        draft, parsed, ungrounded, mech_failures, quantities, \
-            conflict_fail, uncited_lb, stripped = \
-            _gates_with_strip(draft)
+        try:
+            draft, parsed, ungrounded, mech_failures, \
+                quantities, conflict_fail, uncited_lb, \
+                stripped = _gates_with_strip(draft)
+        except Exception as e:
+            # v26 (F10): a checker that RAISES fails closed
+            # like a checker that fails — the unit IDKs with
+            # the exception recorded, instead of the exception
+            # escaping to do_POST's generic handler (a bare
+            # 500, and no ask record was written). The catch
+            # is scoped to the checker invocations (the
+            # _det_gates / _gates_with_strip calls).
+            gate_error = f"{type(e).__name__}: {e}"[:200]
+            draft = None
     # --- v25.1: ONE repair draft when the floor still fails.
     # Same seat, the failures listed verbatim; the repaired
     # draft faces the same gates. The lane's draft cap is 2
-    # (initial + repair); the ask's shared cap still governs,
+    # (initial + repair, claimed per-part since v26 F9),
     # and the anchored deadline still decides whether the
     # repair may start at all.
     quick_repair = False
@@ -9923,7 +10197,12 @@ def _run_unit_quick(ctx):
         elif deadline and not _call_may_start(deadline):
             _mark_cap()
             _may = False
-        elif not _claim_draft_call():
+        elif _or_ask_cost() >= PER_ASK_CEILING_USD:
+            # v26 (F1): the repair is a paid leg start; it
+            # does not start at the ceiling either.
+            cost_capped = True
+            _may = False
+        elif not _claim_quick_draft_call():
             draft_capped = True
             _may = False
         if _may:
@@ -9957,9 +10236,15 @@ def _run_unit_quick(ctx):
                     _actx0.draft_family = _model_family(_srv)
                     _actx0.served_models["draft"] = _srv
                     served = _rserved
-                draft, parsed, ungrounded, mech_failures, \
-                    quantities, conflict_fail, uncited_lb, \
-                    stripped = _gates_with_strip(draft)
+                try:
+                    draft, parsed, ungrounded, mech_failures, \
+                        quantities, conflict_fail, uncited_lb, \
+                        stripped = _gates_with_strip(draft)
+                except Exception as e:
+                    # v26 (F10): same fail-closed rule at the
+                    # repair's re-gate.
+                    gate_error = f"{type(e).__name__}: {e}"[:200]
+                    draft = None
             if _trk is not None:
                 _trk_set(_trk, "drafting", "done")
             _set_phase("final checks")
@@ -9980,7 +10265,8 @@ def _run_unit_quick(ctx):
     checks["citations"]["failed"] = list(uncited_lb)
     checks["registry"] = [e["id"] for e in
                           (ctx.get("registry_entries") or ())]
-    judging = {"mode": "quick", "errors": [],
+    judging = {"mode": "quick",
+               "errors": [gate_error] if gate_error else [],
                "annotation": "Quick mode: deterministic checks "
                              "only (figures, citations, "
                              "quantities, arithmetic, mechanism "
@@ -9994,7 +10280,7 @@ def _run_unit_quick(ctx):
             "prompt": prompt, "rungs": 1 if attempted else 0,
             "judge_ms": 0, "refute_ms": 0,
             "cap_hit": cap_hit, "budget_cut": cap_hit,
-            "cut_phase": cut_phase, "cost_capped": False,
+            "cut_phase": cut_phase, "cost_capped": cost_capped,
             "draft_calls": _ask_ctx().draft_calls,
             "draft_capped": draft_capped,
             "assembly_guard": None,
@@ -10029,11 +10315,21 @@ def _run_unit_quick(ctx):
     if gen_error:
         missing.append("the answering model could not run "
                        f"({gen_error})")
-    if draft_capped:
-        missing.append("the ask reached its draft-call cap "
-                       f"({DRAFT_CALL_CAP} drafting calls) "
+    if gate_error:
+        missing.append("the answer's checks could not run "
+                       f"({gate_error})")
+    if cost_capped:
+        missing.append("the ask reached its per-ask cost "
+                       f"ceiling (${PER_ASK_CEILING_USD:.2f}) "
                        "before a checked answer could be "
                        "assembled")
+    if draft_capped:
+        # v26 (F9): the cap that binds a Quick unit is its
+        # own per-part budget, so the note names that.
+        missing.append("this part reached its draft-call "
+                       f"cap ({QUICK_UNIT_DRAFT_CAP} drafting "
+                       "calls) before a checked answer could "
+                       "be assembled")
     for f in mech_failures:
         missing.append("the answer did not establish: "
                        + f["label"])
@@ -11128,6 +11424,31 @@ class Handler(BaseHTTPRequestHandler):
                 return
             raw = self.rfile.read(length)
             req = json.loads(raw)
+            # v26 (N2; GPT's finding 2 + Claude's note 3 via
+            # plan §7): request-shape validation BEFORE the
+            # async branch. Through v25.1 a non-object body
+            # failed at .get() and a non-string field at
+            # .strip(), both landing in the catch-all as a
+            # bare 500 with no record; and an unknown mode on
+            # the async path was accepted with a 202 (the job
+            # then failed opaquely). Shape errors are client
+            # errors: 400, before any job exists. (The sync
+            # flow re-validates mode below; harmless.)
+            if not isinstance(req, dict):
+                self._json({"error": "request body must be "
+                            "a JSON object"}, 400)
+                return
+            for _fld in ("question", "model"):
+                if _fld in req \
+                        and not isinstance(req[_fld], str):
+                    self._json({"error": _fld + " must be "
+                                "a string"}, 400)
+                    return
+            if "mode" in req \
+                    and req["mode"] not in ("quick", "deep"):
+                self._json({"error": "unknown mode: "
+                            + str(req["mode"])[:40]}, 400)
+                return
             _inf_entry = None  # v18 (F18): dedupe ownership
             _inf_key = None
             # v15 (S5): the async job path (POST /ask?async=1 or
@@ -11173,6 +11494,9 @@ class Handler(BaseHTTPRequestHandler):
             # drafters or judges, whatever a client sends.
             seat_models = {"draft": "hosted",
                            "extract": "hosted", "judge": "hosted"}
+            # v26 (F5): set below when a colliding judge pick
+            # is substituted; stamped on the ask record.
+            seat_substitution = None
             _sm = req.get("seat_models")
             if isinstance(_sm, dict):
                 for _sk in seat_models:
@@ -11210,6 +11534,20 @@ class Handler(BaseHTTPRequestHandler):
                 # the old mode's exact shape, one version of
                 # transition for old clients.
                 _lm = model or LOCAL_MODEL
+                # v26 (F3, D4 = VALIDATE): the legacy mapping
+                # overwrites the validated seat picks with the
+                # raw model field — through v25.1 ANY installed
+                # model (the coder, either abliterated 8B)
+                # became drafter + extractor + judge here,
+                # skipping the §8 allowlist the panel seats
+                # honor. The path stays; the model must pass
+                # the same membership check, or the ask is
+                # refused at intake.
+                if _lm not in LOCAL_SEAT_ALLOWLIST:
+                    self._json({"error": "local model not in "
+                                "the seat allowlist: "
+                                + str(_lm)[:60]}, 400)
+                    return
                 seat_models = {"draft": _lm, "extract": _lm,
                                "judge": _lm}
                 search_help = "off"
@@ -11217,6 +11555,36 @@ class Handler(BaseHTTPRequestHandler):
             if search_help == "off":
                 use_rewrite = False
                 use_rerank = False
+            # v26 (F5, D3 = ENFORCE): the draft-family
+            # exclusion at intake. §C's rule (a model never
+            # judges its own draft) was dead code through
+            # v25.1 — draft_family was written at serve time
+            # and read nowhere — so panel picks could seat
+            # the drafting family as its own judge and the
+            # verdict counted. A colliding judge pick is
+            # substituted with the roster's default
+            # different-family judge (the hosted chain) and
+            # the substitution is stamped on the ask record.
+            # The legacy local mapping is exempt HERE by
+            # design: a local ask is fully on-device, the
+            # allowlist holds one family only, and its judge
+            # leg is refused at runtime instead (the round
+            # finals on deterministic checks) — the ask
+            # stays local and never self-judges either way.
+            if not local_mode:
+                _dpick = seat_models.get("draft")
+                _jpick = seat_models.get("judge")
+                if _jpick != "hosted" and _dpick != "hosted" \
+                        and _model_family(_jpick) \
+                        == _model_family(_dpick):
+                    seat_substitution = {
+                        "seat": "judge", "from": _jpick,
+                        "to": "hosted",
+                        "reason": "the judge pick is the "
+                        "drafting family ("
+                        + _model_family(_jpick) + "); a "
+                        "model never judges its own draft"}
+                    seat_models["judge"] = "hosted"
             seat_local = {k: (None if v == "hosted" else v)
                           for k, v in seat_models.items()}
             any_seat_local = any(seat_local.values())
@@ -11346,15 +11714,27 @@ class Handler(BaseHTTPRequestHandler):
             fresh = bool(req.get("fresh") or req.get("nocache")
                          or parse_qs(u.query).get("fresh")
                          or parse_qs(u.query).get("nocache"))
-            # v13 routing: contested-figure and bundled questions asked
-            # of the local default go to the 14B. Explicit model picks
-            # and the Gemini chain are never rerouted. The cache key
-            # carries the routed model, so a 14B answer is never
-            # replayed for a 9B ask or vice versa.
-            routed_model, route_reason = model, ""
-            if not use_gemini:
-                routed_model, route_reason = route_local_model(
-                    question, model)
+            # v26 (F8, D2 = RETIRE): the v13 routed-model
+            # route is deleted. Through v25.1, contested and
+            # bundled questions asked of the local default
+            # were silently rerouted to qwen3:14b — a model
+            # deleted from the PC in the 2026-10-15 cleanup,
+            # so the route drafted on a ghost (or failed
+            # trying) and freed VRAM for a model that would
+            # never serve. A no-model ask now follows the
+            # normal seat logic: the local default is the
+            # installed 9B, explicit picks name their model,
+            # and the default seats draft on the hosted
+            # ladder. What the route ALSO carried — the
+            # hard-question classification for default local
+            # asks (it sets the class deadline) — is kept as
+            # a plain question property below (_hard_q); it
+            # was never the route's to take with it.
+            routed_model = model or LOCAL_MODEL
+            route_reason = ""
+            _hard_q = (not use_gemini
+                       and model in ("", "default", LOCAL_MODEL)
+                       and bool(is_hard_question(question)))
             # v25: the mode rides the key (last position) —
             # a Quick answer is never served for a Deep ask
             # or vice versa, and in-flight dedupe (same key)
@@ -11396,7 +11776,9 @@ class Handler(BaseHTTPRequestHandler):
                     # through and run this ask itself (without
                     # re-acquiring).
             if not model and not use_gemini:
-                # No model named: the routed local default answers.
+                # No model named: the local default answers
+                # (v26 F8: the installed 9B; the routed 14B
+                # default is retired).
                 model = routed_model
             if not model:
                 if _inf_entry is not None:
@@ -11493,6 +11875,25 @@ class Handler(BaseHTTPRequestHandler):
                          figure_check, served, fallback, downgraded,
                          full_prompt, rungs, judge_ms, refute_ms=0,
                          cap_hit=False):
+                # v26 (F14): one final cancel check at the
+                # top of response assembly — a Stop pressed
+                # after the last unit seam (during assembly
+                # itself) was invisible through v25.1 and the
+                # ask reported "done" with its answer. This is
+                # _check_cancel's FLAG half only, mirroring
+                # its job-vs-context precedence exactly: the
+                # helper's deadline half must not run here,
+                # because a leg that started inside its margin
+                # legitimately finishes past the soft ask
+                # deadline, and raising TimeoutError at
+                # assembly would 500 those asks (see BUILD.md).
+                _job_now = getattr(_STAGE_TLS, "job", None)
+                if _job_now is not None:
+                    _cancelled_now = bool(_job_now.get("cancel"))
+                else:
+                    _cancelled_now = bool(_ask_ctx().cancel)
+                if _cancelled_now:
+                    raise _AskCancelled()
                 t_end = time.monotonic()
                 timing = {"retrieve_ms": int((t_retrieved - t_start)
                                              * 1000),
@@ -11549,7 +11950,17 @@ class Handler(BaseHTTPRequestHandler):
                 # for the same reason (deterministic checks
                 # only; the mode is in the key, so the lanes
                 # stay separated regardless).
-                if badge in ("checked", "verified_web"):
+                # v26 (F15): an ABANDONED job's late
+                # completion writes NEITHER the answer cache
+                # NOR the ask record. Through v25.1 the
+                # orphaned thread's finish still cached its
+                # answer — a later identical ask replayed a
+                # result the job layer had already reported
+                # as an error — and still wrote its record.
+                _job_abandoned = bool(
+                    _job_rec and _job_rec.get("_abandoned"))
+                if badge in ("checked", "verified_web") \
+                        and not _job_abandoned:
                     _cache_put(_ASK_CACHE, ask_key, result)
                 # v18 (§E): persist the ask record (see
                 # _record_ask). Per-unit detail comes from the
@@ -11559,7 +11970,7 @@ class Handler(BaseHTTPRequestHandler):
                     _units_now = units
                 except NameError:
                     _units_now = []
-                _record_ask({
+                _ask_rec = {
                     "kind": "ask", "ask_id": _ask_ctx().ask_id,
                     "ts": time.time(),
                     "wall_s": round(t_end - t_start, 3),
@@ -11575,6 +11986,7 @@ class Handler(BaseHTTPRequestHandler):
                     # v24 (§8): the seat picks + the two panel
                     # lines, as served for this ask.
                     "seat_models": dict(seat_models),
+                    "seat_substitution": seat_substitution,
                     "search_help": search_help
                     or ("off" if local_mode else "hosted"),
                     "web_branch": web_branch_pick
@@ -11665,7 +12077,10 @@ class Handler(BaseHTTPRequestHandler):
                                           or {}).get("errors"),
                         "retrieval": u.get("retr_pools"),
                     } for u in _units_now],
-                })
+                }
+                # v26 (F15): the abandoned-job gate (above).
+                if not _job_abandoned:
+                    _record_ask(_ask_rec)
                 # v18 (F18): publish to any identical in-flight
                 # duplicate waiting on this ask, then release.
                 if _inf_entry is not None:
@@ -11758,12 +12173,11 @@ class Handler(BaseHTTPRequestHandler):
             # under its survey instructions.
             engine = "gemini" if use_gemini else "local"
             draft_model = model if use_gemini else routed_model
-            if not use_gemini and route_reason \
-                    and not seat_local["draft"]:
-                # v13: free the 9B's VRAM before the 14B loads
-                # (v14.1: every other resident chat model goes too).
-                _unload_others(ROUTED_MODEL)
-            hard = bool(route_reason) or bool(mechanisms_all)
+            # v26 (F8): the v13 VRAM eviction that freed the
+            # GPU for the routed 14B is deleted with the
+            # route — a hard ask no longer unloads resident
+            # models for a model that will never serve.
+            hard = _hard_q or bool(mechanisms_all)
             # v23.2 (F1): fix the ask's class deadline NOW
             # (150s simple / 285s hard from ask start). The
             # units below carry it in their ctx, and _run_unit
@@ -11977,9 +12391,13 @@ class Handler(BaseHTTPRequestHandler):
                 return _run_unit_quick(_ctx)
 
             # v18 (R8): bundled units run in PARALLEL (max 3
-            # workers). Each unit's per-ask state rides its own
-            # _AskContext (F10), so parallel units cannot corrupt
-            # each other's accounting; the shared stage line is
+            # workers). v26 (F16) correction: the units do NOT
+            # each ride their own _AskContext — ONE shared
+            # _AskContext is propagated into every worker by
+            # _submit, so cost, draft-call accounting, and
+            # events are ask-wide BY DESIGN (F10 made the
+            # context itself thread-safe; per-unit state rides
+            # each unit's own ctx dict). The shared stage line is
             # last-writer-wins across units (documented nuance),
             # and per-unit events in parallel mode are the units'
             # full ask events. The branch-out re-run below stays
@@ -12445,6 +12863,7 @@ class Handler(BaseHTTPRequestHandler):
                     "mode": ask_mode,  # v25: the lane that ran
                     "local": bool(local_mode or any_seat_local),
                     "seat_models": dict(seat_models),
+                    "seat_substitution": seat_substitution,
                     "badge": "cancelled", "status": "cancelled",
                     "cost_usd": _or_ask_cost(),
                     "phase_ms": _phase_ms_snapshot()})
