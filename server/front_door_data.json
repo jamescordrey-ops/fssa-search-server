@@ -1,7 +1,7 @@
 {
  "schema": 1,
  "generated": "2026-10-16",
- "notes": "Front door rows: the v27.1/v27.2 WIRED set plus the v29 wiring of every DRAFTED row that re-traced clean in the v29 data review (v29/FRONT_DOOR_REVIEW.md). Every row traces to FRONT_DOOR_DATA.md in the v27.1 tree plus its v29 trace; the 15 UNVERIFIED topics are absent on purpose. fs_annual_cap is flagged general: the router's specificity guard keeps it from claiming a question that names a service or topic another row covers.",
+ "notes": "Front door rows: the v27.1/v27.2 WIRED set plus the v29 wiring of every DRAFTED row that re-traced clean in the v29 data review (v29/FRONT_DOOR_REVIEW.md). Every row traces to FRONT_DOOR_DATA.md in the v27.1 tree plus its v29 trace; the 15 UNVERIFIED topics are absent on purpose. fs_annual_cap is flagged general: the router's specificity guard keeps it from claiming a question that names a service or topic another row covers. v29.1: paid_relative_cap corrected and the parent-of-own-child territory split into parent_guardian_minor_bar + parent_paid_own_child (v29.1/BUGS.md).",
  "rows": [
   {
    "id": "csra",
@@ -1050,7 +1050,7 @@
      "period": "hours per week",
      "plain": true
     },
-    "conditions": "Legally responsible individuals (a spouse, or a parent of a minor) face extra bars: a spouse may be paid only under Structured Family Caregiving."
+    "conditions": "A relative may be paid only when employed by, or a contractor of, a DDARS-approved provider agency, with the choice justified in the PCISP. The 40-hour cap is on residential habilitation services (Participant Assistance and Care on Family Supports, Residential Habilitation and Support on CIH) furnished to an ADULT waiver individual, per paid relative or legal guardian caregiver. Two exceptions: a spouse may be paid only under Structured Family Caregiving, and a parent, stepparent, or legal guardian of a child under 18 may not be paid for any waiver-funded service to that child."
    },
    "source": "DDARS HCBS Waivers Provider Manual, Section 6.9",
    "effective": {
@@ -1059,6 +1059,47 @@
    },
    "verified_on": "2026-10-16",
    "review_by": "2027-01-15",
+   "exclude": [
+    "own child",
+    "their child",
+    "her child",
+    "his child",
+    "my child",
+    "own children",
+    "their children",
+    "her children",
+    "his children",
+    "my children",
+    "their son",
+    "their daughter",
+    "her son",
+    "her daughter",
+    "his son",
+    "his daughter",
+    "their adult child",
+    "her adult child",
+    "his adult child",
+    "their adult son",
+    "their adult daughter",
+    "her adult son",
+    "her adult daughter",
+    "his adult son",
+    "his adult daughter",
+    "minor child",
+    "minor son",
+    "minor daughter",
+    "minor children",
+    "under 18",
+    "under the age of 18",
+    "year-old son",
+    "year-old daughter",
+    "year-old child",
+    "teenage son",
+    "teenage daughter",
+    "teenage child",
+    "legal guardian",
+    "guardian"
+   ],
    "triggers": {
     "all": [
      [
@@ -1131,6 +1172,20 @@
    "golden": [
     {
      "q": "Can my daughter be a paid caregiver for me on the CIH waiver, and how many hours a week can she work?",
+     "expect": [
+      "40",
+      "hours per week"
+     ]
+    },
+    {
+     "q": "Can my brother be paid to care for me on the Family Supports waiver?",
+     "expect": [
+      "40",
+      "hours per week"
+     ]
+    },
+    {
+     "q": "Can my adult daughter be paid to care for me on the FS waiver, and how many hours a week?",
      "expect": [
       "40",
       "hours per week"
@@ -5776,6 +5831,265 @@
       "under 21",
       "4,000 hours",
       "Prior authorization"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "parent_guardian_minor_bar",
+   "engine": "coverage",
+   "topic": "P2-11a",
+   "title": "Paying a parent, stepparent, or legal guardian to care for their own minor child",
+   "values": {
+    "covered": false,
+    "program": "DD waivers (FS / CIH)",
+    "conditions": "Section 6.9 bars this because a parent, stepparent, or legal guardian is legally responsible for the minor's care: they may not receive payment for any waiver-funded service delivered to a waiver participant under 18, on either waiver. The bar is about minors only \u2014 a parent of an ADULT child may be paid as another relative, through a DDARS-approved provider agency."
+   },
+   "source": "DDARS HCBS Waivers Provider Manual, Section 6.9",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "exclude": [
+    "grandparent",
+    "grandmother",
+    "grandfather",
+    "grandma",
+    "grandpa",
+    "18-year-old",
+    "19-year-old",
+    "20-year-old",
+    "21-year-old",
+    "18 years old",
+    "19 years old",
+    "20 years old",
+    "21 years old",
+    "adult child",
+    "adult son",
+    "adult daughter"
+   ],
+   "triggers": {
+    "all": [
+     [
+      "parent",
+      "parents",
+      "mother",
+      "father",
+      "mom",
+      "dad",
+      "mama",
+      "stepparent",
+      "step-parent",
+      "stepmother",
+      "stepfather",
+      "stepmom",
+      "stepdad",
+      "guardian",
+      "legal guardian",
+      "birth mother",
+      "birth father",
+      "adoptive parent",
+      "foster parent"
+     ],
+     [
+      "minor",
+      "under 18",
+      "under the age of 18",
+      "minor child",
+      "minor son",
+      "minor daughter",
+      "year-old son",
+      "year-old daughter",
+      "year-old child",
+      "year old son",
+      "year old daughter",
+      "year old child",
+      "years old",
+      "teen",
+      "teenage",
+      "teenager",
+      "toddler",
+      "infant",
+      "preschool",
+      "school-age",
+      "school age",
+      "young child",
+      "little boy",
+      "little girl",
+      "child under 18",
+      "son under 18",
+      "daughter under 18"
+     ],
+     [
+      "paid",
+      "pay",
+      "get paid",
+      "be paid",
+      "caregiver",
+      "care for",
+      "take care",
+      "provide care",
+      "providing care",
+      "hired",
+      "hire",
+      "work as",
+      "working as",
+      "provider"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "Can a mother be paid to care for her 10-year-old son on the Family Supports waiver?",
+     "expect": [
+      "No",
+      "under 18",
+      "Section 6.9"
+     ]
+    },
+    {
+     "q": "Can a dad be paid to care for his 8-year-old daughter on the waiver?",
+     "expect": [
+      "No",
+      "under 18"
+     ]
+    },
+    {
+     "q": "Can a legal guardian be paid to care for a minor on the CIH waiver?",
+     "expect": [
+      "No",
+      "any waiver-funded service"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "parent_paid_own_child",
+   "engine": "lookup",
+   "topic": "P2-11b",
+   "title": "Can a parent be paid to care for their own child on a waiver? It depends on the child's age",
+   "values": {
+    "facts": [
+     {
+      "label": "Child under 18",
+      "value": "No \u2014 a parent, stepparent, or legal guardian may not be paid for any waiver-funded service to their own minor child (Family Supports or CIH)"
+     },
+     {
+      "label": "Adult child (18 or older)",
+      "value": "Yes \u2014 the parent is treated as another relative: paid only through a DDARS-approved provider agency, with the choice justified in the person's plan (PCISP); residential habilitation (PAC on Family Supports, RHS on CIH) is capped at 40 hours per week per caregiver"
+     },
+     {
+      "label": "A spouse is different",
+      "value": "a spouse may be paid only under Structured Family Caregiving"
+     }
+    ]
+   },
+   "source": "DDARS HCBS Waivers Provider Manual, Section 6.9",
+   "effective": {
+    "from": null,
+    "to": null
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "exclude": [
+    "minor",
+    "under 18",
+    "under the age of 18",
+    "minor child",
+    "minor son",
+    "minor daughter",
+    "year-old son",
+    "year-old daughter",
+    "year-old child",
+    "teenage",
+    "teenager",
+    "toddler",
+    "infant",
+    "preschool",
+    "school-age",
+    "school age",
+    "young child"
+   ],
+   "triggers": {
+    "all": [
+     [
+      "parent",
+      "parents",
+      "mother",
+      "father",
+      "mom",
+      "dad",
+      "stepparent",
+      "step-parent",
+      "stepmother",
+      "stepfather",
+      "guardian",
+      "son",
+      "daughter",
+      "child",
+      "children"
+     ],
+     [
+      "paid",
+      "pay",
+      "get paid",
+      "be paid",
+      "caregiver",
+      "care for",
+      "take care",
+      "provide care",
+      "providing care",
+      "hire",
+      "hired",
+      "work as",
+      "working as"
+     ],
+     [
+      "own child",
+      "their child",
+      "her child",
+      "his child",
+      "my child",
+      "own children",
+      "their children",
+      "her children",
+      "his children",
+      "my children",
+      "their son",
+      "their daughter",
+      "her son",
+      "her daughter",
+      "his son",
+      "his daughter",
+      "their adult child",
+      "her adult child",
+      "his adult child",
+      "their adult son",
+      "their adult daughter",
+      "her adult son",
+      "her adult daughter",
+      "his adult son",
+      "his adult daughter"
+     ]
+    ]
+   },
+   "golden": [
+    {
+     "q": "Can a parent be paid to care for their own child on a waiver?",
+     "expect": [
+      "Child under 18",
+      "No",
+      "Adult child",
+      "40 hours per week"
+     ]
+    },
+    {
+     "q": "Can a father be paid to care for his adult daughter on the Family Supports waiver?",
+     "expect": [
+      "Adult child",
+      "40 hours per week"
      ]
     }
    ]
