@@ -32,7 +32,15 @@
       "csra",
       "community spouse resource allowance",
       "spouse resource allowance",
-      "spousal resource allowance"
+      "spousal resource allowance",
+      "going into a nursing home",
+      "entering a nursing home",
+      "goes into a nursing home",
+      "going in a nursing home",
+      "husband's entering",
+      "wife's entering",
+      "as his wife",
+      "as her husband"
      ],
      [
       "savings",
@@ -51,7 +59,8 @@
       "investments",
       "savings account",
       "checking account",
-      "retirement accounts"
+      "retirement accounts",
+      "saved"
      ]
     ]
    },
@@ -144,7 +153,14 @@
       "keep from her income",
       "of my income can",
       "of his income can",
-      "of her income can"
+      "of her income can",
+      "going into a nursing home",
+      "entering a nursing home",
+      "going into care",
+      "of his money can",
+      "of her money can",
+      "what's left for the home",
+      "left for the home"
      ]
     ]
    },
@@ -258,17 +274,11 @@
     "give us",
     "gives us",
     "giving us",
-    "gave me",
-    "given me",
-    "given to me",
-    "gave to me",
     "wants to give me",
     "going to give me",
     "will give me",
     "will give us",
     "gift to me",
-    "left me",
-    "left to me",
     "inherit",
     "inherited",
     "inheritance"
@@ -385,11 +395,13 @@
    "values": {
     "table": {
      "2026": {
-      "amount": 2982
+      "amount": 2982,
+      "note": "a Qualified Income Trust (Miller trust) can route income over the cap so the person may still qualify"
      }
     },
     "field_labels": {
-     "amount": "Monthly income cap"
+     "amount": "Monthly income cap",
+     "note": "Over the cap"
     }
    },
    "source": "Indiana HCBS waiver standards 2026: 300% of the SSI federal benefit rate (server registry entry waiver_income_cap). The 2027 cap had not been posted by Indiana as of October 2026.",
@@ -647,7 +659,13 @@
     "washington",
     "west virginia",
     "wisconsin",
-    "wyoming"
+    "wyoming",
+    "part of his money can",
+    "part of her money can",
+    "of his money can i keep",
+    "of her money can i keep",
+    "of his income can i keep",
+    "of her income can i keep"
    ],
    "golden": [
     {
@@ -1047,7 +1065,15 @@
       "wheelchair hoist",
       "scooter hoist",
       "hand controls",
-      "hand control"
+      "hand control",
+      "wheelchair accesible",
+      "weelchair",
+      "accesible",
+      "vehical modification",
+      "vehical modifications",
+      "modify my vehical",
+      "modify a vehical",
+      "adapt my vehical"
      ],
      [
       "waiver",
@@ -1171,7 +1197,19 @@
     "windfall",
     "lump sum",
     "passed away",
-    "just passed"
+    "just passed",
+    "penalty",
+    "penaliz",
+    "transferred",
+    "gave away",
+    "signed over",
+    "deeded",
+    "lookback",
+    "look-back",
+    "gave me",
+    "take care of my own",
+    "care of my own",
+    "care for my own"
    ],
    "triggers": {
     "all": [
@@ -1872,7 +1910,7 @@
     "covered": true,
     "program": "CIH Waiver and Health & Wellness / TBI waivers (not a Family Supports Waiver service)",
     "cap": null,
-    "conditions": "A spouse, or a parent of a minor, is a legally responsible individual and may be paid ONLY under Structured Family Caregiving: a per diem paid through a DDARS-approved provider agency, never directly, and only for extraordinary care beyond what the spouse would ordinarily provide. A spouse may NOT be paid under Attendant Care, Home and Community Assistance, Respite, or Participant-Directed Home Care. Claim notes must show the true spouse relationship."
+    "conditions": "A spouse, or a parent of a minor, is a legally responsible individual and may be paid ONLY under Structured Family Caregiving: a per diem paid through a DDARS-approved provider agency, never directly, and only for extraordinary care beyond what the spouse would ordinarily provide. A spouse may NOT be paid under Attendant Care, Home and Community Assistance, Respite, or Participant-Directed Home Care. Claim notes must show the true spouse relationship. Under the service definition, Structured Family Caregiving is a caregiving arrangement in which the participant lives with the primary caregiver, who provides daily care and support to the participant in the private home of the participant or the caregiver."
    },
    "source": "DDARS HCBS Waivers Provider Manual, Sections 9.30 and 11.28 (Structured Family Caregiving; legally responsible individuals)",
    "effective": {
@@ -1933,7 +1971,11 @@
     "windfall",
     "lump sum",
     "passed away",
-    "just passed"
+    "just passed",
+    "own kid",
+    "own child",
+    "my kid",
+    "respite"
    ],
    "golden": [
     {
@@ -5706,7 +5748,10 @@
    "verified_on": "2026-10-16",
    "review_by": "2027-01-15",
    "exclude": [
-    "inherit"
+    "inherit",
+    "how much can i save",
+    "can i save",
+    "save in 2026"
    ],
    "triggers": {
     "all": [
@@ -5922,6 +5967,11 @@
    },
    "verified_on": "2026-10-16",
    "review_by": "2027-01-15",
+   "exclude": [
+    " trabajo",
+    " trabajar",
+    "trabaja "
+   ],
    "triggers": {
     "all": [
      [
@@ -6220,6 +6270,86 @@
      "expect": [
       "Adult child",
       "40 hours per week"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "eap_window",
+   "engine": "lookup",
+   "topic": "N15/N32-EAP",
+   "title": "Energy Assistance Program (EAP / LIHEAP) application window",
+   "values": {
+    "facts": [
+     {
+      "label": "Application window (program year 2027)",
+      "value": "October 1, 2026 to April 30, 2027"
+     },
+     {
+      "label": "How the benefit is paid",
+      "value": "paid directly to the utility vendor; the money does not come to the household"
+     },
+     {
+      "label": "How to apply",
+      "value": "through a local Community Action Agency / Local Service Provider"
+     }
+    ]
+   },
+   "source": "IHCDA Energy Assistance Program (LIHEAP), program year 2027 window (Battery 2 key U33; the window the v29 live EAP answer shipped)",
+   "effective": {
+    "from": "2026-10-01",
+    "to": "2027-04-30"
+   },
+   "verified_on": "2026-10-16",
+   "review_by": "2027-01-15",
+   "triggers": {
+    "all": [
+     [
+      "energy assistance",
+      "energy assistance program",
+      "heating assistance",
+      "home energy assistance",
+      "low-income home energy",
+      "liheap",
+      "the eap",
+      "eap program",
+      "heating bills",
+      "winter heating",
+      "help with my heating",
+      "utility assistance"
+     ],
+     [
+      "apply",
+      "when",
+      "application",
+      "sign up",
+      "enroll",
+      "window",
+      "how does the program pay",
+      "how does it pay",
+      "who pays",
+      "pay"
+     ]
+    ]
+   },
+   "exclude": [
+    "snap",
+    "food stamps"
+   ],
+   "golden": [
+    {
+     "q": "When can I apply for help with my winter heating bills in Indiana, and how does the program pay?",
+     "expect": [
+      "October 1, 2026",
+      "April 30, 2027",
+      "utility vendor"
+     ]
+    },
+    {
+     "q": "wen can i apply for help with my heating bills in indiana and how doese the program pay",
+     "expect": [
+      "October 1, 2026",
+      "April 30, 2027"
      ]
     }
    ]

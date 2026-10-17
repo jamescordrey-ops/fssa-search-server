@@ -617,14 +617,60 @@ _FED_URLS = {d["url"] for d in CORPUS_FED}
 _ROWS_IN = [i for i, ch in enumerate(EMBEDDINGS) if ch["url"] in _IN_URLS]
 _ROWS_FED = [i for i, ch in enumerate(EMBEDDINGS) if ch["url"] in _FED_URLS]
 
-def _embed_query(text):
-    """Get embedding vector for a query via Ollama."""
+# v30 (generation-scoped embedder): the embed model is a
+# property of the ACTIVE generation, recorded in its meta
+# table at build time (embed_model; generations built
+# before the key existed read as the historical default).
+# _embed_query resolves the model — and the optional
+# query instruction — from the open v2 store's state, so
+# a CURRENT flip back to a nomic generation restores
+# nomic queries with it: the store and the query embedder
+# cannot silently disagree (the boot canary is the
+# backstop if they ever do). Dimensions likewise come
+# from the generation (meta embed_dim / the loaded
+# matrix shape), never a hard-coded constant.
+_EMBED_DEFAULT_MODEL = "nomic-embed-text"
+
+
+def _active_embed_spec():
+    """(model, query_instruction) for the active
+    generation. Falls back to the historical nomic
+    defaults whenever no v2 store is open or the
+    generation predates the meta keys."""
     try:
-        payload = json.dumps({"model": "nomic-embed-text", "prompt": text[:2000]}).encode()
-        req = urllib.request.Request(OLLAMA + "/api/embeddings", data=payload,
+        st = _V2
+    except NameError:
+        st = None
+    if st:
+        return (st.get("embed_model") or _EMBED_DEFAULT_MODEL,
+                st.get("embed_query_instruction") or "")
+    return _EMBED_DEFAULT_MODEL, ""
+
+
+def _embed_query(text, document=False):
+    """Get an embedding vector via Ollama's /api/embed,
+    using the ACTIVE generation's embed model (see
+    _active_embed_spec). Query/document asymmetry (the
+    corpus workstream's fact sheet, Flag 1): the
+    generation's recorded query instruction is a complete
+    prefix (it ends with the Query marker) and is
+    prepended VERBATIM to query prompts only;
+    document=True embeds a stored-text probe (the boot
+    canary) and never carries it, matching how the build
+    embedded the stored side. Nomic generations record no
+    instruction and get the raw text, as before."""
+    model, instr = _active_embed_spec()
+    prompt = text or ""
+    if instr and not document:
+        prompt = instr + prompt
+    try:
+        payload = json.dumps({"model": model,
+                              "input": prompt[:2000]}).encode()
+        req = urllib.request.Request(OLLAMA + "/api/embed", data=payload,
                                      headers={"Content-Type": "application/json"})
         data = json.loads(urllib.request.urlopen(req, timeout=30).read())
-        return data["embedding"]
+        embs = data.get("embeddings") or []
+        return embs[0] if embs else None
     except Exception:
         return None
 
@@ -663,6 +709,40 @@ LOCAL_SEAT_ALLOWLIST = ("qwen3.5:9b", "qwen3.5:4b")
 # Feature toggles (can be overridden via /ask body: {"rewrite": false, "rerank": false})
 REWRITE_ENABLED = True
 RERANK_ENABLED = True
+# v30 (cross-encoder rerank seat; contract per the
+# reranker workstream's INTEGRATION.md): when the backend
+# is "ce", the fused window is rescored by a local
+# cross-encoder service (bge-reranker-v2-m3 class; the
+# service itself is a separate seat) over the same
+# title+excerpt view the LLM rerank reads. Contract: POST
+# {RERANK_CE_URL}/score {query, passages} -> {"scores"}.
+# ANY failure (unreachable, timeout, bad shape) fails
+# open to rerank_with_llm, which itself fails open to
+# fused order; no retry inside the ask. Default backend
+# stays "llm": "ce" becomes the default only when the
+# binding A/B ship rule passes (exported pools; see the
+# pool export below). Kill switch: FSSA_RERANK_BACKEND=
+# llm + restart. State surfaces in /health (rerank_ce).
+RERANK_BACKEND = os.environ.get("FSSA_RERANK_BACKEND",
+                                "llm")  # "llm" | "ce"
+RERANK_CE_URL = os.environ.get(
+    "FSSA_RERANK_CE_URL", "http://127.0.0.1:8472")
+RERANK_CE_TIMEOUT = float(os.environ.get(
+    "FSSA_RERANK_CE_TIMEOUT", "3"))
+RERANK_CE_MAX_PASSAGES = 50
+_RERANK_CE_STATE = {"last_ok": None, "last_error": None,
+                    "consecutive_failures": 0}
+# v30 (pool export for the binding rerank A/B): when
+# FSSA_POOL_EXPORT names a file, each rerank-slot ask
+# appends one JSON line there — the full pre-rerank pool
+# (section id, title, url, passage), the fused order, the
+# winning rerank order, and the backend used — in the
+# A/B harness's fixture shape (gold ids are joined later
+# from the battery keys). Log-only: unset (the default)
+# means no export and zero behavior change; export
+# errors are swallowed so an ask can never fail on it.
+_POOL_EXPORT_PATH = os.environ.get("FSSA_POOL_EXPORT", "")
+_POOL_EXPORT_LOCK = threading.Lock()
 # Simple in-memory caches
 _SEARCH_CACHE = {}
 _ASK_CACHE = {}
@@ -1512,6 +1592,12 @@ _V2_QLOCK = threading.Lock()
 _V2_CACHE = {}
 _V2 = {"requested": None, "effective": "down", "fts5": None,
        "generation": None, "vectors": "unknown", "canary": "n/a",
+       # v30: the active generation's embedder contract
+       # (recorded from its meta table at open; see
+       # _active_embed_spec).
+       "embed_model": None, "embed_recipe": None,
+       "embed_query_instruction": "",
+       "embed_dim": None,
        "drift": False, "fail_reason": None, "profile": None,
        "conn": None, "sections": {}, "docs": {}, "enrich": {},
        "vec_mat": None, "vec_rows": None, "synth_mat": None,
@@ -1547,6 +1633,19 @@ def _v2_health():
                 "fts5": _V2["fts5"],
                 "generation": _V2["generation"],
                 "vectors": _V2["vectors"],
+                "embed_model": _V2.get("embed_model"),
+                "embed_recipe": _V2.get("embed_recipe"),
+                "embed_dim": _V2.get("embed_dim"),
+                "rerank_ce": {
+                    "backend": RERANK_BACKEND,
+                    "url": RERANK_CE_URL,
+                    "last_ok":
+                    _RERANK_CE_STATE["last_ok"],
+                    "last_error":
+                    _RERANK_CE_STATE["last_error"],
+                    "consecutive_failures":
+                    _RERANK_CE_STATE[
+                        "consecutive_failures"]},
                 "embedding_canary": _V2["canary"],
                 "embedding_drift": bool(_V2["drift"]),
                 "fail_reason": _V2["fail_reason"],
@@ -1580,14 +1679,31 @@ def _v2_canary_thread():
             texts = {}
             for r in picks:
                 row = conn.execute(
-                    "SELECT text FROM chunks WHERE row=?",
-                    (r,)).fetchone()
+                    "SELECT c.text, d.title, s.title FROM chunks c"
+                    " JOIN docs d ON d.doc_id = c.doc_id"
+                    " JOIN sections s"
+                    " ON s.section_id = c.section_id"
+                    " WHERE c.row=?", (r,)).fetchone()
                 if row:
-                    texts[r] = row[0]
+                    # v30.1: the probe must be embedded the
+                    # way the build embedded the chunk. For a
+                    # titlectx1 generation that is the title
+                    # context line + the stored text; other
+                    # generations stored raw-text vectors and
+                    # keep the raw probe.
+                    text = row[0]
+                    if _V2.get("embed_recipe") == "titlectx1":
+                        _doc = row[1] or ""
+                        _sec = row[2] or ""
+                        if _doc and _sec:
+                            text = f"{_doc} > {_sec}\n{text}"
+                        elif _doc:
+                            text = f"{_doc}\n{text}"
+                    texts[r] = text
         mat, vrows = _V2["vec_mat"], _V2["vec_rows"]
         measured = 0
         for r, text in texts.items():
-            q = _embed_query(text)
+            q = _embed_query(text, document=True)
             if q is None:
                 continue
             i = vrows.index(r) if r in vrows else None
@@ -1663,9 +1779,53 @@ def _v2_open():
             conn.execute("SELECT COUNT(*) FROM sections").fetchone()
             _V2["conn"] = conn
             _V2["generation"] = gen
-            meta = {k: json.loads(v) for k, v in conn.execute(
+            # Meta values are JSON where the builder wrote
+            # JSON (g0007) and raw strings where it did not
+            # (g0008's embed keys) — parse tolerantly.
+            def _meta_val(v):
+                try:
+                    return json.loads(v)
+                except Exception:
+                    return v
+            meta = {k: _meta_val(v) for k, v in conn.execute(
                 "SELECT key, value FROM meta")}
             _V2["vectors"] = meta.get("vectors_state", "unknown")
+            # v30: the generation's embedder contract
+            # (keys per the corpus workstream's build:
+            # embed_model / embed_recipe / embed_dims /
+            # embed_query_instruction). Generations built
+            # before these keys existed read as the
+            # historical nomic defaults, so a CURRENT flip
+            # across the v30 boundary restores the matching
+            # query embedder in both directions. The model
+            # string is the pinned tag (quantization
+            # included); embed_dims is the native
+            # dimension (2560 for g0008, no truncation).
+            _V2["embed_model"] = meta.get(
+                "embed_model") or _EMBED_DEFAULT_MODEL
+            _V2["embed_recipe"] = meta.get("embed_recipe")
+            _V2["embed_query_instruction"] = meta.get(
+                "embed_query_instruction") or ""
+            _ed = meta.get("embed_dims")
+            _V2["embed_dim"] = int(_ed) if _ed else None
+            # v30 (fact-sheet Flag 5): an operator pin
+            # (FSSA_EMBED_MODEL_PIN) refuses to serve a
+            # generation whose recorded embedder differs
+            # from the configured one — fail closed, like
+            # every other open failure.
+            _pin = os.environ.get("FSSA_EMBED_MODEL_PIN")
+            if _pin and meta.get("embed_model") \
+                    and str(meta["embed_model"]) != _pin:
+                _V2["fail_reason"] = (
+                    "embed_model pin mismatch: generation "
+                    f"records {meta['embed_model']}, pin "
+                    f"is {_pin}")
+                _V2["effective"] = "down"
+                _V2["fail_ts"] = time.monotonic()
+                print("[v30] " + _V2["fail_reason"]
+                      + "; the retrieval engine is DOWN",
+                      flush=True)
+                return False
             for (sid, did, skey, heading, title) in conn.execute(
                     "SELECT section_id, doc_id, section_key, heading,"
                     " title FROM sections"):
@@ -1700,6 +1860,13 @@ def _v2_open():
                 _V2["vec_mat"] = _npy.load(
                     os.path.join(gdir, f"vectors_{gen}.npy"),
                     mmap_mode="r")
+                # v30: the store's dimension is whatever
+                # the generation carries (meta when the
+                # build recorded it, else the matrix
+                # itself) — never a literal.
+                if not _V2["embed_dim"]:
+                    _V2["embed_dim"] = int(
+                        _V2["vec_mat"].shape[1])
                 with open(os.path.join(gdir, "vectors_index.json"),
                           encoding="utf-8") as f:
                     _V2["vec_rows"] = json.load(f)["rows"]
@@ -1901,6 +2068,14 @@ def _v2_vector_sections(mat, index_sections, query, scope, limit,
     if not nrm:
         return [], {}
     qv = qv / nrm
+    if qv.shape[0] != mat.shape[1]:
+        # v30: the query embedder disagrees with the
+        # store's dimension (a mixed-generation state —
+        # the embed_model scoping above exists to prevent
+        # it, and the boot canary records the drift
+        # verdict). The dense channel abstains instead of
+        # raising on the matmul; text channels carry.
+        return [], {}
     scores = mat @ qv
     order = _npy.argsort(-scores)
     out, seen, anchors = [], set(), {}
@@ -2270,9 +2445,23 @@ def _hybrid_search_v2(query, corpus, n, use_rewrite, use_rerank):
         hits.append(h)
     result = hits[:max(12, n * 2)]
     if use_rerank and RERANK_ENABLED and len(result) > n:
-        ranked_hits = rerank_with_llm(query, result)
+        _pool = list(result)
+        ranked_hits = []
+        _backend = "fused"
+        if RERANK_BACKEND == "ce":
+            ranked_hits = rerank_with_cross_encoder(
+                query, result)
+            if ranked_hits:
+                _backend = "ce"
+        if not ranked_hits:
+            ranked_hits = rerank_with_llm(query, result)
+            if ranked_hits:
+                _backend = "llm"
         if ranked_hits:
             result = ranked_hits[:n]
+        if _POOL_EXPORT_PATH:
+            _export_rerank_pool(query, _pool, ranked_hits,
+                                _backend, n)
     if len(result) > n:
         result = result[:n]
 
@@ -2403,6 +2592,107 @@ def hybrid_search(query, corpus=None, n=6, use_rewrite=True,
     return _hybrid_search_v2(query, corpus, n, use_rewrite,
                              use_rerank)
 
+
+
+def _export_rerank_pool(query, pool, ranked, backend, n):
+    """v30: append one pool-export line for the binding
+    rerank A/B (see _POOL_EXPORT_PATH). Candidates are
+    exported in fused order, so fused_order is the
+    identity and the winning rerank outcome is an index
+    list into the candidates — the A/B harness's fixture
+    shape (gold ids are joined later from battery keys).
+    Log-only; never raises, never changes the ask."""
+    try:
+        pos = {id(h): i for i, h in enumerate(pool)}
+        order = None
+        if ranked:
+            order = [pos[id(h)] for h in ranked
+                     if id(h) in pos]
+            if len(order) != len(pool):
+                order = None
+        rec = {
+            "ts": datetime.datetime.now(
+                datetime.timezone.utc).isoformat(),
+            "query": query, "n": n, "backend": backend,
+            "candidates": [
+                {"section_id": h.get("_section")
+                 or h.get("section_id"),
+                 "title": h.get("title") or "",
+                 "url": h.get("url") or "",
+                 "passage": (h.get("title") or "") + ": "
+                 + (h.get("excerpt") or "")[:400].replace(
+                     "\n", " ")}
+                for h in pool],
+            "fused_order": list(range(len(pool))),
+            "llm_order": order if backend == "llm"
+            else None,
+            "ce_order": order if backend == "ce"
+            else None,
+            "meta": {"fixture_quality": "exported_pool",
+                     "pool_size": len(pool)},
+        }
+        line = json.dumps(rec) + "\n"
+        with _POOL_EXPORT_LOCK:
+            with open(_POOL_EXPORT_PATH, "a",
+                      encoding="utf-8") as f:
+                f.write(line)
+    except Exception:
+        pass
+
+
+def rerank_with_cross_encoder(query, hits):
+    """v30: cross-encoder rescoring of the fused window,
+    per the reranker workstream's contract (POST
+    {RERANK_CE_URL}/score, 3s default timeout, no retry).
+    Returns the hits reordered by the service's scores
+    (descending; fused order breaks ties), or [] on ANY
+    failure — the caller then falls back to the LLM
+    rerank, preserving the slot's fail-open contract.
+    Every outcome is recorded in _RERANK_CE_STATE for
+    /health: a silently dead reranker must be visible."""
+    if not hits:
+        return []
+    try:
+        scored = hits[:RERANK_CE_MAX_PASSAGES]
+        rest = hits[RERANK_CE_MAX_PASSAGES:]
+        passages = [
+            (h.get("title") or "") + ": "
+            + (h.get("excerpt") or "")[:400].replace(
+                "\n", " ")
+            for h in scored]
+        payload = json.dumps(
+            {"query": query, "passages": passages}).encode()
+        req = urllib.request.Request(
+            RERANK_CE_URL.rstrip("/") + "/score",
+            data=payload,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(
+                req, timeout=RERANK_CE_TIMEOUT) as resp:
+            body = json.loads(resp.read())
+        scores = body.get("scores") \
+            if isinstance(body, dict) else body
+        if not isinstance(scores, list) \
+                or len(scores) != len(scored) \
+                or any(not isinstance(s, (int, float))
+                       or isinstance(s, bool)
+                       or s != s
+                       or s in (float("inf"), float("-inf"))
+                       for s in scores):
+            raise ValueError("bad scores shape")
+        order = sorted(range(len(scored)),
+                       key=lambda i: -float(scores[i]))
+        _RERANK_CE_STATE.update(
+            {"last_ok": datetime.datetime.now(
+                datetime.timezone.utc).isoformat(),
+             "last_error": None, "consecutive_failures": 0})
+        return [scored[i] for i in order] + rest
+    except Exception as e:
+        _RERANK_CE_STATE.update(
+            {"last_error":
+             f"{type(e).__name__}: {e}"[:200],
+             "consecutive_failures":
+             _RERANK_CE_STATE["consecutive_failures"] + 1})
+        return []
 
 
 def rerank_with_llm(query, hits):
@@ -3574,6 +3864,27 @@ def _check_figures(answer, question, hits, extra_allowed=(),
                 m.group(1).replace(",", "")), 2))
         except ValueError:
             pass
+    # v30 (checker exemption a-i): a figure copied from
+    # the QUESTION is a premise in whatever form the
+    # asker stated it — including a bare number with no $
+    # and no unit suffix ("my dad gave me 40135 last
+    # year"), which fix 2's suffixed forms miss; a draft
+    # restating the asker's own number as a dollar figure
+    # is not fabricating it (Battery 2's U07-T kill).
+    # Bare question numbers join base only at figure
+    # scale (>= 100, read on date-masked text so years
+    # and counts stay out). Every other figure still must
+    # trace to excerpts, and the F5 scoping below is
+    # untouched.
+    for m in re.finditer(r"\b(\d[\d,]*(?:\.\d{1,2})?)\b",
+                         _mask_dates(question or "")):
+        try:
+            _v = round(float(
+                m.group(1).replace(",", "")), 2)
+        except ValueError:
+            continue
+        if _v >= 100:
+            base.add(_v)
     if pool_all:
         for _h in hits or ():
             _ex = _mask_dates((_h or {}).get("excerpt", ""))
@@ -3914,6 +4225,16 @@ def _conflict_scan(hits):
     return out
 
 
+# v30 (checker exemption a-ii): sentence markers that NAME
+# a source disagreement (see _conflict_claims).
+_CONFLICT_NAMED_MARKERS = (
+    "disagree", "conflict", "differ", "not consistent",
+    "inconsistent", "two values", "both values",
+    "another page", "one page", "some sources",
+    "sources give", "pages give", "varies", "vary by",
+    "depending on the source")
+
+
 def _conflict_claims(conflicts, answer, engaged_ids=None):
     """Conflict records as claim texts, plus the code override
     map (claim text -> forced final) for drafts that do not
@@ -4012,7 +4333,28 @@ def _conflict_claims(conflicts, answer, engaged_ids=None):
         claims.append({"text": text, "load_bearing": True,
                        "sources": [], "origin": "conflict"})
         if not both:
-            forced[text] = "contradicted"
+            # v30 (checker exemption a-ii): a draft that
+            # NAMES the disagreement has surfaced the
+            # conflict in prose: a disagreement-marker
+            # sentence anywhere in the draft, while the
+            # draft presents one of THIS pair's two values.
+            # Forcing "contradicted" for not restating both
+            # figures killed drafts that held the keyed
+            # content (Battery 2's U03-F). The pair's own
+            # value is required: the shelter pair in the
+            # v262 F4 fixture is presented nowhere in that
+            # draft, so its forced flag stands even though
+            # another pair of the same entry is discussed.
+            # The claim still records the conflict; only
+            # the forced kill lifts.
+            named = any(
+                any(mk in s
+                    for mk in _CONFLICT_NAMED_MARKERS)
+                for s in sents) and (
+                any(f in low for f in _eforms(rv, kind))
+                or any(f in low for f in _eforms(cv, kind)))
+            if not named:
+                forced[text] = "contradicted"
     return claims, forced
 
 
@@ -8839,6 +9181,34 @@ _FACTUAL_RX = re.compile(
     r"included)\b|\bpays?\s+for\b)", re.IGNORECASE)
 
 
+# v30 (checker exemption a-iii): a META sentence talks
+# about the answer's own sources or scope — sources
+# disagreeing, excerpts not covering a point — rather
+# than stating a program fact. It needs a subject marker
+# (the sources / pages / excerpts / this answer) AND a
+# predicate marker (disagreement or coverage framing) in
+# the same sentence; a program fact that merely mentions
+# a source ("the manual states the limit is $2,000")
+# matches no predicate and stays fully gated.
+_META_SUBJECT_RX = re.compile(
+    r"\b(sources?|pages?|documents?|excerpts?|manual|"
+    r"materials|this answer|the answer above|"
+    r"retrieved (?:text|passages|excerpts))\b", re.I)
+_META_PRED_RX = re.compile(
+    r"\b(disagree\w*|differ\w*|conflict\w*|inconsistent|"
+    r"not consistent|not cover\w*|do not cover|"
+    r"does not cover|outside the scope|beyond the scope|"
+    r"not addressed)\b", re.I)
+
+
+def _is_meta_sentence(text):
+    """True for scope/limits/conflict meta-sentences
+    (exemption a-iii); deliberately narrow."""
+    t = text or ""
+    return bool(_META_SUBJECT_RX.search(t)
+                and _META_PRED_RX.search(t))
+
+
 def _parse_citations(answer, hits):
     """Read a draft's citations back (item 3). Returns
     {sentences: [{text, sources, cited, factual}], cited_claims:
@@ -8926,12 +9296,19 @@ def _parse_citations(answer, hits):
                           "own_sources":
                               _row.get("own_sources") or [],
                           "cited": _row["cited"],
-                          "factual": _row["factual"]})
+                          "factual": _row["factual"],
+                          "meta": _is_meta_sentence(
+                              _row["text"])})
         if _row["factual"] and _row["cited"]:
             cited_claims.append({"text": _row["text"],
                                  "load_bearing": True,
                                  "sources": _row["sources"]})
-        elif _row["factual"] and not _row["cited"]:
+        elif _row["factual"] and not _row["cited"] \
+                and not _is_meta_sentence(_row["text"]):
+            # v30 (exemption a-iii): meta-sentences are
+            # exempt from the citation demand — they state
+            # no program fact to cite. Every other factual
+            # sentence is gated exactly as before.
             uncited_lb.append(_row["text"])
     return {"sentences": sentences, "cited_claims": cited_claims,
             "uncited_lb": uncited_lb}
@@ -10340,6 +10717,53 @@ def _repair_lead(ctx, draft, lead, eng, mdl, instr):
     return text
 
 
+# --- v30 (tier-outage retry): a drafting outage window
+# (both hosted tiers down at once) cost five Battery 2
+# asks honest IDKs inside one window even though the
+# providers recovered on their own minutes later. When a
+# draft attempt fails with EXACTLY the all-tiers-down
+# error, wait briefly and retry that attempt ONCE before
+# the unit gives up; any other failure propagates
+# immediately, and the retry never starts when the ask's
+# remaining budget cannot cover the wait plus a bounded
+# attempt (the wait itself is charged to the ask clock,
+# and the hard backstop is unchanged).
+TIER_OUTAGE_RETRY_WAIT_S = 20.0
+
+
+def _is_tier_outage(exc):
+    """Exactly the all-tiers-down condition: _generate's
+    hosted ladder raises RuntimeError(f"{job}: every
+    drafting tier down") and nothing else uses the text."""
+    return isinstance(exc, RuntimeError) and str(
+        exc).rstrip().endswith("every drafting tier down")
+
+
+def _generate_with_outage_retry(engine, model, question,
+                                hits, instructions,
+                                deadline=None):
+    """_generate with the one-shot outage retry above.
+    Non-outage errors, and a second outage, propagate to
+    the caller's existing failure handling unchanged."""
+    try:
+        return _generate(engine, model, question, hits,
+                         instructions)
+    except Exception as e:
+        if not _is_tier_outage(e) \
+                or TIER_OUTAGE_RETRY_WAIT_S <= 0:
+            raise
+        if _budget_remaining(deadline) \
+                <= TIER_OUTAGE_RETRY_WAIT_S + 30:
+            raise
+        print(f"[v30] drafting tiers down ({e}); one "
+              f"retry after "
+              f"{TIER_OUTAGE_RETRY_WAIT_S:.0f}s",
+              flush=True)
+        time.sleep(TIER_OUTAGE_RETRY_WAIT_S)
+        return _generate(engine, model, question, hits,
+                         instructions)
+
+
 def _run_unit(ctx):
     """Run the ladder for one answering unit. ctx keys: question
     (full question, for figure provenance), unit_q (what this unit
@@ -10508,8 +10932,12 @@ def _run_unit(ctx):
         unavailable (item 5's one sanctioned drafting load);
         the load is recorded."""
         try:
-            return _generate(engine, model, ctx["unit_q"],
-                             ctx["hits"], instr)
+            # v30: the hosted attempt carries the outage
+            # retry; the local fallback below still runs
+            # only when the retry also fails.
+            return _generate_with_outage_retry(
+                engine, model, ctx["unit_q"], ctx["hits"],
+                instr, deadline=deadline)
         except Exception:
             if engine in ("nim", "nimfast"):
                 _note_local_load("fallback-draft")
@@ -11483,8 +11911,10 @@ def _run_unit_quick(ctx):
             _eng, _mdl = "nim", XAI_HARD_MODEL
         attempted = True
         try:
-            draft, prompt, served, _dg, _fb = _generate(
-                _eng, _mdl, ctx["unit_q"], ctx["hits"], instr)
+            draft, prompt, served, _dg, _fb = \
+                _generate_with_outage_retry(
+                    _eng, _mdl, ctx["unit_q"], ctx["hits"],
+                    instr, deadline=deadline)
             ctx["_dg"], ctx["_fb"] = _dg, _fb
         except Exception as e:
             gen_error = str(e)[:200]
@@ -11605,8 +12035,10 @@ def _run_unit_quick(ctx):
             _rdraft = None
             try:
                 _rdraft, _rprompt, _rserved, _rdg, _rfb = \
-                    _generate(_eng, _mdl, ctx["unit_q"],
-                              ctx["hits"], _rinstr)
+                    _generate_with_outage_retry(
+                        _eng, _mdl, ctx["unit_q"],
+                        ctx["hits"], _rinstr,
+                        deadline=deadline)
             except Exception as e:
                 quick_repair_error = str(e)[:200]
             if _rdraft is not None \
@@ -12665,10 +13097,78 @@ def _fd_row_active(row, today):
 
 
 _FD_AMT_RE = re.compile(r"\$\s?([0-9][0-9,]*(?:\.[0-9]{1,2})?)")
+# v30 (amount parse): typo'd and plain voices state money
+# without the $ ("we have 340000 in savings"). A bare 5-6
+# digit integer is accepted as an amount ONLY when the
+# question carries money context (the markers below) and
+# the digits are not already part of a $-matched amount.
+# 5-6 digits keeps years, ages, ZIPs, and counts out; the
+# engines stay conservative on top (an amount that cannot
+# be assigned still falls through).
+_FD_BARE_AMT_RE = re.compile(r"(?<![\d$,.])(\d{5,6})(?![\d,.])")
+_FD_MONEY_CONTEXT = ("$", "dollar", "dollers", "asset",
+                     "savings", "saved", "bank", "money",
+                     "countable", "worth", "estate", "account")
+# v30 fix round (SP-5): a bare 3-6 digit number is also an
+# amount when its OWN clause carries a money marker (the
+# markers below) — "his monthly income is 2600 and mine is
+# 900" states both incomes without a $. A 4-digit number in
+# the year range 1900-2099 NEVER parses this way (a bare
+# year is a year, not money), and a % following digit run
+# keeps percentages out.
+_FD_BARE_AMT_RE2 = re.compile(
+    r"(?<![\d$,.])(\d{3,6})(?!\d|,\d|\.\d|%)")
+_FD_CLAUSE_MONEY = _FD_MONEY_CONTEXT + (
+    "income", "monthly", "a month", "per month", "earnings",
+    "pension", "social security", "paycheck")
 _FD_SPOUSE_WORDS = ("wife", "husband", "spouse")
 _FD_PATIENT_WORDS = ("my income", "i get", "i receive", "i have",
                      "patient", "nursing home", "my check",
                      "my benefit")
+# v30 (spousal-scenario assignment, Workstream C note):
+# when the community spouse asks, the PATIENT's income is
+# stated in the third person ("he gets $2,600 a month")
+# and the asker's own in the first person ("i get $900").
+# The base lists read first person as the patient (the
+# applicant-asks framing), so that shape assigned nothing
+# and the liability engine could never prove (U03-P /
+# R-B04). The third-person phrases below mark a patient
+# amount; a first-person amount flips to the spouse ONLY
+# when a third-person patient amount exists AND the
+# question establishes the third person as the one
+# entering care (the care signals) — without the signal
+# the framing is ambiguous and the assignment stays
+# conservative (None, fall through).
+_FD_PATIENT_THIRD = ("he gets", "she gets", "he receives",
+                     "she receives", "his income",
+                     "her income", "his monthly income",
+                     "her monthly income", "his check",
+                     "her check", "his benefit", "her benefit",
+                     "his pension", "her pension",
+                     "his social security",
+                     "her social security")
+_FD_FIRST_PERSON = ("my income", "i get", "i receive",
+                    "i have", "my check", "my benefit",
+                    "mine is")
+_FD_THIRD_CARE_SIGNALS = (
+    "husband is going into", "husband is entering",
+    "husband's going into", "hubby's going into",
+    "hubby is going into", "wife is going into",
+    "wife is entering", "wife's going into",
+    "he is going into", "she is going into",
+    "he's going into", "she's going into",
+    "husband is in a nursing home",
+    "wife is in a nursing home")
+# v30 fix round (SP-6): when the asker names THEMSELF the
+# community spouse, the framing inverts the base lists:
+# the third person (the husband/wife in the nursing home)
+# is the PATIENT, and first-person amounts are the SPOUSE's
+# own income. Without this, "my husband in the nursing
+# home gets $2,600" assigned the patient amount to the
+# spouse on the bare word "husband" and swapped the
+# derivation (allocation $105 for $1,805).
+_FD_COMMUNITY_ASKER = ("i'm the community spouse",
+                       "i am the community spouse")
 _FD_SHELTER_WORDS = ("rent", "mortgage", "shelter", "housing",
                      "utilities", "utility")
 
@@ -12684,41 +13184,130 @@ def _fd_amounts(question):
         spans.append((start, sm.start()))
         start = sm.end()
     spans.append((start, len(ql)))
-    out = []
+    found = []  # (offset, value)
+
+    def _clause(off):
+        for a, b in spans:
+            if a <= off < b:
+                return ql[a:b]
+        return ""
+
     for m in _FD_AMT_RE.finditer(ql):
         try:
             val = float(m.group(1).replace(",", ""))
         except Exception:
             continue
-        clause = ""
-        for a, b in spans:
-            if a <= m.start() < b:
-                clause = ql[a:b]
-                break
-        out.append((val, clause))
+        found.append((m.start(), m.end(), val))
+    if any(w in ql for w in _FD_MONEY_CONTEXT):
+        # v30: bare amounts under money context. A bare
+        # token overlapping a $-matched span is the same
+        # amount, never a second one.
+        for m in _FD_BARE_AMT_RE.finditer(ql):
+            if any(a <= m.start() and m.end() <= b
+                   for a, b, _v in found):
+                continue
+            try:
+                val = float(m.group(1))
+            except Exception:
+                continue
+            found.append((m.start(), m.end(), val))
+    # v30 fix round: clause-marked bare amounts (SP-5).
+    # Admitted amounts carry a narrow WINDOW as their
+    # clause (24 chars back, 10 forward) instead of the
+    # punctuation clause: two incomes stated in one clause
+    # ("his monthly income is 2600 and mine is 900") share
+    # the punctuation clause, and the liability assignment
+    # reads each amount's role off its own window.
+    window_spans = set()
+    for m in _FD_BARE_AMT_RE2.finditer(ql):
+        if any(a <= m.start() and m.end() <= b
+               for a, b, _v in found):
+            continue
+        try:
+            val = float(m.group(1))
+        except Exception:
+            continue
+        if len(m.group(1)) == 4 and 1900 <= val <= 2099:
+            continue  # a bare year is never money
+        if not any(w in _clause(m.start())
+                   for w in _FD_CLAUSE_MONEY):
+            continue
+        found.append((m.start(), m.end(), val))
+        window_spans.add((m.start(), m.end()))
+    found.sort()
+    out = []
+    for off, end, val in found:
+        if (off, end) in window_spans:
+            out.append((val, ql[max(0, off - 24):end + 10]))
+        else:
+            out.append((val, _clause(off)))
     return out
 
 
-def _fd_assign_liability(amounts):
+def _fd_assign_liability(amounts, question=""):
     """Assign amounts to (patient, spouse, shelter). Returns a
     dict with any of the keys, or None when an amount cannot be
     assigned unambiguously (the conservative fall-through)."""
+    # v30: the spousal-scenario flip (see _FD_PATIENT_THIRD).
+    qn = _fd_norm(question)
+    has_third = any(any(w in c for w in _FD_PATIENT_THIRD)
+                    for _v, c in amounts)
+    flip = has_third and any(
+        s in qn for s in _FD_THIRD_CARE_SIGNALS)
+    community_asker = any(
+        s in qn for s in _FD_COMMUNITY_ASKER)
+
+    def _role(clause):
+        if any(w in clause for w in _FD_SHELTER_WORDS):
+            return "shelter"
+        if community_asker:
+            # The asker IS the community spouse: their own
+            # (first-person) amounts are the spouse income;
+            # every third-person amount is the patient's.
+            if any(w in clause for w in _FD_FIRST_PERSON):
+                return "spouse"
+            if any(w in clause for w in _FD_SPOUSE_WORDS) \
+                    or any(w in clause
+                           for w in _FD_PATIENT_THIRD) \
+                    or any(w in clause
+                           for w in _FD_PATIENT_WORDS):
+                return "patient"
+            return None
+        if any(w in clause for w in _FD_SPOUSE_WORDS):
+            return "spouse"
+        if any(w in clause for w in _FD_PATIENT_THIRD):
+            return "patient"
+        if any(w in clause for w in _FD_PATIENT_WORDS):
+            if flip and any(w in clause
+                            for w in _FD_FIRST_PERSON):
+                return "spouse"
+            return "patient"
+        if flip and any(w in clause
+                        for w in _FD_FIRST_PERSON):
+            # v30: a first-person marker that is not itself
+            # a base patient word ("mine is $900") reaches
+            # the flip only through this branch — outside
+            # the flip it stays unassigned, as before.
+            return "spouse"
+        return None
+
     patient = spouse = shelter = None
     for val, clause in amounts:
-        if any(w in clause for w in _FD_SHELTER_WORDS):
+        role = _role(clause)
+        if role is None:
+            return None
+        if role == "shelter":
             if shelter is not None:
                 return None
             shelter = val
-        elif any(w in clause for w in _FD_SPOUSE_WORDS):
+        elif role == "spouse":
             if spouse is not None:
                 return None
             spouse = val
-        elif any(w in clause for w in _FD_PATIENT_WORDS):
+        else:
             if patient is not None:
                 return None
             patient = val
-        else:
-            return None
     out = {}
     if patient is not None:
         out["patient_income"] = patient
@@ -12790,7 +13379,7 @@ def _fd_engine_split_and_clamp(row, question, amounts):
 def _fd_engine_liability(row, question, amounts):
     v = row["values"]
     qn = _fd_norm(question)
-    assigned = _fd_assign_liability(amounts)
+    assigned = _fd_assign_liability(amounts, question)
     if assigned is None:
         return None
     inputs = dict(assigned)
@@ -13004,6 +13593,72 @@ _FD_ENGINES = {
     "coverage": _fd_engine_coverage,
 }
 
+# v30 (engine-class priority): a row whose engine COMPUTES
+# the asker's answer outranks a row that renders stored
+# facts, which outranks a broad coverage row — regardless
+# of trigger-word overlap. Priority only reorders
+# candidates whose engines already proved they can answer
+# (a formula row that cannot parse the question never
+# enters the list), so it cannot manufacture a claim; it
+# decides contests the specificity tuple used to settle
+# by wording luck (the 2026-10-16 live find: the
+# paid-relative COVERAGE row claiming a transfer-penalty
+# question the penalty FORMULA row had already proven).
+_FD_ENGINE_CLASS = {"penalty": 3, "liability": 3,
+                    "split_and_clamp": 3,
+                    "year_indexed": 2, "lookup": 2,
+                    "coverage": 1}
+
+# v30 (win margin): when the top two specific candidates
+# are in the same engine class and their specificity is
+# within this many matched-phrase chars (with the same
+# matched-phrase count), the claim is a coin flip dressed
+# as a win — the door falls through and logs door_margin
+# instead. Calibrated against the claim battery's
+# near-tie fixtures, not in production.
+_FD_MARGIN_CHARS = 8
+
+
+def _fd_within_margin(spec_a, spec_b):
+    """The v30 near-tie test on two _fd_match_specificity
+    tuples: same matched-phrase count and matched-phrase
+    chars differing by less than the margin."""
+    return spec_a[0] == spec_b[0] \
+        and abs(spec_a[1] - spec_b[1]) < _FD_MARGIN_CHARS
+
+
+# v30 fix round (F2): the specificity band for engine-class
+# priority. Class-primary ordering let a thin lookup match
+# (fs_serves_ages: 2 phrases, 23 chars) override a coverage
+# row's blowout match on its own topic (paid_relative_cap:
+# 8 phrases, 65 chars) — class priority assumed candidacy
+# implies answerability, which is thin for lookup/coverage
+# engines. Revised rule: a higher class decides the contest
+# only when its specificity is WITHIN THE BAND of the best
+# specificity on the table (phrase count within 1, phrase
+# chars within 24). Outside the band the strongest match
+# wins and class never gets asked. Inside the band the
+# class ladder still decides, tier by tier.
+_FD_BAND_COUNT = 1
+_FD_BAND_CHARS = 24
+
+
+def _fd_within_band(spec, best):
+    return spec[0] >= best[0] - _FD_BAND_COUNT \
+        and spec[1] >= best[1] - _FD_BAND_CHARS
+
+
+def _fd_trigger_groups_match(row, qn):
+    """Every trigger group satisfied, ignoring excludes:
+    the candidacy half of _fd_triggers_match. A row that
+    group-matches but is vetoed by an exclude was IN the
+    contest; the fall-through log names it (fix round:
+    the NT logging gap)."""
+    for group in row["triggers"]["all"]:
+        if not any(p in qn for p in group):
+            return False
+    return True
+
 _FD_TOPIC_TERMS = (
     ("P1_spousal_ltc", ("nursing home", "spouse", "wife",
                         "husband", "csra", "mmmna", "liability",
@@ -13031,6 +13686,230 @@ def _fd_topic(question):
         if any(t in qn for t in terms):
             return tag
     return "other"
+
+
+# --- v30 (verdict layer): for four arithmetic rows, the
+# render appends the computed verdict on the ASKER'S OWN
+# numbers (under/over, remainder). Every threshold comes
+# from the row's own data (facts / cap), never a literal
+# here. A verdict is computed only when the asker's
+# numbers parse unambiguously (exactly one amount in the
+# needed role); missing or ambiguous numbers render the
+# rule alone. Never guesses.
+def _fd_fact_figure(row, label_part):
+    """First number in the named fact's value, from the
+    row's own data."""
+    for f in (row.get("values") or {}).get("facts") or ():
+        if label_part in (f.get("label") or "").lower():
+            m = re.search(r"\$?\s?(\d[\d,]*(?:\.\d{1,2})?)",
+                          f.get("value") or "")
+            if m:
+                try:
+                    return float(m.group(1).replace(",", ""))
+                except Exception:
+                    return None
+    return None
+
+
+def _fd_role_amount(amounts, words):
+    """The single amount whose clause carries one of the
+    role words; None unless exactly one matches."""
+    hits = [v for v, c in amounts
+            if any(w in c for w in words)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _fd_verdict_qmb(row, question, amounts):
+    lines = []
+    inc_lim = _fd_fact_figure(row, "income limit")
+    inc = _fd_role_amount(
+        amounts, ("income", "social security", "make",
+                  "makes", "earn", "get", "gets", "receive",
+                  "receives"))
+    if inc is not None and inc_lim:
+        d = inc_lim - inc
+        if d > 0:
+            lines.append(
+                "On your numbers: " + _fd_money(inc)
+                + " a month is under the "
+                + _fd_money(inc_lim) + " QMB income limit "
+                "by " + _fd_money(d) + ".")
+        elif d < 0:
+            lines.append(
+                "On your numbers: " + _fd_money(inc)
+                + " a month is over the "
+                + _fd_money(inc_lim) + " QMB income limit "
+                "by " + _fd_money(-d) + ".")
+        else:
+            lines.append(
+                "On your numbers: " + _fd_money(inc)
+                + " a month is right at the "
+                + _fd_money(inc_lim) + " QMB income limit.")
+    ast_lim = _fd_fact_figure(row, "asset limit")
+    ast = _fd_role_amount(
+        amounts, ("asset", "savings", "saved", "bank",
+                  "countable"))
+    if ast is not None and ast_lim:
+        d = ast_lim - ast
+        if d > 0:
+            lines.append(
+                "Your countable assets of " + _fd_money(ast)
+                + " are under the " + _fd_money(ast_lim)
+                + " QMB asset limit by " + _fd_money(d)
+                + ".")
+        elif d < 0:
+            lines.append(
+                "Your countable assets of " + _fd_money(ast)
+                + " are over the " + _fd_money(ast_lim)
+                + " QMB asset limit by " + _fd_money(-d)
+                + ".")
+    return "\n".join(lines) or None
+
+
+def _fd_verdict_hip(row, question, amounts):
+    need_h = _fd_fact_figure(row, "work activity")
+    need_e = _fd_fact_figure(row, "earnings alternative")
+    if not need_h or not need_e:
+        return None
+    ql = (question or "").lower()
+    hrs_mo = None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(?:hours|hrs|hour)"
+                  r"\s*(?:a|per|an|/)\s*(week|month|wk|mo)",
+                  ql)
+    if m:
+        hv = float(m.group(1))
+        hrs_mo = hv * 52.0 / 12.0 \
+            if m.group(2) in ("week", "wk") else hv
+    wage = _fd_role_amount(amounts, ("hour",))
+    earn = _fd_role_amount(amounts, ("earn", "make",
+                                     "paid"))
+    if earn is not None and not any(
+            w in c for v, c in amounts if v == earn
+            for w in ("month",)):
+        earn = None
+    if earn is None and wage is not None \
+            and hrs_mo is not None:
+        earn = hrs_mo * wage
+    if hrs_mo is None and earn is None:
+        return None
+    hrs_txt = ("about " + (str(int(round(hrs_mo)))
+                           if hrs_mo == int(hrs_mo)
+                           else f"{hrs_mo:.0f}")
+               + " hours a month") if hrs_mo is not None \
+        else None
+    meets_h = hrs_mo is not None and hrs_mo >= need_h
+    meets_e = earn is not None and earn >= need_e
+    if meets_h:
+        return ("On your numbers: " + hrs_txt + " meets "
+                "the " + f"{need_h:.0f}" + "-hour work "
+                "requirement.")
+    if meets_e:
+        out = ("On your numbers: about " + _fd_money(earn)
+               + " a month in earnings meets the "
+               "requirement through the "
+               + _fd_money(need_e) + " earnings alternative")
+        if hrs_txt:
+            out += (" (hours alone, " + hrs_txt + ", are "
+                    "under " + f"{need_h:.0f}" + ")"
+                    )
+        return out + "."
+    if hrs_mo is not None and earn is not None:
+        return ("On your numbers: " + hrs_txt + " is "
+                "under the " + f"{need_h:.0f}" + "-hour "
+                "requirement, and about " + _fd_money(earn)
+                + " a month in earnings is under the "
+                + _fd_money(need_e) + " earnings "
+                "alternative.")
+    if hrs_mo is not None:
+        return ("On your numbers: " + hrs_txt + " is "
+                "under the " + f"{need_h:.0f}" + "-hour "
+                "requirement. The other way to meet it is "
+                + _fd_money(need_e) + " a month in "
+                "earnings.")
+    return ("On your numbers: about " + _fd_money(earn)
+            + " a month in earnings is under the "
+            + _fd_money(need_e) + " earnings alternative. "
+            "The other way to meet it is "
+            + f"{need_h:.0f}" + " hours a month of work "
+            "activity.")
+
+
+def _fd_verdict_cap(row, question, amounts):
+    cap_v = (row.get("values") or {}).get("cap") or {}
+    try:
+        cap = float(cap_v["amount"])
+    except Exception:
+        return None
+    period = cap_v.get("period") or "per year"
+    ql = (question or "").lower()
+    raw_spends, raw_quotes = [], []
+    for m in _FD_AMT_RE.finditer(ql):
+        try:
+            val = float(m.group(1).replace(",", ""))
+        except Exception:
+            continue
+        before = ql[max(0, m.start() - 40):m.start()]
+        after = ql[m.end():m.end() + 25]
+        if any(w in before
+               for w in ("spent", "used", "paid")):
+            raw_spends.append(val)
+        elif any(w in before
+                 for w in ("quot", "estimate", "charge")) \
+                or " cost" in after:
+            raw_quotes.append(val)
+    # v30 fix round (V-PEST-1): a question that RESTATES
+    # the cap ("used $3,200 of its $4,000 pest control
+    # allowance") puts the cap amount itself inside the
+    # spend window — the cap is not a spend. Cap-equal
+    # amounts are set aside first; they count as a spend
+    # only when nothing else does (a full-cap spend).
+    spends = [v for v in raw_spends if v != cap]
+    quotes = [v for v in raw_quotes if v != cap]
+    if not spends:
+        spends = raw_spends
+    if len(spends) != 1:
+        return None
+    spent = spends[0]
+    left = cap - spent
+    cap_txt = _fd_money(cap) + " cap (" + period + ")"
+    if left < 0:
+        return ("On your numbers: " + _fd_money(spent)
+                + " used is " + _fd_money(-left)
+                + " over the " + cap_txt + ".")
+    out = ("On your numbers: " + _fd_money(spent)
+           + " used of the " + cap_txt + " leaves "
+           + _fd_money(left) + ".")
+    if len(quotes) == 1:
+        q = quotes[0]
+        if q > left:
+            out += (" Of the " + _fd_money(q) + " quoted, "
+                    + _fd_money(left) + " fits under the "
+                    "cap and " + _fd_money(q - left)
+                    + " falls outside it.")
+        else:
+            out += (" The " + _fd_money(q) + " quoted fits "
+                    "under what is left of the cap.")
+    return out
+
+
+_FD_VERDICTS = {
+    "qmb_limits": _fd_verdict_qmb,
+    "hip_work_requirement": _fd_verdict_hip,
+    "fs_annual_cap": _fd_verdict_cap,
+    "pest_control_hw": _fd_verdict_cap,
+}
+
+
+def _fd_verdict(row, question, amounts):
+    """The winner's verdict paragraph, or None. Never
+    raises (a verdict bug must not cost the claim)."""
+    fn = _FD_VERDICTS.get(row["id"])
+    if fn is None:
+        return None
+    try:
+        return fn(row, question, amounts)
+    except Exception:
+        return None
 
 
 def _front_door_try(question):
@@ -13069,10 +13948,17 @@ def _front_door_try(question):
         # specific rows is ambiguity and falls through.
         specific = []
         general = []
+        blocked = []
         for row in _FRONT_DOOR_ROWS:
             if not _fd_row_active(row, today):
                 continue
             if not _fd_triggers_match(row, qn):
+                # v30 fix round: a row whose trigger groups
+                # all match but whose exclude vetoed it was
+                # in this contest; remember it for the
+                # fall-through log.
+                if _fd_trigger_groups_match(row, qn):
+                    blocked.append(row["id"])
                 continue
             engine = _FD_ENGINES.get(row["engine"])
             if engine is None:
@@ -13086,17 +13972,64 @@ def _front_door_try(question):
             else:
                 specific.append(entry)
         winner = None
+        margin_pair = None
         if specific:
-            specific.sort(key=lambda e: e[0], reverse=True)
-            if (len(specific) == 1
-                    or specific[0][0] != specific[1][0]):
-                winner = specific[0]
-        elif general:
+            # v30 fix round (F2): class priority inside a
+            # specificity band. Walk the class ladder from
+            # the top: the first class with a candidate
+            # whose specificity is within the band of the
+            # best specificity on the table decides, and
+            # its strongest in-band candidate wins. A class
+            # whose best is a blowout loss (outside the
+            # band) never gets to decide, so the strongest
+            # match overall wins instead. The win margin
+            # still applies INSIDE the deciding class: a
+            # top two within the margin — an exact tie
+            # included — falls through with a door_margin
+            # log. (Supersedes the v30 class-primary sort:
+            # see _FD_BAND_COUNT / _FD_BAND_CHARS.)
+            best_spec = max(e[0] for e in specific)
+            classes = sorted(
+                {_FD_ENGINE_CLASS.get(e[1]["engine"], 0)
+                 for e in specific}, reverse=True)
+            for cls in classes:
+                pool = [e for e in specific
+                        if _FD_ENGINE_CLASS.get(
+                            e[1]["engine"], 0) == cls
+                        and _fd_within_band(e[0], best_spec)]
+                if not pool:
+                    continue
+                pool.sort(key=lambda e: e[0], reverse=True)
+                winner = pool[0]
+                if len(pool) > 1 and _fd_within_margin(
+                        pool[0][0], pool[1][0]):
+                    margin_pair = (pool[0], pool[1])
+                    winner = None
+                break
+        if margin_pair is not None:
+            _fd_log({"decision": "door_margin",
+                     "rows": [margin_pair[0][1]["id"],
+                              margin_pair[1][1]["id"]],
+                     "specs": [list(margin_pair[0][0]),
+                               list(margin_pair[1][0])],
+                     "topic": _fd_topic(question),
+                     "q": (question or "")[:160]})
+            return None
+        if winner is None and general:
             if not _fd_names_covered_topic(qn, general[0][1]):
                 winner = general[0]
         if winner is not None:
             _spec, row, got = winner
             text, inputs = got
+            # v30 (verdict layer): four arithmetic rows
+            # append the computed verdict on the asker's
+            # own numbers; no verdict when they are
+            # missing or ambiguous.
+            _verdict = _fd_verdict(row, question, amounts)
+            if _verdict:
+                text = text + "\n\n" + _verdict
+                inputs = dict(inputs or {})
+                inputs["verdict"] = True
             answer = text + "\n\n" + _fd_source_line(row)
             _fd_log({"decision": "claimed", "row": row["id"],
                      "engine": row["engine"], "inputs": inputs,
@@ -13106,6 +14039,16 @@ def _front_door_try(question):
         _fd_log({"decision": "fell_through",
                  "topic": _fd_topic(question),
                  "q": (question or "")[:160]})
+        if blocked:
+            # v30 fix round: every fall-through that had a
+            # contender removed by an exclude is logged as
+            # a margin decision naming the vetoed row(s) —
+            # the audit trail the near-tie fixtures read.
+            _fd_log({"decision": "door_margin",
+                     "rows": blocked,
+                     "reason": "excluded",
+                     "topic": _fd_topic(question),
+                     "q": (question or "")[:160]})
         return None
     except Exception:
         return None
